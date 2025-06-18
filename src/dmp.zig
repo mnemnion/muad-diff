@@ -434,9 +434,9 @@ fn diffCompute(
 
     // Check to see if the problem can be split in two.
     var maybe_half_match = try dmp.diffHalfMatch(allocator, before, after);
+    defer if (maybe_half_match) |half_match| half_match.deinit(allocator);
     if (maybe_half_match) |*half_match| {
         // A half-match was found, sort out the return data.
-        defer half_match.deinit(allocator);
         // Send both pairs off for separate processing.
         var diffs = try dmp.diffInternal(
             allocator,
@@ -620,6 +620,7 @@ fn diffHalfMatchInternal(
         const prefix_after = try allocator.dupe(u8, best_short_text_a);
         errdefer allocator.free(prefix_after);
         const suffix_after = try allocator.dupe(u8, best_short_text_b);
+        errdefer allocator.free(suffix_after);
         const best_common_text = try best_common.toOwnedSlice(allocator);
         errdefer allocator.free(best_common_text); // Keeps the code portable.
         return .{
@@ -3954,8 +3955,10 @@ fn rebuildtexts(allocator: std.mem.Allocator, diffs: DiffList) ![2][]const u8 {
             try text[1].appendSlice(myDiff.text);
         }
     }
+    const t0_owned = try text[0].toOwnedSlice();
+    errdefer allocator.free(t0_owned);
     return .{
-        try text[0].toOwnedSlice(),
+        t0_owned,
         try text[1].toOwnedSlice(),
     };
 }
