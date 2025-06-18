@@ -2744,13 +2744,11 @@ fn patchSplitMax(
                     try patch.diffs.ensureUnusedCapacity(allocator, 1);
                     patch.diffs.appendAssumeCapacity(bigpatch.diffs.orderedRemove(0));
                     empty = false;
-                } else if (patch.diffs.items.len == 1 and cond: {
-                    // zig fmt simply will not line break if clauses :/
-                    const a = diff_type == .delete;
-                    const b = patch.diffs.items[0].operation == .equal;
-                    const c = diff_text.len > 2 * patch_size;
-                    break :cond a and b and c;
-                }) {
+                } else if (patch.diffs.items.len == 1 and
+                    diff_type == .delete and
+                    patch.diffs.items[0].operation == .equal and
+                    diff_text.len > 2 * patch_size)
+                {
                     // This is a large deletion.  Let it pass in one chunk.
                     patch.length1 += diff_text.len;
                     start1 += diff_text.len;
