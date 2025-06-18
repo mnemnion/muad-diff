@@ -2397,8 +2397,8 @@ fn makePatchInternal(
     defer postpatch.deinit();
     postpatch.appendSliceAssumeCapacity(text);
     var patch = Patch{};
+    errdefer patch.deinit(allocator);
     for (diffs.items, 0..) |a_diff, i| {
-        errdefer patch.deinit(allocator);
         if (patch.diffs.items.len == 0 and a_diff.operation != .equal) {
             patch.start1 = char_count1;
             patch.start2 = char_count2;
@@ -2493,7 +2493,6 @@ fn makePatchInternal(
             char_count2 += a_diff.text.len;
         }
     } // end for loop
-    errdefer patch.deinit(allocator);
     // Pick up the leftover patch if not empty.
     if (patch.diffs.items.len != 0) {
         try dmp.patchAddContext(allocator, &patch, prepatch_text);
@@ -3314,14 +3313,16 @@ test diffCommonOverlap {
     try testing.expectEqual(@as(usize, 0), diffCommonOverlap("fi", "\u{fb01}")); // Unicode
 }
 
+const TestHalfMatch = struct {
+    dmp: DiffMatchPatch,
+    before: []const u8,
+    after: []const u8,
+    expected: ?HalfMatchResult,
+};
+
 fn testDiffHalfMatch(
     allocator: std.mem.Allocator,
-    params: struct {
-        dmp: DiffMatchPatch,
-        before: []const u8,
-        after: []const u8,
-        expected: ?HalfMatchResult,
-    },
+    params: TestHalfMatch,
 ) !void {
     const maybe_result = try params.dmp.diffHalfMatch(allocator, params.before, params.after);
     defer if (maybe_result) |result| result.deinit(allocator);
@@ -3344,7 +3345,7 @@ test diffHalfMatch {
     const one_timeout: DiffMatchPatch = .{ .diff_timeout = 1 };
 
     // No match #1
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
         .dmp = one_timeout,
         .before = "1234567890",
         .after = "abcdef",
@@ -3352,7 +3353,7 @@ test diffHalfMatch {
     }});
 
     // No match #2
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
         .dmp = one_timeout,
         .before = "12345",
         .after = "23",
@@ -3360,7 +3361,7 @@ test diffHalfMatch {
     }});
 
     // Single matches
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
         .dmp = one_timeout,
         .before = "1234567890",
         .after = "a345678z",
@@ -3374,7 +3375,7 @@ test diffHalfMatch {
     }});
 
     // Single Match #2
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
         .dmp = one_timeout,
         .before = "a345678z",
         .after = "1234567890",
@@ -3388,7 +3389,7 @@ test diffHalfMatch {
     }});
 
     // Single Match #3
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
         .dmp = one_timeout,
         .before = "abc56789z",
         .after = "1234567890",
@@ -3402,7 +3403,7 @@ test diffHalfMatch {
     }});
 
     // Single Match #4
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
         .dmp = one_timeout,
         .before = "a23456xyz",
         .after = "1234567890",
@@ -3416,7 +3417,7 @@ test diffHalfMatch {
     }});
 
     // Multiple matches #1
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
         .dmp = one_timeout,
         .before = "121231234123451234123121",
         .after = "a1234123451234z",
@@ -3430,7 +3431,7 @@ test diffHalfMatch {
     }});
 
     // Multiple Matches #2
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
         .dmp = one_timeout,
         .before = "x-=-=-=-=-=-=-=-=-=-=-=-=",
         .after = "xx-=-=-=-=-=-=-=",
@@ -3444,7 +3445,7 @@ test diffHalfMatch {
     }});
 
     // Multiple Matches #3
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
         .dmp = one_timeout,
         .before = "-=-=-=-=-=-=-=-=-=-=-=-=y",
         .after = "-=-=-=-=-=-=-=yy",
@@ -3461,7 +3462,7 @@ test diffHalfMatch {
 
     // Optimal diff would be -q+x=H-i+e=lloHe+Hu=llo-Hew+y not -qHillo+x=HelloHe-w+Hulloy
     // Non-optimal halfmatch
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
         .dmp = one_timeout,
         .before = "qHilloHelloHew",
         .after = "xHelloHeHulloy",
@@ -3475,7 +3476,7 @@ test diffHalfMatch {
     }});
 
     // Non-optimal halfmatch
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
         .dmp = .{ .diff_timeout = 0 },
         .before = "qHilloHelloHew",
         .after = "xHelloHeHulloy",
@@ -3558,13 +3559,15 @@ test diffLinesToChars {
     }
 }
 
+const TCharLines = struct {
+    diffs: []const Diff,
+    line_array: []const []const u8,
+    expected: []const Diff,
+};
+
 fn testDiffCharsToLines(
     allocator: std.mem.Allocator,
-    params: struct {
-        diffs: []const Diff,
-        line_array: []const []const u8,
-        expected: []const Diff,
-    },
+    params: TCharLines,
 ) !void {
     var char_diffs = try DiffList.initCapacity(allocator, params.diffs.len);
     defer deinitDiffList(allocator, &char_diffs);
@@ -3591,7 +3594,7 @@ test diffCharsToLines {
     try testing.checkAllAllocationFailures(
         testing.allocator,
         testDiffCharsToLines,
-        .{.{
+        .{TCharLines{
             .diffs = diff_list.items,
             .line_array = &[_][]const u8{
                 "alpha\n",
@@ -3605,10 +3608,10 @@ test diffCharsToLines {
     );
 }
 
-fn testDiffCleanupMerge(allocator: std.mem.Allocator, params: struct {
-    input: []const Diff,
-    expected: []const Diff,
-}) !void {
+fn testDiffCleanupMerge(
+    allocator: std.mem.Allocator,
+    params: TestIO,
+) !void {
     var diffs = try DiffList.initCapacity(allocator, params.input.len);
     defer deinitDiffList(allocator, &diffs);
 
@@ -3625,7 +3628,7 @@ test diffCleanupMerge {
     // Cleanup a messy diff.
 
     // No change case
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{TestIO{
         .input = &.{
             .{ .operation = .equal, .text = "a" },
             .{ .operation = .delete, .text = "b" },
@@ -3639,7 +3642,7 @@ test diffCleanupMerge {
     }});
 
     // Merge equalities
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{TestIO{
         .input = &.{
             .{ .operation = .equal, .text = "a" },
             .{ .operation = .equal, .text = "b" },
@@ -3651,7 +3654,7 @@ test diffCleanupMerge {
     }});
 
     // Merge deletions
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{TestIO{
         .input = &.{
             .{ .operation = .delete, .text = "a" },
             .{ .operation = .delete, .text = "b" },
@@ -3663,7 +3666,7 @@ test diffCleanupMerge {
     }});
 
     // Merge insertions
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{TestIO{
         .input = &.{
             .{ .operation = .insert, .text = "a" },
             .{ .operation = .insert, .text = "b" },
@@ -3675,7 +3678,7 @@ test diffCleanupMerge {
     }});
 
     // Merge interweave
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{TestIO{
         .input = &.{
             .{ .operation = .delete, .text = "a" },
             .{ .operation = .insert, .text = "b" },
@@ -3692,7 +3695,7 @@ test diffCleanupMerge {
     }});
 
     // Prefix and suffix detection
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{TestIO{
         .input = &.{
             .{ .operation = .delete, .text = "a" },
             .{ .operation = .insert, .text = "abc" },
@@ -3707,7 +3710,7 @@ test diffCleanupMerge {
     }});
 
     // Prefix and suffix detection with equalities
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{TestIO{
         .input = &.{
             .{ .operation = .equal, .text = "x" },
             .{ .operation = .delete, .text = "a" },
@@ -3724,7 +3727,7 @@ test diffCleanupMerge {
     }});
 
     // Slide edit left
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{TestIO{
         .input = &.{
             .{ .operation = .equal, .text = "a" },
             .{ .operation = .insert, .text = "ba" },
@@ -3737,7 +3740,7 @@ test diffCleanupMerge {
     }});
 
     // Slide edit right
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{TestIO{
         .input = &.{
             .{ .operation = .equal, .text = "c" },
             .{ .operation = .insert, .text = "ab" },
@@ -3750,7 +3753,7 @@ test diffCleanupMerge {
     }});
 
     // Slide edit left recursive
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{TestIO{
         .input = &.{
             .{ .operation = .equal, .text = "a" },
             .{ .operation = .delete, .text = "b" },
@@ -3765,7 +3768,7 @@ test diffCleanupMerge {
     }});
 
     // Slide edit right recursive
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{TestIO{
         .input = &.{
             .{ .operation = .equal, .text = "x" },
             .{ .operation = .delete, .text = "ca" },
@@ -3780,7 +3783,7 @@ test diffCleanupMerge {
     }});
 
     // Empty merge
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{TestIO{
         .input = &.{
             .{ .operation = .delete, .text = "b" },
             .{ .operation = .insert, .text = "ab" },
@@ -3793,7 +3796,7 @@ test diffCleanupMerge {
     }});
 
     // Empty equality
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupMerge, .{TestIO{
         .input = &.{
             .{ .operation = .equal, .text = "" },
             .{ .operation = .insert, .text = "a" },
@@ -3808,10 +3811,7 @@ test diffCleanupMerge {
 
 fn testDiffCleanupSemanticLossless(
     allocator: std.mem.Allocator,
-    params: struct {
-        input: []const Diff,
-        expected: []const Diff,
-    },
+    params: TestIO,
 ) !void {
     var diffs = try DiffList.initCapacity(allocator, params.input.len);
     defer deinitDiffList(allocator, &diffs);
@@ -3840,13 +3840,13 @@ fn sliceToDiffList(allocator: Allocator, diff_slice: []const Diff) !DiffList {
 
 test diffCleanupSemanticLossless {
     // Null case
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{TestIO{
         .input = &[_]Diff{},
         .expected = &[_]Diff{},
     }});
 
     //defer deinitDiffList(allocator, &diffs);
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{TestIO{
         .input = &.{
             .{ .operation = .equal, .text = "AAA\r\n\r\nBBB" },
             .{ .operation = .insert, .text = "\r\nDDD\r\n\r\nBBB" },
@@ -3859,7 +3859,7 @@ test diffCleanupSemanticLossless {
         },
     }});
 
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{TestIO{
         .input = &.{
             .{ .operation = .equal, .text = "AAA\r\nBBB" },
             .{ .operation = .insert, .text = " DDD\r\nBBB" },
@@ -3872,7 +3872,7 @@ test diffCleanupSemanticLossless {
         },
     }});
 
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{TestIO{
         .input = &.{
             .{ .operation = .equal, .text = "The c" },
             .{ .operation = .insert, .text = "ow and the c" },
@@ -3885,7 +3885,7 @@ test diffCleanupSemanticLossless {
         },
     }});
 
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{TestIO{
         .input = &.{
             .{ .operation = .equal, .text = "The-c" },
             .{ .operation = .insert, .text = "ow-and-the-c" },
@@ -3898,7 +3898,7 @@ test diffCleanupSemanticLossless {
         },
     }});
 
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{TestIO{
         .input = &.{
             .{ .operation = .equal, .text = "a" },
             .{ .operation = .delete, .text = "a" },
@@ -3910,7 +3910,7 @@ test diffCleanupSemanticLossless {
         },
     }});
 
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{TestIO{
         .input = &.{
             .{ .operation = .equal, .text = "xa" },
             .{ .operation = .delete, .text = "a" },
@@ -3922,7 +3922,7 @@ test diffCleanupSemanticLossless {
         },
     }});
 
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{TestIO{
         .input = &.{
             .{ .operation = .equal, .text = "The xxx. The " },
             .{ .operation = .insert, .text = "zzz. The " },
@@ -3960,10 +3960,12 @@ fn rebuildtexts(allocator: std.mem.Allocator, diffs: DiffList) ![2][]const u8 {
     };
 }
 
-fn testRebuildTexts(allocator: Allocator, diffs: DiffList, params: struct {
+const TRebuild = struct {
     before: []const u8,
     after: []const u8,
-}) !void {
+};
+
+fn testRebuildTexts(allocator: Allocator, diffs: DiffList, params: TRebuild) !void {
     const texts = try rebuildtexts(allocator, diffs);
     defer {
         allocator.free(texts[0]);
@@ -3983,7 +3985,7 @@ test rebuildtexts {
         defer deinitDiffList(testing.allocator, &diffs);
         try testing.checkAllAllocationFailures(testing.allocator, testRebuildTexts, .{
             diffs,
-            .{
+            TRebuild{
                 .before = "defdefghighi",
                 .after = "abcabcdefdef",
             },
@@ -3997,7 +3999,7 @@ test rebuildtexts {
         defer deinitDiffList(testing.allocator, &diffs);
         try testing.checkAllAllocationFailures(testing.allocator, testRebuildTexts, .{
             diffs,
-            .{
+            TRebuild{
                 .before = "yyy",
                 .after = "xxx",
             },
@@ -4011,7 +4013,7 @@ test rebuildtexts {
         defer deinitDiffList(testing.allocator, &diffs);
         try testing.checkAllAllocationFailures(testing.allocator, testRebuildTexts, .{
             diffs,
-            .{
+            TRebuild{
                 .before = "xyzpdq",
                 .after = "xyzpdq",
             },
@@ -4019,15 +4021,17 @@ test rebuildtexts {
     }
 }
 
+const TBisect = struct {
+    dmp: DiffMatchPatch,
+    before: []const u8,
+    after: []const u8,
+    deadline: u64,
+    expected: []const Diff,
+};
+
 fn testDiffBisect(
     allocator: std.mem.Allocator,
-    params: struct {
-        dmp: DiffMatchPatch,
-        before: []const u8,
-        after: []const u8,
-        deadline: u64,
-        expected: []const Diff,
-    },
+    params: TBisect,
 ) !void {
     var diffs = try params.dmp.diffBisect(allocator, params.before, params.after, params.deadline);
     defer deinitDiffList(allocator, &diffs);
@@ -4041,7 +4045,7 @@ test diffBisect {
     const b = "map";
 
     // Normal
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffBisect, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffBisect, .{TBisect{
         .dmp = this,
         .before = a,
         .after = b,
@@ -4057,7 +4061,7 @@ test diffBisect {
     }});
 
     // Timeout
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffBisect, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffBisect, .{TBisect{
         .dmp = this,
         .before = a,
         .after = b,
@@ -4069,15 +4073,17 @@ test diffBisect {
     }});
 }
 
+const TDiff = struct {
+    dmp: DiffMatchPatch,
+    before: []const u8,
+    after: []const u8,
+    check_lines: bool,
+    expected: []const Diff,
+};
+
 fn testDiff(
     allocator: std.mem.Allocator,
-    params: struct {
-        dmp: DiffMatchPatch,
-        before: []const u8,
-        after: []const u8,
-        check_lines: bool,
-        expected: []const Diff,
-    },
+    params: TDiff,
 ) !void {
     var diffs = try params.dmp.diff(allocator, params.before, params.after, params.check_lines);
     defer deinitDiffList(allocator, &diffs);
@@ -4088,7 +4094,7 @@ test diff {
     const dmp: DiffMatchPatch = .{ .diff_timeout = 0 };
 
     //  Null case.
-    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
         .dmp = dmp,
         .before = "",
         .after = "",
@@ -4097,7 +4103,7 @@ test diff {
     }});
 
     //  Equality.
-    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
         .dmp = dmp,
         .before = "abc",
         .after = "abc",
@@ -4108,7 +4114,7 @@ test diff {
     }});
 
     // Simple insertion.
-    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
         .dmp = dmp,
         .before = "abc",
         .after = "ab123c",
@@ -4121,7 +4127,7 @@ test diff {
     }});
 
     // Simple deletion.
-    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
         .dmp = dmp,
         .before = "a123bc",
         .after = "abc",
@@ -4134,7 +4140,7 @@ test diff {
     }});
 
     // Two insertions.
-    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
         .dmp = dmp,
         .before = "abc",
         .after = "a123b456c",
@@ -4149,7 +4155,7 @@ test diff {
     }});
 
     // Two deletions.
-    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
         .dmp = dmp,
         .before = "a123b456c",
         .after = "abc",
@@ -4164,7 +4170,7 @@ test diff {
     }});
 
     // Simple case #1
-    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
         .dmp = dmp,
         .before = "a",
         .after = "b",
@@ -4176,7 +4182,7 @@ test diff {
     }});
 
     // Simple case #2
-    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
         .dmp = dmp,
         .before = "Apples are a fruit.",
         .after = "Bananas are also fruit.",
@@ -4191,7 +4197,7 @@ test diff {
     }});
 
     // Simple case #3
-    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
         .dmp = dmp,
         .before = "ax\t",
         .after = "\u{0680}x\x00",
@@ -4206,7 +4212,7 @@ test diff {
     }});
 
     // Overlap #1
-    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
         .dmp = dmp,
         .before = "1ayb2",
         .after = "abxab",
@@ -4222,7 +4228,7 @@ test diff {
     }});
 
     // Overlap #2
-    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
         .dmp = dmp,
         .before = "abcy",
         .after = "xaxcxabc",
@@ -4235,7 +4241,7 @@ test diff {
     }});
 
     // Overlap #3
-    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
         .dmp = dmp,
         .before = "ABCDa=bcd=efghijklmnopqrsEFGHIJKLMNOefg",
         .after = "a-bcd-efghijklmnopqrs",
@@ -4254,7 +4260,7 @@ test diff {
     }});
 
     // Large equality
-    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
         .dmp = dmp,
         .before = "a [[Pennsylvania]] and [[New",
         .after = " and [[Pennsylvania]]",
@@ -4454,9 +4460,9 @@ test "Unicode diffs" {
             diffRoundTrip,
             .{
                 dmp, &.{
-                    .{ .operation = .equal, .text = "三亥" },
-                    .{ .operation = .delete, .text = "两" },
-                    .{ .operation = .insert, .text = "临" },
+                    Diff{ .operation = .equal, .text = "三亥" },
+                    Diff{ .operation = .delete, .text = "两" },
+                    Diff{ .operation = .insert, .text = "临" },
                 },
             },
         );
@@ -4467,9 +4473,9 @@ test "Unicode diffs" {
             diffRoundTrip,
             .{
                 dmp, &.{
-                    .{ .operation = .equal, .text = "三亥" },
-                    .{ .operation = .delete, .text = "两" },
-                    .{ .operation = .insert, .text = "乤" },
+                    Diff{ .operation = .equal, .text = "三亥" },
+                    Diff{ .operation = .delete, .text = "两" },
+                    Diff{ .operation = .insert, .text = "乤" },
                 },
             },
         );
@@ -4480,9 +4486,9 @@ test "Unicode diffs" {
             diffRoundTrip,
             .{
                 dmp, &.{
-                    .{ .operation = .equal, .text = "三亥" },
-                    .{ .operation = .delete, .text = "两" },
-                    .{ .operation = .insert, .text = "帤" },
+                    Diff{ .operation = .equal, .text = "三亥" },
+                    Diff{ .operation = .delete, .text = "两" },
+                    Diff{ .operation = .insert, .text = "帤" },
                 },
             },
         );
@@ -4493,10 +4499,10 @@ test "Unicode diffs" {
             diffRoundTrip,
             .{
                 dmp, &.{
-                    .{ .operation = .equal, .text = "三" },
-                    .{ .operation = .delete, .text = "两" },
-                    .{ .operation = .insert, .text = "帤" },
-                    .{ .operation = .equal, .text = "亥" },
+                    Diff{ .operation = .equal, .text = "三" },
+                    Diff{ .operation = .delete, .text = "两" },
+                    Diff{ .operation = .insert, .text = "帤" },
+                    Diff{ .operation = .equal, .text = "亥" },
                 },
             },
         );
@@ -4507,10 +4513,10 @@ test "Unicode diffs" {
             diffRoundTrip,
             .{
                 dmp, &.{
-                    .{ .operation = .equal, .text = "三" },
-                    .{ .operation = .delete, .text = "两" },
-                    .{ .operation = .insert, .text = "乤" },
-                    .{ .operation = .equal, .text = "亥" },
+                    Diff{ .operation = .equal, .text = "三" },
+                    Diff{ .operation = .delete, .text = "两" },
+                    Diff{ .operation = .insert, .text = "乤" },
+                    Diff{ .operation = .equal, .text = "亥" },
                 },
             },
         );
@@ -4521,10 +4527,10 @@ test "Unicode diffs" {
             diffRoundTrip,
             .{
                 dmp, &.{
-                    .{ .operation = .equal, .text = "三" },
-                    .{ .operation = .delete, .text = "两" },
-                    .{ .operation = .insert, .text = "临" },
-                    .{ .operation = .equal, .text = "亥" },
+                    Diff{ .operation = .equal, .text = "三" },
+                    Diff{ .operation = .delete, .text = "两" },
+                    Diff{ .operation = .insert, .text = "临" },
+                    Diff{ .operation = .equal, .text = "亥" },
                 },
             },
         );
@@ -4535,9 +4541,9 @@ test "Unicode diffs" {
             diffRoundTrip,
             .{
                 dmp, &.{
-                    .{ .operation = .delete, .text = "两" },
-                    .{ .operation = .insert, .text = "临" },
-                    .{ .operation = .equal, .text = "三亥" },
+                    Diff{ .operation = .delete, .text = "两" },
+                    Diff{ .operation = .insert, .text = "临" },
+                    Diff{ .operation = .equal, .text = "三亥" },
                 },
             },
         );
@@ -4548,9 +4554,9 @@ test "Unicode diffs" {
             diffRoundTrip,
             .{
                 dmp, &.{
-                    .{ .operation = .delete, .text = "两" },
-                    .{ .operation = .insert, .text = "乤" },
-                    .{ .operation = .equal, .text = "三亥" },
+                    Diff{ .operation = .delete, .text = "两" },
+                    Diff{ .operation = .insert, .text = "乤" },
+                    Diff{ .operation = .equal, .text = "三亥" },
                 },
             },
         );
@@ -4561,9 +4567,9 @@ test "Unicode diffs" {
             diffRoundTrip,
             .{
                 dmp, &.{
-                    .{ .operation = .delete, .text = "两" },
-                    .{ .operation = .insert, .text = "帤" },
-                    .{ .operation = .equal, .text = "三亥" },
+                    Diff{ .operation = .delete, .text = "两" },
+                    Diff{ .operation = .insert, .text = "帤" },
+                    Diff{ .operation = .equal, .text = "三亥" },
                 },
             },
         );
@@ -4574,10 +4580,10 @@ test "Unicode diffs" {
             diffRoundTrip,
             .{
                 dmp, &.{
-                    .{ .operation = .equal, .text = "三" },
-                    .{ .operation = .delete, .text = "临" },
-                    .{ .operation = .insert, .text = "丿" },
-                    .{ .operation = .equal, .text = "亥" },
+                    Diff{ .operation = .equal, .text = "三" },
+                    Diff{ .operation = .delete, .text = "临" },
+                    Diff{ .operation = .insert, .text = "丿" },
+                    Diff{ .operation = .equal, .text = "亥" },
                 },
             },
         );
@@ -4588,10 +4594,10 @@ test "Unicode diffs" {
             diffRoundTrip,
             .{
                 dmp, &.{
-                    .{ .operation = .equal, .text = "😹💋" },
-                    .{ .operation = .delete, .text = "\xf0\x9f\xa5\xb9" },
-                    .{ .operation = .insert, .text = "丿" },
-                    .{ .operation = .equal, .text = "👀🫵" },
+                    Diff{ .operation = .equal, .text = "😹💋" },
+                    Diff{ .operation = .delete, .text = "\xf0\x9f\xa5\xb9" },
+                    Diff{ .operation = .insert, .text = "丿" },
+                    Diff{ .operation = .equal, .text = "👀🫵" },
                 },
             },
         );
@@ -4602,10 +4608,10 @@ test "Unicode diffs" {
             diffRoundTrip,
             .{
                 dmp, &.{
-                    .{ .operation = .equal, .text = "😹💋" },
-                    .{ .operation = .delete, .text = "\xf0\x9f\xa5\xb9" },
-                    .{ .operation = .insert, .text = "\xf1\x9f\xa5\xb9" },
-                    .{ .operation = .equal, .text = "👀🫵" },
+                    Diff{ .operation = .equal, .text = "😹💋" },
+                    Diff{ .operation = .delete, .text = "\xf0\x9f\xa5\xb9" },
+                    Diff{ .operation = .insert, .text = "\xf1\x9f\xa5\xb9" },
+                    Diff{ .operation = .equal, .text = "👀🫵" },
                 },
             },
         );
@@ -4616,10 +4622,10 @@ test "Unicode diffs" {
             diffRoundTrip,
             .{
                 dmp, &.{
-                    .{ .operation = .equal, .text = "😹💋" },
-                    .{ .operation = .delete, .text = "\xf0\x9f\xa5\xb9" },
-                    .{ .operation = .insert, .text = "\xf0\xa0\xa5\xb9" },
-                    .{ .operation = .equal, .text = "👀🫵" },
+                    Diff{ .operation = .equal, .text = "😹💋" },
+                    Diff{ .operation = .delete, .text = "\xf0\x9f\xa5\xb9" },
+                    Diff{ .operation = .insert, .text = "\xf0\xa0\xa5\xb9" },
+                    Diff{ .operation = .equal, .text = "👀🫵" },
                 },
             },
         );
@@ -4630,10 +4636,10 @@ test "Unicode diffs" {
             diffRoundTrip,
             .{
                 dmp, &.{
-                    .{ .operation = .equal, .text = "😹💋" },
-                    .{ .operation = .delete, .text = "\xf0\x9f\xa5\xb9" },
-                    .{ .operation = .insert, .text = "\xf0\x9f\xa4\xb9" },
-                    .{ .operation = .equal, .text = "👀🫵" },
+                    Diff{ .operation = .equal, .text = "😹💋" },
+                    Diff{ .operation = .delete, .text = "\xf0\x9f\xa5\xb9" },
+                    Diff{ .operation = .insert, .text = "\xf0\x9f\xa4\xb9" },
+                    Diff{ .operation = .equal, .text = "👀🫵" },
                 },
             },
         );
@@ -4644,10 +4650,10 @@ test "Unicode diffs" {
             diffRoundTrip,
             .{
                 dmp, &.{
-                    .{ .operation = .equal, .text = "😹💋" },
-                    .{ .operation = .delete, .text = "\xf0\x9f\xa5\xb9" },
-                    .{ .operation = .insert, .text = "\xf0\x9f\xa5\xb4" },
-                    .{ .operation = .equal, .text = "👀🫵" },
+                    Diff{ .operation = .equal, .text = "😹💋" },
+                    Diff{ .operation = .delete, .text = "\xf0\x9f\xa5\xb9" },
+                    Diff{ .operation = .insert, .text = "\xf0\x9f\xa5\xb4" },
+                    Diff{ .operation = .equal, .text = "👀🫵" },
                 },
             },
         );
@@ -4674,12 +4680,14 @@ test "Diff format" {
     try testing.expectEqualStrings(expect, out_string);
 }
 
+const TestIO = struct {
+    input: []const Diff,
+    expected: []const Diff,
+};
+
 fn testDiffCleanupSemantic(
     allocator: std.mem.Allocator,
-    params: struct {
-        input: []const Diff,
-        expected: []const Diff,
-    },
+    params: TestIO,
 ) !void {
     var diffs = try DiffList.initCapacity(allocator, params.input.len);
     defer deinitDiffList(allocator, &diffs);
@@ -4695,13 +4703,13 @@ fn testDiffCleanupSemantic(
 
 test diffCleanupSemantic {
     // Null case.
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{TestIO{
         .input = &[_]Diff{},
         .expected = &[_]Diff{},
     }});
 
     // No elimination #1
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{TestIO{
         .input = &.{
             .{ .operation = .delete, .text = "ab" },
             .{ .operation = .insert, .text = "cd" },
@@ -4717,7 +4725,7 @@ test diffCleanupSemantic {
     }});
 
     // No elimination #2
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{TestIO{
         .input = &.{
             .{ .operation = .delete, .text = "abc" },
             .{ .operation = .insert, .text = "ABC" },
@@ -4733,7 +4741,7 @@ test diffCleanupSemantic {
     }});
 
     // Simple elimination
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{TestIO{
         .input = &.{
             .{ .operation = .delete, .text = "a" },
             .{ .operation = .equal, .text = "b" },
@@ -4746,7 +4754,7 @@ test diffCleanupSemantic {
     }});
 
     // Backpass elimination
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{TestIO{
         .input = &.{
             .{ .operation = .delete, .text = "ab" },
             .{ .operation = .equal, .text = "cd" },
@@ -4761,7 +4769,7 @@ test diffCleanupSemantic {
     }});
 
     // Multiple elimination
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{TestIO{
         .input = &.{
             .{ .operation = .insert, .text = "1" },
             .{ .operation = .equal, .text = "A" },
@@ -4780,7 +4788,7 @@ test diffCleanupSemantic {
     }});
 
     // Word boundaries
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{TestIO{
         .input = &.{
             .{ .operation = .equal, .text = "The c" },
             .{ .operation = .delete, .text = "ow and the c" },
@@ -4794,7 +4802,7 @@ test diffCleanupSemantic {
     }});
 
     // No overlap elimination
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{TestIO{
         .input = &.{
             .{ .operation = .delete, .text = "abcxx" },
             .{ .operation = .insert, .text = "xxdef" },
@@ -4806,7 +4814,7 @@ test diffCleanupSemantic {
     }});
 
     // Overlap elimination
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{TestIO{
         .input = &.{
             .{ .operation = .delete, .text = "abcxxx" },
             .{ .operation = .insert, .text = "xxxdef" },
@@ -4819,7 +4827,7 @@ test diffCleanupSemantic {
     }});
 
     // Reverse overlap elimination
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{TestIO{
         .input = &.{
             .{ .operation = .delete, .text = "xxxabc" },
             .{ .operation = .insert, .text = "defxxx" },
@@ -4832,7 +4840,7 @@ test diffCleanupSemantic {
     }});
 
     // Two overlap eliminations
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{.{
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{TestIO{
         .input = &.{
             .{ .operation = .delete, .text = "abcd1212" },
             .{ .operation = .insert, .text = "1212efghi" },
@@ -4855,10 +4863,7 @@ test diffCleanupSemantic {
 fn testDiffCleanupEfficiency(
     allocator: Allocator,
     dmp: DiffMatchPatch,
-    params: struct {
-        input: []const Diff,
-        expected: []const Diff,
-    },
+    params: TestIO,
 ) !void {
     var diffs = try DiffList.initCapacity(allocator, params.input.len);
     defer deinitDiffList(allocator, &diffs);
@@ -4892,7 +4897,7 @@ test diffCleanupEfficiency {
             testDiffCleanupEfficiency,
             .{
                 dmp,
-                .{ .input = dslice, .expected = dslice },
+                TestIO{ .input = dslice, .expected = dslice },
             },
         );
     }
@@ -4913,7 +4918,7 @@ test diffCleanupEfficiency {
             testDiffCleanupEfficiency,
             .{
                 dmp,
-                .{ .input = dslice, .expected = d_after },
+                TestIO{ .input = dslice, .expected = d_after },
             },
         );
     }
@@ -4933,7 +4938,7 @@ test diffCleanupEfficiency {
             testDiffCleanupEfficiency,
             .{
                 dmp,
-                .{ .input = dslice, .expected = d_after },
+                TestIO{ .input = dslice, .expected = d_after },
             },
         );
     }
@@ -4956,7 +4961,7 @@ test diffCleanupEfficiency {
             testDiffCleanupEfficiency,
             .{
                 dmp,
-                .{ .input = dslice, .expected = d_after },
+                TestIO{ .input = dslice, .expected = d_after },
             },
         );
     }
@@ -4978,7 +4983,7 @@ test diffCleanupEfficiency {
             testDiffCleanupEfficiency,
             .{
                 dmp,
-                .{ .input = dslice, .expected = d_after },
+                TestIO{ .input = dslice, .expected = d_after },
             },
         );
         dmp.diff_edit_cost = 4;
@@ -5079,15 +5084,17 @@ test "matchAlphabet" {
     try testMapSubsetEquality(map, bitap_map2);
 }
 
+const TBitap = struct {
+    text: []const u8,
+    pattern: []const u8,
+    loc: usize,
+    expect: ?usize,
+};
+
 fn testMatchBitap(
     allocator: Allocator,
     dmp: DiffMatchPatch,
-    params: struct {
-        text: []const u8,
-        pattern: []const u8,
-        loc: usize,
-        expect: ?usize,
-    },
+    params: TBitap,
 ) !void {
     const best_loc = try dmp.matchBitap(
         allocator,
@@ -5108,7 +5115,7 @@ test matchBitap {
         testMatchBitap,
         .{
             dmp,
-            .{
+            TBitap{
                 .text = "abcdefghijk",
                 .pattern = "fgh",
                 .loc = 5,
@@ -5122,7 +5129,7 @@ test matchBitap {
         testMatchBitap,
         .{
             dmp,
-            .{
+            TBitap{
                 .text = "abcdefghijk",
                 .pattern = "fgh",
                 .loc = 0,
@@ -5136,7 +5143,7 @@ test matchBitap {
         testMatchBitap,
         .{
             dmp,
-            .{
+            TBitap{
                 .text = "abcdefghijk",
                 .pattern = "efxhi",
                 .loc = 0,
@@ -5150,7 +5157,7 @@ test matchBitap {
         testMatchBitap,
         .{
             dmp,
-            .{
+            TBitap{
                 .text = "abcdefghijk",
                 .pattern = "cdefxyhijk",
                 .loc = 5,
@@ -5164,7 +5171,7 @@ test matchBitap {
         testMatchBitap,
         .{
             dmp,
-            .{
+            TBitap{
                 .text = "abcdefghijk",
                 .pattern = "bxy",
                 .loc = 1,
@@ -5178,7 +5185,7 @@ test matchBitap {
         testMatchBitap,
         .{
             dmp,
-            .{
+            TBitap{
                 .text = "123456789xx0",
                 .pattern = "3456789x0",
                 .loc = 2,
@@ -5192,7 +5199,7 @@ test matchBitap {
         testMatchBitap,
         .{
             dmp,
-            .{
+            TBitap{
                 .text = "abcdef",
                 .pattern = "xxabc",
                 .loc = 4,
@@ -5207,7 +5214,7 @@ test matchBitap {
         testMatchBitap,
         .{
             dmp,
-            .{
+            TBitap{
                 .text = "abcdef",
                 .pattern = "defyy",
                 .loc = 4,
@@ -5221,7 +5228,7 @@ test matchBitap {
         testMatchBitap,
         .{
             dmp,
-            .{
+            TBitap{
                 .text = "abcdef",
                 .pattern = "xabcdefy",
                 .loc = 0,
@@ -5236,7 +5243,7 @@ test matchBitap {
         testMatchBitap,
         .{
             dmp,
-            .{
+            TBitap{
                 .text = "abcdefghijk",
                 .pattern = "efxyhi",
                 .loc = 1,
@@ -5251,7 +5258,7 @@ test matchBitap {
         testMatchBitap,
         .{
             dmp,
-            .{
+            TBitap{
                 .text = "abcdefghijk",
                 .pattern = "efxyhi",
                 .loc = 1,
@@ -5266,7 +5273,7 @@ test matchBitap {
         testMatchBitap,
         .{
             dmp,
-            .{
+            TBitap{
                 .text = "abcdefghijk",
                 .pattern = "bcdef",
                 .loc = 1,
@@ -5281,7 +5288,7 @@ test matchBitap {
         testMatchBitap,
         .{
             dmp,
-            .{
+            TBitap{
                 .text = "abcdexyzabcde",
                 .pattern = "abccde",
                 .loc = 5,
@@ -5296,7 +5303,7 @@ test matchBitap {
         testMatchBitap,
         .{
             dmp,
-            .{
+            TBitap{
                 .text = "abcdefghijklmnopqrstuvwxyz",
                 .pattern = "abcdefg",
                 .loc = 1,
@@ -5310,7 +5317,7 @@ test matchBitap {
         testMatchBitap,
         .{
             dmp,
-            .{
+            TBitap{
                 .text = "abcdefghijklmnopqrstuvwxyz",
                 .pattern = "abcdxxefg",
                 .loc = 1,
@@ -5325,7 +5332,7 @@ test matchBitap {
         testMatchBitap,
         .{
             dmp,
-            .{
+            TBitap{
                 .text = "abcdefghijklmnopqrstuvwxyz",
                 .pattern = "abcdefg",
                 .loc = 24,
