@@ -27,6 +27,7 @@ const testing = std.testing;
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const ArrayList = std.array_list.Managed;
 const Diff = ArrayListUnmanaged(Edit);
 const Patch = ArrayListUnmanaged(Hunk);
 
@@ -113,10 +114,17 @@ pub const Edit = struct {
         equal,
     };
 
+    // TODO: The algorithm as a whole requires some text to be copied,
+    // at least it does without some very heavyweight reimagination.
+    // But not all.  Since this is aligned with a slice, it's three
+    // usize, and our enum is tiny, so we can add a boolean recording
+    // copy status 'for free' and use views for the great majority of
+    // text.
+
     operation: Operation,
     text: []const u8,
 
-    pub fn format(value: Edit, _: anytype, _: anytype, writer: anytype) !void {
+    pub fn format(value: Edit, writer: anytype) !void {
         try writer.print("({s}, \"{s}\")", .{
             switch (value.operation) {
                 .equal => "=",
@@ -185,7 +193,7 @@ pub const Hunk = struct {
     /// Indices are printed as 1-based, not 0-based.
     /// @return The GNU diff string.
     pub fn asText(patch: Hunk, allocator: Allocator) ![]const u8 {
-        var text_array = std.ArrayList(u8).init(allocator);
+        var text_array = ArrayList(u8).init(allocator);
         defer text_array.deinit();
         const writer = text_array.writer();
         try patch.writeText(writer);
@@ -588,7 +596,8 @@ fn diffHalfMatchInternal(
     const seed = long_text[i .. i + long_text.len / 4];
     var j: isize = -1;
 
-    var best_common = std.ArrayListUnmanaged(u8){};
+    // TODO: this array list is absolutely not needed
+    var best_common = ArrayListUnmanaged(u8){};
     defer best_common.deinit(allocator);
     var best_long_text_a: []const u8 = "";
     var best_long_text_b: []const u8 = "";
@@ -603,10 +612,14 @@ fn diffHalfMatchInternal(
         const suffix_length = diffCommonSuffix(long_text[0..i], short_text[0..@as(usize, @intCast(j))]);
         if (best_common.items.len < suffix_length + prefix_length) {
             best_common.items.len = 0;
+            // TODO: This is nuts in here, clean up.
             const a = short_text[@as(usize, @intCast(j - @as(isize, @intCast(suffix_length)))) .. @as(usize, @intCast(j - @as(isize, @intCast(suffix_length)))) + suffix_length];
             try best_common.appendSlice(allocator, a);
             const b = short_text[@as(usize, @intCast(j)) .. @as(usize, @intCast(j)) + prefix_length];
             try best_common.appendSlice(allocator, b);
+            // short_text[j - suffix_length .. j + prefix_length]... right?
+            assert(std.mem.eql(u8, best_common.items, short_text[@as(usize, @intCast(j - @as(isize, @intCast(suffix_length)))) .. @as(usize, @intCast(j)) + prefix_length]));
+            // Looks like it ¯\_(ツ)_/¯
 
             best_long_text_a = long_text[0 .. i - suffix_length];
             best_long_text_b = long_text[i + prefix_length ..];
@@ -624,7 +637,7 @@ fn diffHalfMatchInternal(
         const suffix_after = try allocator.dupe(u8, best_short_text_b);
         errdefer allocator.free(suffix_after);
         const best_common_text = try best_common.toOwnedSlice(allocator);
-        errdefer allocator.free(best_common_text); // Keeps the code portable.
+        errdefer allocator.free(best_common_text);
         return .{
             .prefix_before = prefix_before,
             .suffix_before = suffix_before,
@@ -888,13 +901,12 @@ fn diffLineMode(
     const text1 = a.chars_1;
     const text2 = a.chars_2;
     const line_array = a.line_array;
-    var diffs: Diff = undefined;
-    {
+    var diffs: Diff = diff_munge: {
         var char_diffs: Diff = try dmp.diffInternal(allocator, text1, text2, false, deadline);
         defer deinitDiffList(allocator, &char_diffs);
         // Convert the diff back to original text.
-        diffs = try diffCharsToLines(allocator, &char_diffs, line_array.items);
-    }
+        break :diff_munge try diffCharsToLines(allocator, &char_diffs, line_array.items);
+    };
     errdefer deinitDiffList(allocator, &diffs);
     // Eliminate freak matches (e.g. blank lines)
     try diffCleanupSemantic(allocator, &diffs);
@@ -1187,7 +1199,6 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *Diff) error{OutOfMemor
     var text_insert = ArrayListUnmanaged(u8){};
     defer text_insert.deinit(allocator);
 
-    var common_length: usize = undefined;
     while (pointer < diffs.items.len) {
         switch (diffs.items[pointer].operation) {
             .insert => {
@@ -1205,7 +1216,7 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *Diff) error{OutOfMemor
                 if (count_delete + count_insert > 1) {
                     if (count_delete != 0 and count_insert != 0) {
                         // Factor out any common prefixes.
-                        common_length = diffCommonPrefix(text_insert.items, text_delete.items);
+                        var common_length: usize = diffCommonPrefix(text_insert.items, text_delete.items);
                         if (common_length != 0) {
                             if ((pointer - count_delete - count_insert) > 0 and
                                 diffs.items[pointer - count_delete - count_insert - 1].operation == .equal)
@@ -1226,7 +1237,7 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *Diff) error{OutOfMemor
                             try text_insert.replaceRange(allocator, 0, common_length, &.{});
                             try text_delete.replaceRange(allocator, 0, common_length, &.{});
                         }
-                        // Factor out any common suffixies.
+                        // Factor out any common suffices.
                         // @ZigPort this seems very wrong
                         common_length = diffCommonSuffix(text_insert.items, text_delete.items);
                         if (common_length != 0) {
@@ -1673,7 +1684,7 @@ pub fn diffCleanupEfficiency(
 ) error{OutOfMemory}!void {
     var changes = false;
     // Stack of indices where equalities are found.
-    var equalities = std.ArrayList(usize).init(allocator);
+    var equalities = ArrayList(usize).init(allocator);
     defer equalities.deinit();
     // Always equal to equalities[equalitiesLength-1][1]
     var last_equality: []const u8 = "";
@@ -1894,7 +1905,7 @@ pub fn diffPrettyFormat(
     diffs: Diff,
     deco: DiffDecorations,
 ) ![]const u8 {
-    var out = std.ArrayList(u8).init(allocator);
+    var out = ArrayList(u8).init(allocator);
     defer out.deinit();
     const writer = out.writer();
     _ = try writeDiffPrettyFormat(allocator, writer, diffs, deco);
@@ -1979,6 +1990,9 @@ pub fn diffAfterText(allocator: Allocator, diffs: Diff) error{OutOfMemory}![]con
     return chars.toOwnedSlice(allocator);
 }
 
+// Lookup table for counting bytes fast.
+const cp_weight: [4]u8 = .{ 1, 1, 0, 1 };
+
 ///
 /// Compute the Levenshtein distance; the number of inserted,
 /// deleted or substituted characters.
@@ -1987,16 +2001,23 @@ pub fn diffAfterText(allocator: Allocator, diffs: Diff) error{OutOfMemory}![]con
 /// @return Number of changes.
 ///
 pub fn diffLevenshtein(diffs: Diff) f64 {
+    // We compensate for multi-byte characters by only
+    // counting the lead bytes, because we don't care
+    // much what happens when this isn't even UTF-8.
     var inserts: usize = 0;
     var deletes: usize = 0;
     var levenshtein: usize = 0;
     for (diffs.items) |a_diff| {
         switch (a_diff.operation) {
             .insert => {
-                inserts += a_diff.text.len;
+                for (a_diff.text) |b| {
+                    inserts += cp_weight[b >> 6];
+                }
             },
             .delete => {
-                deletes += a_diff.text.len;
+                for (a_diff.text) |b| {
+                    deletes += cp_weight[b >> 6];
+                }
             },
             .equal => {
                 // A deletion and an insertion is one substitution.
@@ -2068,7 +2089,7 @@ pub fn matchMain(
     } else if (text.len == 0) {
         // Nothing to match.
         return null;
-    } else if (loc + pattern.len <= text.len and std.mem.eql(u8, text[loc .. loc + pattern.len], pattern)) {
+    } else if (loc + pattern.len <= text.len and std.mem.eql(u8, text[loc..][0..pattern.len], pattern)) {
         // Perfect match at the perfect spot!  (Includes case of null pattern)
         return loc;
     } else {
@@ -2078,6 +2099,39 @@ pub fn matchMain(
 }
 
 const sh_one: u64 = 1;
+
+//| TODO: There's a lot we can tweak here.  Big one: a SIMD-lane Shift-Or
+//| can be a lot larger than 64 / 32 bits, when we have one.
+//| ---
+//| The notes about perfect match optimization are actually spurious because the
+//| speedups above prevent that.  What I don't like is the 'speedups' which will
+//| search the entire text without matching if there isn't a perfect fit.  We
+//| should be able to use the clamp function to determine what's so far off from
+//| our threshold that we don't treat it as a match even if we find it, then
+//| clamp off the source text in both directions so we decline to search where
+//| we don't care if there is a match.
+//| ---
+//| I also don't like the hash map we're using for the alphabet, it's a
+//| heavyweight heap-allocated data structure, and what we do with it can be
+//| done simpler.  Stack space is cheap, since we know the total call graph
+//| is shallow, so we can use the sparse array trick.  Two [256]u8, and one
+//| [256]usize: we index sparse with our byte, and if sparse[b] < n, the number
+//| of elements, we check if dense[sparse[b]] == b.  If so, our value is at
+//| val[sparse[b]].  Even for big vector match-maps, 256 bits, this is not a lot
+//| of stack allocation.  Better yet, we have the option to allocate the val
+//| array after building our alphabet, and we only make as many vectors as we
+//| have unique letters.  But it's 'just' a 16KiB stack allocation, even then,
+//| and we use it densely, not sparsely.
+//| ---
+//| Bonus round: making our alphabet bytes does not fit the problem domain,
+//| and this matters: our result will treat drift by wider characters as more
+//| expensive than narrow ones, which is contrary to intuition.  Same issue with
+//| Levenshein, the value should be in terms of codepoints, not codeunits.  I
+//| think both of these are amenable to a cheap 'fixup', though the details
+//| escape me.  Options: make a map of the pattern with indices in increasing
+//| order, where multibytes all get the same number.  Or, maybe we just adjust
+//| the default match threshold by the mean of character widths, and hope for
+//| the best.  That heuristic has the advantage of being very easy, at least.
 
 /// Locate the best instance of `pattern` in `text` near `loc` using the
 /// Bitap algorithm.  Returns -1 if no match found.
@@ -2217,7 +2271,7 @@ fn matchBitapScore(
     pattern: []const u8,
 ) f64 {
     // shortcut? TODO, proof in comments
-    // if (e == 0 and x == loc) return 0.0;
+    if (e == 0 and x == loc) return 0.0;
     const e_float: f64 = @floatFromInt(e);
     const len_float: f64 = @floatFromInt(pattern.len);
     // if e == 0, accuracy == 0: 0/x = 0
@@ -2396,7 +2450,7 @@ fn makePatchInternal(
     }
     const extra_u: usize = if (extra > 0) @intCast(extra) else 0;
     const dummy_diff = Edit{ .operation = .equal, .text = "" };
-    var postpatch = try std.ArrayList(u8).initCapacity(allocator, text.len + extra_u);
+    var postpatch = try ArrayList(u8).initCapacity(allocator, text.len + extra_u);
     defer postpatch.deinit();
     postpatch.appendSliceAssumeCapacity(text);
     var patch = Hunk{};
@@ -2564,7 +2618,7 @@ pub fn patchApply(
     defer deinitPatchList(allocator, &patches);
     const null_padding = try dmp.patchAddPadding(allocator, &patches);
     defer allocator.free(null_padding);
-    var text = try std.ArrayList(u8).initCapacity(allocator, og_text.len + 2 * null_padding.len);
+    var text = try ArrayList(u8).initCapacity(allocator, og_text.len + 2 * null_padding.len);
     defer text.deinit();
     text.appendSliceAssumeCapacity(null_padding);
     text.appendSliceAssumeCapacity(og_text);
@@ -2878,7 +2932,7 @@ fn patchAddPadding(
 ) error{OutOfMemory}![]const u8 {
     if (patches.items.len == 0) return "";
     const pad_len = dmp.patch_margin;
-    var paddingcodes = try std.ArrayList(u8).initCapacity(allocator, pad_len);
+    var paddingcodes = try ArrayList(u8).initCapacity(allocator, pad_len);
     defer paddingcodes.deinit();
 
     {
@@ -2977,7 +3031,7 @@ fn patchListClone(allocator: Allocator, patches: *Patch) error{OutOfMemory}!Patc
 /// @param patches List of Patch objects.
 /// @return Text representation of patches.
 pub fn patchToText(allocator: Allocator, patches: Patch) error{OutOfMemory}![]const u8 {
-    var text_array = std.ArrayList(u8).init(allocator);
+    var text_array = ArrayList(u8).init(allocator);
     defer text_array.deinit();
     const writer = text_array.writer();
     try writePatch(writer, patches);
@@ -3140,7 +3194,7 @@ fn decodeUri(allocator: Allocator, line: []const u8) DiffError![]const u8 {
     if (std.mem.indexOf(u8, line, "%")) |first| {
         // Text to decode.
         // Result will always be shorter than line:
-        var new_line = try std.ArrayList(u8).initCapacity(allocator, line.len);
+        var new_line = try ArrayList(u8).initCapacity(allocator, line.len);
         defer new_line.deinit();
         try new_line.appendSlice(line[0..first]);
         var out_buf: [1]u8 = .{0};
@@ -3228,7 +3282,7 @@ fn writeUriEncoded(writer: anytype, text: []const u8) !usize {
 }
 
 fn encodeUri(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
-    var charlist = try std.ArrayList(u8).initCapacity(allocator, text.len);
+    var charlist = try ArrayList(u8).initCapacity(allocator, text.len);
     defer charlist.deinit();
     const writer = charlist.writer();
     _ = try writeUriEncoded(writer, text);
@@ -3488,7 +3542,7 @@ test diffHalfMatch {
 test diffLinesToChars {
     const allocator = testing.allocator;
     // Convert lines down to characters.
-    var tmp_array_list = std.ArrayList([]const u8).init(allocator);
+    var tmp_array_list = ArrayList([]const u8).init(allocator);
     defer tmp_array_list.deinit();
     try tmp_array_list.append("alpha\n");
     try tmp_array_list.append("beta\n");
@@ -3522,9 +3576,9 @@ test diffLinesToChars {
     {
         const n: u21 = 1024;
 
-        var line_list = std.ArrayList(u8).init(allocator);
+        var line_list = ArrayList(u8).init(allocator);
         defer line_list.deinit();
-        var char_list = std.ArrayList(u8).init(allocator);
+        var char_list = ArrayList(u8).init(allocator);
         defer char_list.deinit();
 
         var i: u21 = CHAR_OFFSET;
@@ -3938,9 +3992,9 @@ test diffCleanupSemanticLossless {
 }
 
 fn rebuildtexts(allocator: std.mem.Allocator, diffs: Diff) ![2][]const u8 {
-    var text = [2]std.ArrayList(u8){
-        std.ArrayList(u8).init(allocator),
-        std.ArrayList(u8).init(allocator),
+    var text = [2]ArrayList(u8){
+        ArrayList(u8).init(allocator),
+        ArrayList(u8).init(allocator),
     };
     errdefer {
         text[0].deinit();
@@ -4679,7 +4733,7 @@ test "Diff format" {
     const a_diff = Edit{ .operation = .insert, .text = "add me" };
     const expect = "(+, \"add me\")";
     var out_buf: [13]u8 = undefined;
-    const out_string = try std.fmt.bufPrint(&out_buf, "{}", .{a_diff});
+    const out_string = try std.fmt.bufPrint(&out_buf, "{f}", .{a_diff});
     try testing.expectEqualStrings(expect, out_string);
 }
 
