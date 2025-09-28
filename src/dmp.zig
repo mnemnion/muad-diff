@@ -28,8 +28,8 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const ArrayList = std.array_list.Managed;
-const Diff = ArrayListUnmanaged(Edit);
-const Patch = ArrayListUnmanaged(Hunk);
+pub const DiffList = ArrayListUnmanaged(Edit);
+pub const Patch = ArrayListUnmanaged(Hunk);
 
 pub const DiffError = error{
     OutOfMemory,
@@ -74,7 +74,7 @@ patch_margin: u8 = 4,
 
 /// Deinit an `ArrayListUnmanaged(Diff)` and the allocated slices of
 /// text in each `Diff`.
-pub fn deinitDiffList(allocator: Allocator, diffs: *Diff) void {
+pub fn deinitDiffList(allocator: Allocator, diffs: *DiffList) void {
     defer diffs.deinit(allocator);
     for (diffs.items) |d| {
         allocator.free(d.text);
@@ -85,7 +85,7 @@ pub fn deinitDiffList(allocator: Allocator, diffs: *Diff) void {
 /// edits.
 fn freeRangeDiffList(
     allocator: Allocator,
-    diffs: *Diff,
+    diffs: *DiffList,
     start: usize,
     len: usize,
 ) void {
@@ -153,7 +153,7 @@ pub const Edit = struct {
 /// Represents a single operation in a Patch.
 pub const Hunk = struct {
     /// Diff to be applied
-    diffs: Diff = .empty,
+    diffs: DiffList = .empty,
     /// Start of patch in before text
     start1: usize = 0,
     length1: usize = 0,
@@ -165,7 +165,7 @@ pub const Hunk = struct {
 
     /// Make a clone of the Hunk, including the Diff.
     pub fn clone(patch: Hunk, allocator: Allocator) !Hunk {
-        var new_diffs: Diff = .empty;
+        var new_diffs: DiffList = .empty;
         try new_diffs.ensureTotalCapacity(allocator, patch.diffs.items.len);
         errdefer {
             deinitDiffList(allocator, &new_diffs);
@@ -257,7 +257,7 @@ pub fn diff(
     /// to identify the changed areas. If true, then run
     /// a faster slightly less optimal diff.
     check_lines: bool,
-) error{OutOfMemory}!Diff {
+) error{OutOfMemory}!DiffList {
     const deadline = if (dmp.diff_timeout == 0)
         std.math.maxInt(u64)
     else
@@ -272,10 +272,10 @@ fn diffInternal(
     after: []const u8,
     check_lines: bool,
     deadline: u64,
-) error{OutOfMemory}!Diff {
+) error{OutOfMemory}!DiffList {
     // Check for equality (speedup).
     if (std.mem.eql(u8, before, after)) {
-        var diffs: Diff = .empty;
+        var diffs: DiffList = .empty;
         errdefer deinitDiffList(allocator, &diffs);
         if (before.len != 0) {
             try diffs.ensureUnusedCapacity(allocator, 1);
@@ -373,10 +373,10 @@ fn diffCompute(
     after: []const u8,
     check_lines: bool,
     deadline: u64,
-) error{OutOfMemory}!Diff {
+) error{OutOfMemory}!DiffList {
     if (before.len == 0) {
         // Just add some text (speedup).
-        var diffs: Diff = .empty;
+        var diffs: DiffList = .empty;
         errdefer deinitDiffList(allocator, &diffs);
         try diffs.ensureUnusedCapacity(allocator, 1);
         diffs.appendAssumeCapacity(Edit.init(
@@ -388,7 +388,7 @@ fn diffCompute(
 
     if (after.len == 0) {
         // Just delete some text (speedup).
-        var diffs: Diff = .empty;
+        var diffs: DiffList = .empty;
         errdefer deinitDiffList(allocator, &diffs);
         try diffs.ensureUnusedCapacity(allocator, 1);
         diffs.appendAssumeCapacity(Edit.init(
@@ -403,7 +403,7 @@ fn diffCompute(
 
     if (std.mem.indexOf(u8, long_text, short_text)) |index| {
         // Shorter text is inside the longer text (speedup).
-        var diffs: Diff = .empty;
+        var diffs: DiffList = .empty;
         errdefer deinitDiffList(allocator, &diffs);
         const op: Edit.Operation = if (before.len > after.len)
             .delete
@@ -428,7 +428,7 @@ fn diffCompute(
     if (short_text.len == 1) {
         // Single character string.
         // After the previous speedup, the character can't be an equality.
-        var diffs: Diff = .empty;
+        var diffs: DiffList = .empty;
         errdefer deinitDiffList(allocator, &diffs);
         try diffs.ensureUnusedCapacity(allocator, 2);
         diffs.appendAssumeCapacity(Edit.init(
@@ -663,7 +663,7 @@ fn diffBisect(
     before: []const u8,
     after: []const u8,
     deadline: u64,
-) error{OutOfMemory}!Diff {
+) error{OutOfMemory}!DiffList {
     const before_length: isize = @intCast(before.len);
     const after_length: isize = @intCast(after.len);
     const max_d: isize = @intCast((before.len + after.len + 1) / 2);
@@ -788,7 +788,7 @@ fn diffBisect(
     }
     // Diff took too long and hit the deadline or
     // number of diffs equals number of characters, no commonality at all.
-    var diffs: Diff = .empty;
+    var diffs: DiffList = .empty;
     errdefer deinitDiffList(allocator, &diffs);
     try diffs.ensureUnusedCapacity(allocator, 2);
     diffs.appendAssumeCapacity(Edit.init(
@@ -818,7 +818,7 @@ fn diffBisectSplit(
     x: isize,
     y: isize,
     deadline: u64,
-) error{OutOfMemory}!Diff {
+) error{OutOfMemory}!DiffList {
     const x1 = fixSplitForward(text1, @intCast(x));
     const y1 = fixSplitBackward(text2, @intCast(y));
     const text1a = text1[0..x1];
@@ -827,7 +827,7 @@ fn diffBisectSplit(
     const text2b = text2[y1..];
 
     if (text1a.len == 0 and text2a.len == 0) {
-        var diffs: Diff = .empty;
+        var diffs: DiffList = .empty;
         errdefer deinitDiffList(allocator, &diffs);
         try diffs.ensureUnusedCapacity(allocator, 2);
         diffs.appendAssumeCapacity(Edit.init(
@@ -846,7 +846,7 @@ fn diffBisectSplit(
         ));
         return diffs;
     } else if (text1b.len == 0 and text2b.len == 0) {
-        var diffs: Diff = .empty;
+        var diffs: DiffList = .empty;
         errdefer deinitDiffList(allocator, &diffs);
         try diffs.ensureUnusedCapacity(allocator, 2);
         diffs.appendAssumeCapacity(Edit.init(
@@ -894,15 +894,15 @@ fn diffLineMode(
     text1_in: []const u8,
     text2_in: []const u8,
     deadline: u64,
-) error{OutOfMemory}!Diff {
+) error{OutOfMemory}!DiffList {
     // Scan the text on a line-by-line basis first.
     var a = try diffLinesToChars(allocator, text1_in, text2_in);
     defer a.deinit(allocator);
     const text1 = a.chars_1;
     const text2 = a.chars_2;
     const line_array = a.line_array;
-    var diffs: Diff = diff_munge: {
-        var char_diffs: Diff = try dmp.diffInternal(allocator, text1, text2, false, deadline);
+    var diffs: DiffList = diff_munge: {
+        var char_diffs: DiffList = try dmp.diffInternal(allocator, text1, text2, false, deadline);
         defer deinitDiffList(allocator, &char_diffs);
         // Convert the diff back to original text.
         break :diff_munge try diffCharsToLines(allocator, &char_diffs, line_array.items);
@@ -1121,12 +1121,12 @@ fn diffIteratorToCharsMunge(
 /// @param lineArray List of unique strings.
 fn diffCharsToLines(
     allocator: Allocator,
-    char_diffs: *Diff,
+    char_diffs: *DiffList,
     line_array: []const []const u8,
-) error{OutOfMemory}!Diff {
+) error{OutOfMemory}!DiffList {
     var text = ArrayListUnmanaged(u8){};
     defer text.deinit(allocator);
-    var diffs: Diff = .empty;
+    var diffs: DiffList = .empty;
     errdefer deinitDiffList(allocator, &diffs);
     try diffs.ensureUnusedCapacity(allocator, char_diffs.items.len);
     for (char_diffs.items) |*d| {
@@ -1186,7 +1186,7 @@ const LineIterator = struct {
 /// Reorder and merge like edit sections.  Merge equalities.
 /// Any edit section can move as long as it doesn't cross an equality.
 /// @param diffs List of Diff objects.
-fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *Diff) error{OutOfMemory}!void {
+fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *DiffList) error{OutOfMemory}!void {
     // Add a dummy entry at the end.
     try diffs.append(allocator, Edit.init(.equal, ""));
     var pointer: usize = 0;
@@ -1360,7 +1360,7 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *Diff) error{OutOfMemor
 /// Reduce the number of edits by eliminating semantically trivial
 /// equalities.
 /// @param diffs List of Diff objects.
-pub fn diffCleanupSemantic(allocator: std.mem.Allocator, diffs: *Diff) error{OutOfMemory}!void {
+pub fn diffCleanupSemantic(allocator: std.mem.Allocator, diffs: *DiffList) error{OutOfMemory}!void {
     var changes = false;
     // Stack of indices where equalities are found.
     var equalities = ArrayListUnmanaged(usize){};
@@ -1512,7 +1512,7 @@ pub fn diffCleanupSemantic(allocator: std.mem.Allocator, diffs: *Diff) error{Out
 /// e.g: The c<ins>at c</ins>ame. -> The <ins>cat </ins>came.
 pub fn diffCleanupSemanticLossless(
     allocator: std.mem.Allocator,
-    diffs: *Diff,
+    diffs: *DiffList,
 ) error{OutOfMemory}!void {
     var pointer: usize = 1;
     // Intentionally ignore the first and last element (don't need checking).
@@ -1680,7 +1680,7 @@ fn diffCleanupSemanticScore(one: []const u8, two: []const u8) usize {
 pub fn diffCleanupEfficiency(
     dmp: DiffMatchPatch,
     allocator: std.mem.Allocator,
-    diffs: *Diff,
+    diffs: *DiffList,
 ) error{OutOfMemory}!void {
     var changes = false;
     // Stack of indices where equalities are found.
@@ -1838,7 +1838,7 @@ fn diffCommonOverlap(text1_in: []const u8, text2_in: []const u8) usize {
 /// @param loc Location within text1.
 /// @return Location within text2.
 ///
-pub fn diffIndex(diffs: Diff, u_loc: usize) usize {
+pub fn diffIndex(diffs: DiffList, u_loc: usize) usize {
     var chars1: isize = 0;
     var chars2: isize = 0;
     var last_chars1: isize = 0;
@@ -1902,7 +1902,7 @@ pub const xterm_classic = DiffDecorations{
 /// See `DiffDecorations` for how to customize this output.
 pub fn diffPrettyFormat(
     allocator: Allocator,
-    diffs: Diff,
+    diffs: DiffList,
     deco: DiffDecorations,
 ) ![]const u8 {
     var out = ArrayList(u8).init(allocator);
@@ -1913,7 +1913,7 @@ pub fn diffPrettyFormat(
 }
 
 /// Pretty-print a diff for output to a terminal.
-pub fn diffPrettyFormatXTerm(allocator: Allocator, diffs: Diff) ![]const u8 {
+pub fn diffPrettyFormatXTerm(allocator: Allocator, diffs: DiffList) ![]const u8 {
     return try diffPrettyFormat(allocator, diffs, xterm_classic);
 }
 
@@ -1923,7 +1923,7 @@ pub fn diffPrettyFormatXTerm(allocator: Allocator, diffs: Diff) ![]const u8 {
 pub fn writeDiffPrettyFormat(
     allocator: Allocator,
     writer: anytype,
-    diffs: Diff,
+    diffs: DiffList,
     deco: DiffDecorations,
 ) !usize {
     var written: usize = 0;
@@ -1963,7 +1963,7 @@ pub fn writeDiffPrettyFormat(
 /// @param diffs List of `Diff` objects.
 /// @return Source text.
 ///
-pub fn diffBeforeText(allocator: Allocator, diffs: Diff) error{OutOfMemory}![]const u8 {
+pub fn diffBeforeText(allocator: Allocator, diffs: DiffList) error{OutOfMemory}![]const u8 {
     var chars = ArrayListUnmanaged(u8){};
     defer chars.deinit(allocator);
     for (diffs.items) |d| {
@@ -1979,7 +1979,7 @@ pub fn diffBeforeText(allocator: Allocator, diffs: Diff) error{OutOfMemory}![]co
 /// @param diffs List of `Diff` objects.
 /// @return Destination text.
 ///
-pub fn diffAfterText(allocator: Allocator, diffs: Diff) error{OutOfMemory}![]const u8 {
+pub fn diffAfterText(allocator: Allocator, diffs: DiffList) error{OutOfMemory}![]const u8 {
     var chars = ArrayListUnmanaged(u8){};
     defer chars.deinit(allocator);
     for (diffs.items) |d| {
@@ -2000,7 +2000,7 @@ const cp_weight: [4]u8 = .{ 1, 1, 0, 1 };
 /// @param diffs List of Diff objects.
 /// @return Number of changes.
 ///
-pub fn diffLevenshtein(diffs: Diff) f64 {
+pub fn diffLevenshtein(diffs: DiffList) f64 {
     // We compensate for multi-byte characters by only
     // counting the lead bytes, because we don't care
     // much what happens when this isn't even UTF-8.
@@ -2035,7 +2035,7 @@ test diffLevenshtein {
     const allocator = testing.allocator;
     // These diffs don't get text freed
     {
-        var diffs: Diff = .empty;
+        var diffs: DiffList = .empty;
         defer diffs.deinit(allocator);
         try diffs.appendSlice(allocator, &.{
             Edit.init(.delete, "abc"),
@@ -2045,7 +2045,7 @@ test diffLevenshtein {
         try testing.expectEqual(4, diffLevenshtein(diffs));
     }
     {
-        var diffs: Diff = .empty;
+        var diffs: DiffList = .empty;
         defer diffs.deinit(allocator);
         try diffs.appendSlice(allocator, &.{
             Edit.init(.equal, "xyz"),
@@ -2055,7 +2055,7 @@ test diffLevenshtein {
         try testing.expectEqual(4, diffLevenshtein(diffs));
     }
     {
-        var diffs: Diff = .empty;
+        var diffs: DiffList = .empty;
         defer diffs.deinit(allocator);
         try diffs.appendSlice(allocator, &.{
             Edit.init(.delete, "abc"),
@@ -2416,7 +2416,7 @@ fn makePatchInternal(
     dmp: DiffMatchPatch,
     allocator: Allocator,
     text: []const u8,
-    diffs: Diff,
+    diffs: DiffList,
     diff_act: DiffHandling,
 ) error{OutOfMemory}!Patch {
     var patches = Patch{};
@@ -2568,7 +2568,7 @@ pub fn makePatch(
     dmp: DiffMatchPatch,
     allocator: Allocator,
     text: []const u8,
-    diffs: Diff,
+    diffs: DiffList,
 ) error{OutOfMemory}!Patch {
     return try dmp.makePatchInternal(allocator, text, diffs, .copy);
 }
@@ -2576,7 +2576,7 @@ pub fn makePatch(
 pub fn makePatchFromDiffs(
     dmp: DiffMatchPatch,
     allocator: Allocator,
-    diffs: Diff,
+    diffs: DiffList,
 ) error{OutOfMemory}!Patch {
     const text1 = try diffBeforeText(allocator, diffs);
     defer allocator.free(text1);
@@ -3624,7 +3624,7 @@ fn testDiffCharsToLines(
     allocator: std.mem.Allocator,
     params: TCharLines,
 ) !void {
-    var char_diffs = try Diff.initCapacity(allocator, params.diffs.len);
+    var char_diffs = try DiffList.initCapacity(allocator, params.diffs.len);
     defer deinitDiffList(allocator, &char_diffs);
 
     for (params.diffs) |item| {
@@ -3639,7 +3639,7 @@ fn testDiffCharsToLines(
 
 test diffCharsToLines {
     // Convert chars up to lines.
-    var diff_list: Diff = .empty;
+    var diff_list: DiffList = .empty;
     defer deinitDiffList(testing.allocator, &diff_list);
     try diff_list.ensureTotalCapacity(testing.allocator, 2);
     diff_list.appendSliceAssumeCapacity(&.{
@@ -3667,7 +3667,7 @@ fn testDiffCleanupMerge(
     allocator: std.mem.Allocator,
     params: TestIO,
 ) !void {
-    var diffs = try Diff.initCapacity(allocator, params.input.len);
+    var diffs = try DiffList.initCapacity(allocator, params.input.len);
     defer deinitDiffList(allocator, &diffs);
 
     for (params.input) |item| {
@@ -3868,7 +3868,7 @@ fn testDiffCleanupSemanticLossless(
     allocator: std.mem.Allocator,
     params: TestIO,
 ) !void {
-    var diffs = try Diff.initCapacity(allocator, params.input.len);
+    var diffs = try DiffList.initCapacity(allocator, params.input.len);
     defer deinitDiffList(allocator, &diffs);
 
     for (params.input) |item| {
@@ -3880,8 +3880,8 @@ fn testDiffCleanupSemanticLossless(
     try testing.expectEqualDeep(params.expected, diffs.items);
 }
 
-fn sliceToDiffList(allocator: Allocator, diff_slice: []const Edit) !Diff {
-    var diff_list: Diff = .empty;
+fn sliceToDiffList(allocator: Allocator, diff_slice: []const Edit) !DiffList {
+    var diff_list: DiffList = .empty;
     errdefer deinitDiffList(allocator, &diff_list);
     try diff_list.ensureTotalCapacity(allocator, diff_slice.len);
     for (diff_slice) |d| {
@@ -3991,7 +3991,7 @@ test diffCleanupSemanticLossless {
     }});
 }
 
-fn rebuildtexts(allocator: std.mem.Allocator, diffs: Diff) ![2][]const u8 {
+fn rebuildtexts(allocator: std.mem.Allocator, diffs: DiffList) ![2][]const u8 {
     var text = [2]ArrayList(u8){
         ArrayList(u8).init(allocator),
         ArrayList(u8).init(allocator),
@@ -4022,7 +4022,7 @@ const TRebuild = struct {
     after: []const u8,
 };
 
-fn testRebuildTexts(allocator: Allocator, diffs: Diff, params: TRebuild) !void {
+fn testRebuildTexts(allocator: Allocator, diffs: DiffList, params: TRebuild) !void {
     const texts = try rebuildtexts(allocator, diffs);
     defer {
         allocator.free(texts[0]);
@@ -4432,7 +4432,7 @@ test "diffLineMode" {
 
 /// Round-trip a diff, confirming that the result matches the original.
 fn diffRoundTrip(allocator: Allocator, dmp: DiffMatchPatch, diff_slice: []const Edit) !void {
-    var diffs_before = try Diff.initCapacity(allocator, diff_slice.len);
+    var diffs_before = try DiffList.initCapacity(allocator, diff_slice.len);
     defer deinitDiffList(allocator, &diffs_before);
     for (diff_slice) |item| {
         diffs_before.appendAssumeCapacity(.{ .operation = item.operation, .text = try allocator.dupe(u8, item.text) });
@@ -4746,7 +4746,7 @@ fn testDiffCleanupSemantic(
     allocator: std.mem.Allocator,
     params: TestIO,
 ) !void {
-    var diffs = try Diff.initCapacity(allocator, params.input.len);
+    var diffs = try DiffList.initCapacity(allocator, params.input.len);
     defer deinitDiffList(allocator, &diffs);
 
     for (params.input) |item| {
@@ -4922,7 +4922,7 @@ fn testDiffCleanupEfficiency(
     dmp: DiffMatchPatch,
     params: TestIO,
 ) !void {
-    var diffs = try Diff.initCapacity(allocator, params.input.len);
+    var diffs = try DiffList.initCapacity(allocator, params.input.len);
     defer deinitDiffList(allocator, &diffs);
     for (params.input) |item| {
         diffs.appendAssumeCapacity(.{ .operation = item.operation, .text = try allocator.dupe(u8, item.text) });
@@ -4937,9 +4937,9 @@ test diffCleanupEfficiency {
     var dmp = DiffMatchPatch{};
     dmp.diff_edit_cost = 4;
     { // Null case.
-        var diffs: Diff = .empty;
+        var diffs: DiffList = .empty;
         try dmp.diffCleanupEfficiency(allocator, &diffs);
-        try testing.expectEqualDeep(Diff.empty, diffs);
+        try testing.expectEqualDeep(DiffList.empty, diffs);
     }
     { // No elimination.
         const dslice: []const Edit = &.{
