@@ -1,6 +1,6 @@
 // Zig package metadata for {driff}
 .{
-    .name = .driff,
+    .name = .muad_diff,
 
     .version = "0.0.1",
 
