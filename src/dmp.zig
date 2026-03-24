@@ -3205,6 +3205,7 @@ fn decodeUri(allocator: Allocator, line: []const u8) DiffError![]const u8 {
         try new_line.append(codeunit[0]);
         var cursor = first + 3;
         while (std.mem.indexOfScalarPos(u8, line, cursor, '%')) |next| {
+            try new_line.appendSlice(line[cursor..next]);
             codeunit = std.fmt.hexToBytes(
                 &out_buf,
                 line[next + 1 .. next + 3],
