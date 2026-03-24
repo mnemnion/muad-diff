@@ -344,7 +344,7 @@ test "corpus revision pairs satisfy diff and patch invariants" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const diff_config: dmp.DiffConfig = .{ .check_line_threshold = 1024 * 1024, .timeout = 0 };
-    const patch_config: dmp = .{ .diff_check_lines_over = 1024 * 1024, .diff_timeout = 0 };
+    const patch_config: dmp = .{};
 
     var fixtures = try loadCorpusFixtures(arena);
     defer fixtures.deinit();
