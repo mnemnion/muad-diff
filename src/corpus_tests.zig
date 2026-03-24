@@ -216,13 +216,13 @@ fn expectDiffListUtf8(diffs: dmp.DiffList) !void {
     }
 }
 
-fn expectPatchUtf8(patches: dmp.Patch) !void {
+fn expectPatchUtf8(patches: dmp.PatchList) !void {
     for (patches.items) |patch| {
         try expectDiffListUtf8(patch.diffs);
     }
 }
 
-fn expectPatchesEqual(expected: dmp.Patch, actual: dmp.Patch) !void {
+fn expectPatchesEqual(expected: dmp.PatchList, actual: dmp.PatchList) !void {
     try testing.expectEqual(expected.items.len, actual.items.len);
 
     for (expected.items, actual.items) |expected_patch, actual_patch| {
@@ -236,7 +236,7 @@ fn expectPatchesEqual(expected: dmp.Patch, actual: dmp.Patch) !void {
 
 fn assertRevisionPairInvariant(
     diff_config: dmp.DiffConfig,
-    patch_config: dmp,
+    patch_config: dmp.PatchConfig,
     before: RevisionFixture,
     after: RevisionFixture,
 ) !void {
@@ -253,24 +253,22 @@ fn assertRevisionPairInvariant(
     defer testing.allocator.free(rebuilt_after);
     try testing.expectEqualStrings(after.body, rebuilt_after);
 
-    var patches = try patch_config.makePatch(testing.allocator, before.body, diff.edits);
-    defer dmp.deinitPatchList(testing.allocator, &patches);
-    try expectPatchUtf8(patches);
+    var patches = dmp.Patch.initOptions(patch_config);
+    defer patches.deinit(testing.allocator);
+    _ = try patches.make(testing.allocator, before.body, diff.edits);
+    try expectPatchUtf8(patches.hunks);
 
-    const patch_text = try dmp.patchToText(testing.allocator, patches);
+    const patch_text = try patches.toText(testing.allocator);
     defer testing.allocator.free(patch_text);
     try expectValidUtf8(patch_text);
 
-    var reparsed_patches = try dmp.patchFromText(testing.allocator, patch_text);
-    defer dmp.deinitPatchList(testing.allocator, &reparsed_patches);
-    try expectPatchUtf8(reparsed_patches);
-    try expectPatchesEqual(patches, reparsed_patches);
+    var reparsed_patches = dmp.Patch.init();
+    defer reparsed_patches.deinit(testing.allocator);
+    _ = try reparsed_patches.fromText(testing.allocator, patch_text);
+    try expectPatchUtf8(reparsed_patches.hunks);
+    try expectPatchesEqual(patches.hunks, reparsed_patches.hunks);
 
-    const patched_text, const success = try patch_config.patchApply(
-        testing.allocator,
-        &patches,
-        before.body,
-    );
+    const patched_text, const success = try patches.apply(testing.allocator, before.body);
     defer testing.allocator.free(patched_text);
     try testing.expect(success);
     try testing.expectEqualStrings(after.body, patched_text);
@@ -344,7 +342,7 @@ test "corpus revision pairs satisfy diff and patch invariants" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const diff_config: dmp.DiffConfig = .{ .check_line_threshold = 1024 * 1024, .timeout = 0 };
-    const patch_config: dmp = .{};
+    const patch_config: dmp.PatchConfig = .{};
 
     var fixtures = try loadCorpusFixtures(arena);
     defer fixtures.deinit();
