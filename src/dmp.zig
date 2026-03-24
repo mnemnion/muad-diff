@@ -46,7 +46,8 @@ pub const DiffConfig = struct {
     edit_cost: u16 = 4,
     /// If true, use the initial line-mode speedup when inputs are large enough.
     check_lines: bool = true,
-    /// Number of bytes in each string needed to trigger a line-based diff
+    /// Number of bytes in each string needed to trigger a line-based diff.
+    /// Ignored if check_lines is `false`.
     check_line_threshold: u32 = 100,
 };
 
@@ -74,6 +75,10 @@ pub const Diff = struct {
         self.edits = .empty;
     }
 
+    /// Find the differences between two texts.
+    /// @param before Old string to be diffed.
+    /// @param after New string to be diffed.
+    /// @return self.
     pub fn diff(
         self: *Diff,
         allocator: Allocator,
@@ -88,55 +93,82 @@ pub const Diff = struct {
         return self;
     }
 
+    /// Reduce the number of edits by eliminating semantically trivial
+    /// equalities.
+    /// @return self.
     pub fn cleanupSemantic(self: *Diff, allocator: Allocator) error{OutOfMemory}!*Diff {
         try diffCleanupSemantic(allocator, &self.edits);
         return self;
     }
 
+    /// Look for single edits surrounded on both sides by equalities
+    /// which can be shifted sideways to align the edit to a word boundary.
+    /// e.g: The c<ins>at c</ins>ame. -> The <ins>cat </ins>came.
+    /// @return self.
     pub fn cleanupSemanticLossless(self: *Diff, allocator: Allocator) error{OutOfMemory}!*Diff {
         try diffCleanupSemanticLossless(allocator, &self.edits);
         return self;
     }
 
+    /// Reduce the number of edits by eliminating operationally trivial
+    /// equalities.
+    /// @return self.
     pub fn cleanupEfficiency(self: *Diff, allocator: Allocator) error{OutOfMemory}!*Diff {
         try diffCleanupEfficiencyConfig(self.config, allocator, &self.edits);
         return self;
     }
 
+    /// Return text representing a pretty-formatted `Diff`.
+    /// See `DiffDecorations` for how to customize this output.
     pub fn prettyFormat(self: Diff, allocator: Allocator, deco: DiffDecorations) ![]const u8 {
         return try diffPrettyFormat(allocator, self.edits, deco);
     }
 
+    /// Write a pretty-formatted `Diff` to `writer`.  The `Allocator`
+    /// is only used if a custom text formatter is defined for
+    /// `DiffDecorations`.  Returns number of bytes written.
     pub fn writePrettyFormat(self: Diff, allocator: Allocator, writer: anytype, deco: DiffDecorations) !usize {
         return try writeDiffPrettyFormat(allocator, writer, self.edits, deco);
     }
 
+    ///
+    /// Compute and return the source text (all equalities and deletions).
+    /// @return Source text.
+    ///
     pub fn beforeText(self: Diff, allocator: Allocator) error{OutOfMemory}![]const u8 {
         return try diffBeforeText(allocator, self.edits);
     }
 
+    ///
+    /// Compute and return the destination text (all equalities and insertions).
+    /// @return Destination text.
+    ///
     pub fn afterText(self: Diff, allocator: Allocator) error{OutOfMemory}![]const u8 {
         return try diffAfterText(allocator, self.edits);
     }
 
+    ///
+    /// Compute the Levenshtein distance; the number of inserted,
+    /// deleted or substituted characters.
+    ///
+    /// @return Number of changes.
+    ///
     pub fn levenshtein(self: Diff) f64 {
         return diffLevenshtein(self.edits);
     }
 
+    /// loc is a location in text1, compute and return the equivalent location in
+    /// text2.
+    /// e.g. "The cat" vs "The big cat", 1->1, 5->8
+    /// @param loc Location within text1.
+    /// @return Location within text2.
+    ///
     pub fn index(self: Diff, loc: usize) usize {
         return diffIndex(self.edits, loc);
     }
 };
 
 //| Fields
-
-/// Number of milliseconds to map a diff before giving up (0 for infinity).
-diff_timeout: u64 = 1000,
-/// Cost of an empty edit operation in terms of edit characters.
-diff_edit_cost: u16 = 4,
-
-/// Number of bytes in each string needed to trigger a line-based diff
-diff_check_lines_over: u32 = 100,
 
 /// At what point is no match declared (0.0 = perfection, 1.0 = very loose).
 /// This defaults to 0.05, on the premise that the library will mostly be
@@ -179,6 +211,21 @@ fn cloneDiffList(allocator: Allocator, diffs: DiffList) !DiffList {
         new_diffs.appendAssumeCapacity(try d.clone(allocator));
     }
     return new_diffs;
+}
+
+/// Test helper.
+fn diffListFromConfig(
+    allocator: Allocator,
+    config: DiffConfig,
+    before: []const u8,
+    after: []const u8,
+) !DiffList {
+    var diff_obj = Diff.initOptions(config);
+    defer diff_obj.deinit(allocator);
+    _ = try diff_obj.diff(allocator, before, after);
+    const diffs = diff_obj.edits;
+    diff_obj.edits = .empty;
+    return diffs;
 }
 
 test "Diff lifecycle" {
@@ -393,36 +440,6 @@ pub const Hunk = struct {
 
 const PATCH_HEAD = "@@ -";
 const PATCH_TAIL = " @@\n";
-
-/// Find the differences between two texts.
-/// @param before Old string to be diffed.
-/// @param after New string to be diffed.
-/// @param checklines Speedup flag.  If false, then don't run a
-///     line-level diff first to identify the changed areas.
-///     If true, then run a faster slightly less optimal diff.
-/// @return List of Diff objects.
-pub fn diff(
-    dmp: DiffMatchPatch,
-    allocator: std.mem.Allocator,
-    before: []const u8,
-    after: []const u8,
-    /// If false, then don't run a line-level diff first
-    /// to identify the changed areas. If true, then run
-    /// a faster slightly less optimal diff.
-    check_lines: bool,
-) error{OutOfMemory}!DiffList {
-    var config = diffConfig(dmp);
-    config.check_lines = check_lines;
-    return diffWithConfig(config, allocator, before, after);
-}
-
-fn diffConfig(dmp: DiffMatchPatch) DiffConfig {
-    return .{
-        .timeout = dmp.diff_timeout,
-        .edit_cost = dmp.diff_edit_cost,
-        .check_line_threshold = dmp.diff_check_lines_over,
-    };
-}
 
 fn diffWithConfig(
     config: DiffConfig,
@@ -675,23 +692,6 @@ const HalfMatchResult = struct {
     }
 };
 
-/// Do the two texts share a Substring which is at least half the length of
-/// the longer text?
-/// This speedup can produce non-minimal diffs.
-/// @param before First string.
-/// @param after Second string.
-/// @return Five element String array, containing the prefix of text1, the
-///     suffix of text1, the prefix of text2, the suffix of text2 and the
-///     common middle.  Or null if there was no match.
-fn diffHalfMatch(
-    dmp: DiffMatchPatch,
-    allocator: std.mem.Allocator,
-    before: []const u8,
-    after: []const u8,
-) error{OutOfMemory}!?HalfMatchResult {
-    return diffHalfMatchConfig(diffConfig(dmp), allocator, before, after);
-}
-
 fn diffHalfMatchConfig(
     config: DiffConfig,
     allocator: std.mem.Allocator,
@@ -826,23 +826,6 @@ fn diffHalfMatchInternal(
     } else {
         return null;
     }
-}
-
-/// Find the 'middle snake' of a diff, split the problem in two
-/// and return the recursively constructed diff.
-/// See Myers 1986 paper: An O(ND) Difference Algorithm and Its Variations.
-/// @param before Old string to be diffed.
-/// @param after New string to be diffed.
-/// @param deadline Time at which to bail if not yet complete.
-/// @return List of Diff objects.
-fn diffBisect(
-    dmp: DiffMatchPatch,
-    allocator: std.mem.Allocator,
-    before: []const u8,
-    after: []const u8,
-    deadline: u64,
-) error{OutOfMemory}!DiffList {
-    return diffBisectConfig(diffConfig(dmp), allocator, before, after, deadline);
 }
 
 fn diffBisectConfig(
@@ -1873,16 +1856,6 @@ fn diffCleanupSemanticScore(one: []const u8, two: []const u8) usize {
     return 0;
 }
 
-/// Reduce the number of edits by eliminating operationally trivial
-/// equalities.
-pub fn diffCleanupEfficiency(
-    dmp: DiffMatchPatch,
-    allocator: std.mem.Allocator,
-    diffs: *DiffList,
-) error{OutOfMemory}!void {
-    return diffCleanupEfficiencyConfig(diffConfig(dmp), allocator, diffs);
-}
-
 fn diffCleanupEfficiencyConfig(
     config: DiffConfig,
     allocator: std.mem.Allocator,
@@ -2608,7 +2581,7 @@ pub fn diffAndMakePatch(
     text1: []const u8,
     text2: []const u8,
 ) error{OutOfMemory}!Patch {
-    var diff_obj = Diff.initOptions(diffConfig(dmp));
+    var diff_obj = Diff.init();
     defer diff_obj.deinit(allocator);
     diff_obj.config.check_lines = true;
     _ = try diff_obj.diff(allocator, text1, text2);
@@ -2896,7 +2869,7 @@ pub fn patchApply(
             } else {
                 // Imperfect match.  Run a diff to get a framework of equivalent
                 // indices.
-                var diff_obj = Diff.initOptions(diffConfig(dmp));
+                var diff_obj = Diff.init();
                 defer diff_obj.deinit(allocator);
                 diff_obj.config.check_lines = false;
                 _ = try diff_obj.diff(
@@ -3582,7 +3555,7 @@ test diffCommonOverlap {
 }
 
 const TestHalfMatch = struct {
-    dmp: DiffMatchPatch,
+    config: DiffConfig,
     before: []const u8,
     after: []const u8,
     expected: ?HalfMatchResult,
@@ -3592,16 +3565,16 @@ fn testDiffHalfMatch(
     allocator: std.mem.Allocator,
     params: TestHalfMatch,
 ) !void {
-    const maybe_result = try params.dmp.diffHalfMatch(allocator, params.before, params.after);
+    const maybe_result = try diffHalfMatchConfig(params.config, allocator, params.before, params.after);
     defer if (maybe_result) |result| result.deinit(allocator);
     try testing.expectEqualDeep(params.expected, maybe_result);
 }
 
 fn testdiffHalfMatchLeak(allocator: Allocator) !void {
-    const dmp = DiffMatchPatch{};
+    const config = DiffConfig{};
     const text1 = "The quick brown fox jumps over the lazy dog.";
     const text2 = "That quick brown fox jumped over a lazy dog.";
-    var diffs = try dmp.diff(allocator, text2, text1, true);
+    var diffs = try diffListFromConfig(allocator, config, text2, text1);
     deinitDiffList(allocator, &diffs);
 }
 
@@ -3609,12 +3582,12 @@ test "diffHalfMatch leak regression test" {
     try testing.checkAllAllocationFailures(testing.allocator, testdiffHalfMatchLeak, .{});
 }
 
-test diffHalfMatch {
-    const one_timeout: DiffMatchPatch = .{ .diff_timeout = 1 };
+test "diffHalfMatch" {
+    const one_timeout: DiffConfig = .{ .timeout = 1 };
 
     // No match #1
     try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
-        .dmp = one_timeout,
+        .config = one_timeout,
         .before = "1234567890",
         .after = "abcdef",
         .expected = null,
@@ -3622,7 +3595,7 @@ test diffHalfMatch {
 
     // No match #2
     try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
-        .dmp = one_timeout,
+        .config = one_timeout,
         .before = "12345",
         .after = "23",
         .expected = null,
@@ -3630,7 +3603,7 @@ test diffHalfMatch {
 
     // Single matches
     try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
-        .dmp = one_timeout,
+        .config = one_timeout,
         .before = "1234567890",
         .after = "a345678z",
         .expected = .{
@@ -3644,7 +3617,7 @@ test diffHalfMatch {
 
     // Single Match #2
     try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
-        .dmp = one_timeout,
+        .config = one_timeout,
         .before = "a345678z",
         .after = "1234567890",
         .expected = .{
@@ -3658,7 +3631,7 @@ test diffHalfMatch {
 
     // Single Match #3
     try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
-        .dmp = one_timeout,
+        .config = one_timeout,
         .before = "abc56789z",
         .after = "1234567890",
         .expected = .{
@@ -3672,7 +3645,7 @@ test diffHalfMatch {
 
     // Single Match #4
     try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
-        .dmp = one_timeout,
+        .config = one_timeout,
         .before = "a23456xyz",
         .after = "1234567890",
         .expected = .{
@@ -3686,7 +3659,7 @@ test diffHalfMatch {
 
     // Multiple matches #1
     try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
-        .dmp = one_timeout,
+        .config = one_timeout,
         .before = "121231234123451234123121",
         .after = "a1234123451234z",
         .expected = .{
@@ -3700,7 +3673,7 @@ test diffHalfMatch {
 
     // Multiple Matches #2
     try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
-        .dmp = one_timeout,
+        .config = one_timeout,
         .before = "x-=-=-=-=-=-=-=-=-=-=-=-=",
         .after = "xx-=-=-=-=-=-=-=",
         .expected = .{
@@ -3714,7 +3687,7 @@ test diffHalfMatch {
 
     // Multiple Matches #3
     try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
-        .dmp = one_timeout,
+        .config = one_timeout,
         .before = "-=-=-=-=-=-=-=-=-=-=-=-=y",
         .after = "-=-=-=-=-=-=-=yy",
         .expected = .{
@@ -3731,7 +3704,7 @@ test diffHalfMatch {
     // Optimal diff would be -q+x=H-i+e=lloHe+Hu=llo-Hew+y not -qHillo+x=HelloHe-w+Hulloy
     // Non-optimal halfmatch
     try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
-        .dmp = one_timeout,
+        .config = one_timeout,
         .before = "qHilloHelloHew",
         .after = "xHelloHeHulloy",
         .expected = .{
@@ -3745,7 +3718,7 @@ test diffHalfMatch {
 
     // Non-optimal halfmatch
     try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
-        .dmp = .{ .diff_timeout = 0 },
+        .config = .{ .timeout = 0 },
         .before = "qHilloHelloHew",
         .after = "xHelloHeHulloy",
         .expected = null,
@@ -4292,7 +4265,7 @@ test rebuildtexts {
 }
 
 const TBisect = struct {
-    dmp: DiffMatchPatch,
+    config: DiffConfig,
     before: []const u8,
     after: []const u8,
     deadline: u64,
@@ -4303,20 +4276,20 @@ fn testDiffBisect(
     allocator: std.mem.Allocator,
     params: TBisect,
 ) !void {
-    var diffs = try params.dmp.diffBisect(allocator, params.before, params.after, params.deadline);
+    var diffs = try diffBisectConfig(params.config, allocator, params.before, params.after, params.deadline);
     defer deinitDiffList(allocator, &diffs);
     try testing.expectEqualDeep(params.expected, diffs.items);
 }
 
-test diffBisect {
-    const this: DiffMatchPatch = .{ .diff_timeout = 0 };
+test "diffBisect" {
+    const config: DiffConfig = .{ .timeout = 0 };
 
     const a = "cat";
     const b = "map";
 
     // Normal
     try testing.checkAllAllocationFailures(testing.allocator, testDiffBisect, .{TBisect{
-        .dmp = this,
+        .config = config,
         .before = a,
         .after = b,
         // std.time returns an i64
@@ -4332,7 +4305,7 @@ test diffBisect {
 
     // Timeout
     try testing.checkAllAllocationFailures(testing.allocator, testDiffBisect, .{TBisect{
-        .dmp = this,
+        .config = config,
         .before = a,
         .after = b,
         .deadline = 0, // Do not run prior to 1970
@@ -4344,10 +4317,9 @@ test diffBisect {
 }
 
 const TDiff = struct {
-    dmp: DiffMatchPatch,
+    config: DiffConfig,
     before: []const u8,
     after: []const u8,
-    check_lines: bool,
     expected: []const Edit,
 };
 
@@ -4355,29 +4327,27 @@ fn testDiff(
     allocator: std.mem.Allocator,
     params: TDiff,
 ) !void {
-    var diffs = try params.dmp.diff(allocator, params.before, params.after, params.check_lines);
+    var diffs = try diffListFromConfig(allocator, params.config, params.before, params.after);
     defer deinitDiffList(allocator, &diffs);
     try testing.expectEqualDeep(params.expected, diffs.items);
 }
 
-test diff {
-    const dmp: DiffMatchPatch = .{ .diff_timeout = 0 };
+test "diff" {
+    const config: DiffConfig = .{ .timeout = 0, .check_lines = false };
 
     //  Null case.
     try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
-        .dmp = dmp,
+        .config = config,
         .before = "",
         .after = "",
-        .check_lines = false,
         .expected = &[_]Edit{},
     }});
 
     //  Equality.
     try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
-        .dmp = dmp,
+        .config = config,
         .before = "abc",
         .after = "abc",
-        .check_lines = false,
         .expected = &.{
             .{ .operation = .equal, .text = "abc" },
         },
@@ -4385,10 +4355,9 @@ test diff {
 
     // Simple insertion.
     try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
-        .dmp = dmp,
+        .config = config,
         .before = "abc",
         .after = "ab123c",
-        .check_lines = false,
         .expected = &.{
             .{ .operation = .equal, .text = "ab" },
             .{ .operation = .insert, .text = "123" },
@@ -4398,10 +4367,9 @@ test diff {
 
     // Simple deletion.
     try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
-        .dmp = dmp,
+        .config = config,
         .before = "a123bc",
         .after = "abc",
-        .check_lines = false,
         .expected = &.{
             .{ .operation = .equal, .text = "a" },
             .{ .operation = .delete, .text = "123" },
@@ -4411,10 +4379,9 @@ test diff {
 
     // Two insertions.
     try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
-        .dmp = dmp,
+        .config = config,
         .before = "abc",
         .after = "a123b456c",
-        .check_lines = false,
         .expected = &.{
             .{ .operation = .equal, .text = "a" },
             .{ .operation = .insert, .text = "123" },
@@ -4426,10 +4393,9 @@ test diff {
 
     // Two deletions.
     try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
-        .dmp = dmp,
+        .config = config,
         .before = "a123b456c",
         .after = "abc",
-        .check_lines = false,
         .expected = &.{
             .{ .operation = .equal, .text = "a" },
             .{ .operation = .delete, .text = "123" },
@@ -4441,10 +4407,9 @@ test diff {
 
     // Simple case #1
     try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
-        .dmp = dmp,
+        .config = config,
         .before = "a",
         .after = "b",
-        .check_lines = false,
         .expected = &.{
             .{ .operation = .delete, .text = "a" },
             .{ .operation = .insert, .text = "b" },
@@ -4453,10 +4418,9 @@ test diff {
 
     // Simple case #2
     try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
-        .dmp = dmp,
+        .config = config,
         .before = "Apples are a fruit.",
         .after = "Bananas are also fruit.",
-        .check_lines = false,
         .expected = &.{
             .{ .operation = .delete, .text = "Apple" },
             .{ .operation = .insert, .text = "Banana" },
@@ -4468,10 +4432,9 @@ test diff {
 
     // Simple case #3
     try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
-        .dmp = dmp,
+        .config = config,
         .before = "ax\t",
         .after = "\u{0680}x\x00",
-        .check_lines = false,
         .expected = &.{
             .{ .operation = .delete, .text = "a" },
             .{ .operation = .insert, .text = "\u{0680}" },
@@ -4483,10 +4446,9 @@ test diff {
 
     // Overlap #1
     try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
-        .dmp = dmp,
+        .config = config,
         .before = "1ayb2",
         .after = "abxab",
-        .check_lines = false,
         .expected = &.{
             .{ .operation = .delete, .text = "1" },
             .{ .operation = .equal, .text = "a" },
@@ -4499,10 +4461,9 @@ test diff {
 
     // Overlap #2
     try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
-        .dmp = dmp,
+        .config = config,
         .before = "abcy",
         .after = "xaxcxabc",
-        .check_lines = false,
         .expected = &.{
             .{ .operation = .insert, .text = "xaxcx" },
             .{ .operation = .equal, .text = "abc" },
@@ -4512,10 +4473,9 @@ test diff {
 
     // Overlap #3
     try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
-        .dmp = dmp,
+        .config = config,
         .before = "ABCDa=bcd=efghijklmnopqrsEFGHIJKLMNOefg",
         .after = "a-bcd-efghijklmnopqrs",
-        .check_lines = false,
         .expected = &.{
             .{ .operation = .delete, .text = "ABCD" },
             .{ .operation = .equal, .text = "a" },
@@ -4531,10 +4491,9 @@ test diff {
 
     // Large equality
     try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
-        .dmp = dmp,
+        .config = config,
         .before = "a [[Pennsylvania]] and [[New",
         .after = " and [[Pennsylvania]]",
-        .check_lines = false,
         .expected = &.{
             .{ .operation = .insert, .text = " " },
             .{ .operation = .equal, .text = "a" },
@@ -4552,51 +4511,52 @@ test diff {
         const a = "`Twas brillig, and the slithy toves\nDid gyre and gimble in the wabe:\nAll mimsy were the borogoves,\nAnd the mome raths outgrabe.\n" ** 1024;
         const b = "I am the very model of a modern major general,\nI've information vegetable, animal, and mineral,\nI know the kings of England, and I quote the fights historical,\nFrom Marathon to Waterloo, in order categorical.\n" ** 1024;
 
-        const with_timout: DiffMatchPatch = .{
-            .diff_timeout = 100, // 100ms
-        };
-
+        const with_timeout: DiffConfig = .{ .timeout = 100, .check_lines = false };
         const start_time = std.time.milliTimestamp();
         {
-            var time_diff = try with_timout.diff(allocator, a, b, false);
+            var time_diff = try diffListFromConfig(allocator, with_timeout, a, b);
             defer deinitDiffList(allocator, &time_diff);
         }
         const end_time = std.time.milliTimestamp();
 
         // Test that we took at least the timeout period.
-        try testing.expect(with_timout.diff_timeout <= end_time - start_time); // diff: Timeout min.
+        try testing.expect(with_timeout.timeout <= end_time - start_time); // diff: Timeout min.
         // Test that we didn't take forever (be forgiving).
         // Theoretically this test could fail very occasionally if the
         // OS task swaps or locks up for a second at the wrong moment.
-        try testing.expect((with_timout.diff_timeout) * 10000 * 2 > end_time - start_time); // diff: Timeout max.
+        try testing.expect((with_timeout.timeout) * 10000 * 2 > end_time - start_time); // diff: Timeout max.
     }
 }
 
 fn testDiffLineMode(
     allocator: Allocator,
-    dmp: *DiffMatchPatch,
+    threshold: u32,
     before: []const u8,
     after: []const u8,
 ) !void {
-    dmp.diff_check_lines_over = 20;
-    var diff_checked = try dmp.diff(allocator, before, after, true);
+    const checked_config: DiffConfig = .{
+        .timeout = 0,
+        .check_lines = true,
+        .check_line_threshold = threshold,
+    };
+    var diff_checked = try diffListFromConfig(allocator, checked_config, before, after);
     defer deinitDiffList(allocator, &diff_checked);
 
-    var diff_unchecked = try dmp.diff(allocator, before, after, false);
+    var unchecked_config = checked_config;
+    unchecked_config.check_lines = false;
+    var diff_unchecked = try diffListFromConfig(allocator, unchecked_config, before, after);
     defer deinitDiffList(allocator, &diff_unchecked);
 
     try testing.expectEqualDeep(diff_checked.items, diff_unchecked.items); // diff: Simple line-mode.
-    dmp.diff_check_lines_over = 100;
 }
 
 test "diffLineMode" {
-    var dmp: DiffMatchPatch = .{ .diff_timeout = 0 };
     const allocator = testing.allocator;
     try testing.checkAllAllocationFailures(
         testing.allocator,
         testDiffLineMode,
         .{
-            &dmp,
+            @as(u32, 20),
             "1234567890\n1234567890\n1234567890",
             "abcdefghij\nabcdefghij\nabcdefghij",
         },
@@ -4606,10 +4566,17 @@ test "diffLineMode" {
         const a = "1234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890";
         const b = "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij";
 
-        var diff_checked = try dmp.diff(allocator, a, b, true);
+        const checked_config: DiffConfig = .{
+            .timeout = 0,
+            .check_lines = true,
+            .check_line_threshold = 100,
+        };
+        var diff_checked = try diffListFromConfig(allocator, checked_config, a, b);
         defer deinitDiffList(allocator, &diff_checked);
 
-        var diff_unchecked = try dmp.diff(allocator, a, b, false);
+        var unchecked_config = checked_config;
+        unchecked_config.check_lines = false;
+        var diff_unchecked = try diffListFromConfig(allocator, unchecked_config, a, b);
         defer deinitDiffList(allocator, &diff_unchecked);
 
         try testing.expectEqualDeep(diff_checked.items, diff_unchecked.items); // diff: Single line-mode.
@@ -4620,7 +4587,12 @@ test "diffLineMode" {
         const a = "1234567890\n1234567890\n1234567890\n1234567890\n1234567890\n1234567890\n1234567890\n1234567890\n1234567890\n1234567890\n1234567890\n1234567890\n1234567890\n";
         const b = "abcdefghij\n1234567890\n1234567890\n1234567890\nabcdefghij\n1234567890\n1234567890\n1234567890\nabcdefghij\n1234567890\n1234567890\n1234567890\nabcdefghij\n";
 
-        var diffs_linemode = try dmp.diff(allocator, a, b, true);
+        const checked_config: DiffConfig = .{
+            .timeout = 0,
+            .check_lines = true,
+            .check_line_threshold = 100,
+        };
+        var diffs_linemode = try diffListFromConfig(allocator, checked_config, a, b);
         defer deinitDiffList(allocator, &diffs_linemode);
 
         const texts_linemode = try rebuildtexts(allocator, diffs_linemode);
@@ -4629,7 +4601,9 @@ test "diffLineMode" {
             allocator.free(texts_linemode[1]);
         }
 
-        var diffs_textmode = try dmp.diff(allocator, a, b, false);
+        var unchecked_config = checked_config;
+        unchecked_config.check_lines = false;
+        var diffs_textmode = try diffListFromConfig(allocator, unchecked_config, a, b);
         defer deinitDiffList(allocator, &diffs_textmode);
 
         const texts_textmode = try rebuildtexts(allocator, diffs_textmode);
@@ -4644,7 +4618,7 @@ test "diffLineMode" {
 }
 
 /// Round-trip a diff, confirming that the result matches the original.
-fn diffRoundTrip(allocator: Allocator, dmp: DiffMatchPatch, diff_slice: []const Edit) !void {
+fn diffRoundTrip(allocator: Allocator, config: DiffConfig, diff_slice: []const Edit) !void {
     var diffs_before = try DiffList.initCapacity(allocator, diff_slice.len);
     defer deinitDiffList(allocator, &diffs_before);
     for (diff_slice) |item| {
@@ -4654,7 +4628,7 @@ fn diffRoundTrip(allocator: Allocator, dmp: DiffMatchPatch, diff_slice: []const 
     defer allocator.free(text_before);
     const text_after = try diffAfterText(allocator, diffs_before);
     defer allocator.free(text_after);
-    var diffs_after = try dmp.diff(allocator, text_before, text_after, false);
+    var diffs_after = try diffListFromConfig(allocator, config, text_before, text_after);
     defer deinitDiffList(allocator, &diffs_after);
     // Should change nothing:
     try diffCleanupSemantic(allocator, &diffs_after);
@@ -4663,15 +4637,10 @@ fn diffRoundTrip(allocator: Allocator, dmp: DiffMatchPatch, diff_slice: []const 
 
 test "Unicode diffs" {
     const allocator = std.testing.allocator;
-    var dmp = DiffMatchPatch{};
-    dmp.diff_timeout = 0;
+    const config: DiffConfig = .{ .timeout = 0, .check_lines = false };
+    const roundtrip_config: DiffConfig = .{ .timeout = 0, .check_lines = false };
     {
-        var greek_diff = try dmp.diff(
-            allocator,
-            "αβγ",
-            "αβδ",
-            false,
-        );
+        var greek_diff = try diffListFromConfig(allocator, config, "αβγ", "αβδ");
         defer deinitDiffList(allocator, &greek_diff);
         try testing.expectEqualDeep(@as([]const Edit, &.{
             Edit.init(.equal, "αβ"),
@@ -4681,12 +4650,7 @@ test "Unicode diffs" {
     }
     {
         // ө is 0xd3, 0xa9, թ is 0xd6, 0xa9
-        var prefix_diff = try dmp.diff(
-            allocator,
-            "abө",
-            "abթ",
-            false,
-        );
+        var prefix_diff = try diffListFromConfig(allocator, config, "abө", "abթ");
         defer deinitDiffList(allocator, &prefix_diff);
         try testing.expectEqualDeep(@as([]const Edit, &.{
             Edit.init(.equal, "ab"),
@@ -4695,12 +4659,7 @@ test "Unicode diffs" {
         }), prefix_diff.items);
     }
     {
-        var mid_diff = try dmp.diff(
-            allocator,
-            "αөβ",
-            "αթβ",
-            false,
-        );
+        var mid_diff = try diffListFromConfig(allocator, config, "αөβ", "αթβ");
         defer deinitDiffList(allocator, &mid_diff);
         try testing.expectEqualDeep(@as([]const Edit, &.{
             Edit.init(.equal, "α"),
@@ -4710,12 +4669,7 @@ test "Unicode diffs" {
         }), mid_diff.items);
     }
     {
-        var mid_prefix = try dmp.diff(
-            allocator,
-            "αβλ",
-            "αδλ",
-            false,
-        );
+        var mid_prefix = try diffListFromConfig(allocator, config, "αβλ", "αδλ");
         defer deinitDiffList(allocator, &mid_prefix);
         try testing.expectEqualDeep(@as([]const Edit, &.{
             Edit.init(.equal, "α"),
@@ -4729,7 +4683,7 @@ test "Unicode diffs" {
             allocator,
             diffRoundTrip,
             .{
-                dmp, &.{
+                roundtrip_config, &.{
                     Edit{ .operation = .equal, .text = "三亥" },
                     Edit{ .operation = .delete, .text = "两" },
                     Edit{ .operation = .insert, .text = "临" },
@@ -4742,7 +4696,7 @@ test "Unicode diffs" {
             allocator,
             diffRoundTrip,
             .{
-                dmp, &.{
+                roundtrip_config, &.{
                     Edit{ .operation = .equal, .text = "三亥" },
                     Edit{ .operation = .delete, .text = "两" },
                     Edit{ .operation = .insert, .text = "乤" },
@@ -4755,7 +4709,7 @@ test "Unicode diffs" {
             allocator,
             diffRoundTrip,
             .{
-                dmp, &.{
+                roundtrip_config, &.{
                     Edit{ .operation = .equal, .text = "三亥" },
                     Edit{ .operation = .delete, .text = "两" },
                     Edit{ .operation = .insert, .text = "帤" },
@@ -4768,7 +4722,7 @@ test "Unicode diffs" {
             allocator,
             diffRoundTrip,
             .{
-                dmp, &.{
+                roundtrip_config, &.{
                     Edit{ .operation = .equal, .text = "三" },
                     Edit{ .operation = .delete, .text = "两" },
                     Edit{ .operation = .insert, .text = "帤" },
@@ -4782,7 +4736,7 @@ test "Unicode diffs" {
             allocator,
             diffRoundTrip,
             .{
-                dmp, &.{
+                roundtrip_config, &.{
                     Edit{ .operation = .equal, .text = "三" },
                     Edit{ .operation = .delete, .text = "两" },
                     Edit{ .operation = .insert, .text = "乤" },
@@ -4796,7 +4750,7 @@ test "Unicode diffs" {
             allocator,
             diffRoundTrip,
             .{
-                dmp, &.{
+                roundtrip_config, &.{
                     Edit{ .operation = .equal, .text = "三" },
                     Edit{ .operation = .delete, .text = "两" },
                     Edit{ .operation = .insert, .text = "临" },
@@ -4810,7 +4764,7 @@ test "Unicode diffs" {
             allocator,
             diffRoundTrip,
             .{
-                dmp, &.{
+                roundtrip_config, &.{
                     Edit{ .operation = .delete, .text = "两" },
                     Edit{ .operation = .insert, .text = "临" },
                     Edit{ .operation = .equal, .text = "三亥" },
@@ -4823,7 +4777,7 @@ test "Unicode diffs" {
             allocator,
             diffRoundTrip,
             .{
-                dmp, &.{
+                roundtrip_config, &.{
                     Edit{ .operation = .delete, .text = "两" },
                     Edit{ .operation = .insert, .text = "乤" },
                     Edit{ .operation = .equal, .text = "三亥" },
@@ -4836,7 +4790,7 @@ test "Unicode diffs" {
             allocator,
             diffRoundTrip,
             .{
-                dmp, &.{
+                roundtrip_config, &.{
                     Edit{ .operation = .delete, .text = "两" },
                     Edit{ .operation = .insert, .text = "帤" },
                     Edit{ .operation = .equal, .text = "三亥" },
@@ -4849,7 +4803,7 @@ test "Unicode diffs" {
             allocator,
             diffRoundTrip,
             .{
-                dmp, &.{
+                roundtrip_config, &.{
                     Edit{ .operation = .equal, .text = "三" },
                     Edit{ .operation = .delete, .text = "临" },
                     Edit{ .operation = .insert, .text = "丿" },
@@ -4863,7 +4817,7 @@ test "Unicode diffs" {
             allocator,
             diffRoundTrip,
             .{
-                dmp, &.{
+                roundtrip_config, &.{
                     Edit{ .operation = .equal, .text = "😹💋" },
                     Edit{ .operation = .delete, .text = "\xf0\x9f\xa5\xb9" },
                     Edit{ .operation = .insert, .text = "丿" },
@@ -4877,7 +4831,7 @@ test "Unicode diffs" {
             allocator,
             diffRoundTrip,
             .{
-                dmp, &.{
+                roundtrip_config, &.{
                     Edit{ .operation = .equal, .text = "😹💋" },
                     Edit{ .operation = .delete, .text = "\xf0\x9f\xa5\xb9" },
                     Edit{ .operation = .insert, .text = "\xf1\x9f\xa5\xb9" },
@@ -4891,7 +4845,7 @@ test "Unicode diffs" {
             allocator,
             diffRoundTrip,
             .{
-                dmp, &.{
+                roundtrip_config, &.{
                     Edit{ .operation = .equal, .text = "😹💋" },
                     Edit{ .operation = .delete, .text = "\xf0\x9f\xa5\xb9" },
                     Edit{ .operation = .insert, .text = "\xf0\xa0\xa5\xb9" },
@@ -4905,7 +4859,7 @@ test "Unicode diffs" {
             allocator,
             diffRoundTrip,
             .{
-                dmp, &.{
+                roundtrip_config, &.{
                     Edit{ .operation = .equal, .text = "😹💋" },
                     Edit{ .operation = .delete, .text = "\xf0\x9f\xa5\xb9" },
                     Edit{ .operation = .insert, .text = "\xf0\x9f\xa4\xb9" },
@@ -4919,7 +4873,7 @@ test "Unicode diffs" {
             allocator,
             diffRoundTrip,
             .{
-                dmp, &.{
+                roundtrip_config, &.{
                     Edit{ .operation = .equal, .text = "😹💋" },
                     Edit{ .operation = .delete, .text = "\xf0\x9f\xa5\xb9" },
                     Edit{ .operation = .insert, .text = "\xf0\x9f\xa5\xb4" },
@@ -4931,7 +4885,7 @@ test "Unicode diffs" {
     {
         const before = "<r>red</r> <t></t><b>blue</b><t> </t><g>green</g><t></t> <y>yellow</y>";
         const after = "<r>red</r>♦︎ <b>blue</b>♦︎<t>∅ </t><g>green</g>♦︎<t>∅</t>♦︎ <y>yellow</y>";
-        var diffs = try dmp.diff(allocator, before, after, false);
+        var diffs = try diffListFromConfig(allocator, config, before, after);
         defer deinitDiffList(allocator, &diffs);
         const before_2 = try diffBeforeText(allocator, diffs);
         defer allocator.free(before_2);
@@ -5132,7 +5086,7 @@ test diffCleanupSemantic {
 
 fn testDiffCleanupEfficiency(
     allocator: Allocator,
-    dmp: DiffMatchPatch,
+    config: DiffConfig,
     params: TestIO,
 ) !void {
     var diffs = try DiffList.initCapacity(allocator, params.input.len);
@@ -5140,18 +5094,17 @@ fn testDiffCleanupEfficiency(
     for (params.input) |item| {
         diffs.appendAssumeCapacity(.{ .operation = item.operation, .text = try allocator.dupe(u8, item.text) });
     }
-    try dmp.diffCleanupEfficiency(allocator, &diffs);
+    try diffCleanupEfficiencyConfig(config, allocator, &diffs);
 
     try testing.expectEqualDeep(params.expected, diffs.items);
 }
 
-test diffCleanupEfficiency {
+test "diffCleanupEfficiency" {
     const allocator = testing.allocator;
-    var dmp = DiffMatchPatch{};
-    dmp.diff_edit_cost = 4;
+    var config: DiffConfig = .{ .edit_cost = 4 };
     { // Null case.
         var diffs: DiffList = .empty;
-        try dmp.diffCleanupEfficiency(allocator, &diffs);
+        try diffCleanupEfficiencyConfig(config, allocator, &diffs);
         try testing.expectEqualDeep(DiffList.empty, diffs);
     }
     { // No elimination.
@@ -5166,7 +5119,7 @@ test diffCleanupEfficiency {
             testing.allocator,
             testDiffCleanupEfficiency,
             .{
-                dmp,
+                config,
                 TestIO{ .input = dslice, .expected = dslice },
             },
         );
@@ -5187,7 +5140,7 @@ test diffCleanupEfficiency {
             testing.allocator,
             testDiffCleanupEfficiency,
             .{
-                dmp,
+                config,
                 TestIO{ .input = dslice, .expected = d_after },
             },
         );
@@ -5207,7 +5160,7 @@ test diffCleanupEfficiency {
             testing.allocator,
             testDiffCleanupEfficiency,
             .{
-                dmp,
+                config,
                 TestIO{ .input = dslice, .expected = d_after },
             },
         );
@@ -5230,13 +5183,13 @@ test diffCleanupEfficiency {
             testing.allocator,
             testDiffCleanupEfficiency,
             .{
-                dmp,
+                config,
                 TestIO{ .input = dslice, .expected = d_after },
             },
         );
     }
     { // High cost elimination.
-        dmp.diff_edit_cost = 5;
+        config.edit_cost = 5;
         const dslice: []const Edit = &.{
             .{ .operation = .delete, .text = "ab" },
             .{ .operation = .insert, .text = "12" },
@@ -5252,20 +5205,20 @@ test diffCleanupEfficiency {
             testing.allocator,
             testDiffCleanupEfficiency,
             .{
-                dmp,
+                config,
                 TestIO{ .input = dslice, .expected = d_after },
             },
         );
-        dmp.diff_edit_cost = 4;
+        config.edit_cost = 4;
     }
 }
 
 test "diff before and after text" {
-    const dmp = DiffMatchPatch{};
+    const config: DiffConfig = .{ .check_lines = false };
     const allocator = testing.allocator;
     const before = "The cat in the hat.";
     const after = "The bat in the belfry.";
-    var diffs = try dmp.diff(allocator, before, after, false);
+    var diffs = try diffListFromConfig(allocator, config, before, after);
     defer deinitDiffList(allocator, &diffs);
     const before1 = try diffBeforeText(allocator, diffs);
     defer allocator.free(before1);
@@ -5276,25 +5229,15 @@ test "diff before and after text" {
 }
 
 test diffIndex {
-    const dmp = DiffMatchPatch{};
+    const config: DiffConfig = .{ .check_lines = false };
     {
-        var diffs = try dmp.diff(
-            testing.allocator,
-            "The midnight train",
-            "The blue midnight train",
-            false,
-        );
+        var diffs = try diffListFromConfig(testing.allocator, config, "The midnight train", "The blue midnight train");
         defer deinitDiffList(testing.allocator, &diffs);
         try testing.expectEqual(0, diffIndex(diffs, 0));
         try testing.expectEqual(9, diffIndex(diffs, 4));
     }
     {
-        var diffs = try dmp.diff(
-            testing.allocator,
-            "Better still to live and learn",
-            "Better yet to learn and live",
-            false,
-        );
+        var diffs = try diffListFromConfig(testing.allocator, config, "Better still to live and learn", "Better yet to learn and live");
         defer deinitDiffList(testing.allocator, &diffs);
         try testing.expectEqual(11, diffIndex(diffs, 13));
         try testing.expectEqual(20, diffIndex(diffs, 21));
@@ -5310,14 +5253,9 @@ test diffPrettyFormat {
         .equals_start = "<=>",
         .equals_end = "</=>",
     };
-    const dmp = DiffMatchPatch{};
+    const config: DiffConfig = .{ .check_lines = false };
     const allocator = std.testing.allocator;
-    var diffs = try dmp.diff(
-        allocator,
-        "A thing of beauty is a joy forever",
-        "Singular beauty is enjoyed forever",
-        false,
-    );
+    var diffs = try diffListFromConfig(allocator, config, "A thing of beauty is a joy forever", "Singular beauty is enjoyed forever");
     defer deinitDiffList(allocator, &diffs);
     try diffCleanupSemantic(allocator, &diffs);
     const out_text = try diffPrettyFormat(allocator, diffs, test_deco);
@@ -5943,7 +5881,8 @@ fn testMakePatch(allocator: Allocator) !void {
         const patch_text = try patchToText(allocator, patches);
         defer allocator.free(patch_text);
         try testing.expectEqualStrings(expectedPatch, patch_text);
-        var diffs = try dmp.diff(allocator, text1, text2, false);
+        const config: DiffConfig = .{ .check_lines = false };
+        var diffs = try diffListFromConfig(allocator, config, text1, text2);
         defer deinitDiffList(allocator, &diffs);
         var patches2 = try dmp.makePatch(allocator, text1, diffs);
         defer deinitPatchList(allocator, &patches2);
