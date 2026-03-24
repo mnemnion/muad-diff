@@ -1,0 +1,19 @@
+---
+origin = "synthetic"
+article_slug = "emoji-evolution"
+language = "emoji"
+title = "Emoji evolution"
+revid = 900004
+parentid = 900003
+timestamp = "2024-01-04T00:00:00Z"
+user = "fixture-bot"
+comment = "introduce CJK and astral pairings"
+size = 133
+minor = false
+---
+== Emoji log ==
+😀 starts the page.
+Rocket: 🚀
+Sparkles: ✨
+Greek: αλφα 😄
+Kanji: 漢字 🧠

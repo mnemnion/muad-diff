@@ -1,0 +1,18 @@
+---
+origin = "synthetic"
+article_slug = "emoji-evolution"
+language = "emoji"
+title = "Emoji evolution"
+revid = 900003
+parentid = 900002
+timestamp = "2024-01-03T00:00:00Z"
+user = "fixture-bot"
+comment = "mix scripts and emoji"
+size = 106
+minor = false
+---
+== Emoji log ==
+😀 starts the page.
+Rocket: 🚀
+Sparkles: ✨
+Greek: αλφα 😄

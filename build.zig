@@ -42,6 +42,19 @@ pub fn build(b: *std.Build) void {
 
     const run_module_unit_tests = b.addRunArtifact(module_unit_tests);
 
+    const corpus_tests_module = b.createModule(.{
+        .root_source_file = b.path("src/corpus_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const corpus_unit_tests = b.addTest(.{
+        .root_module = corpus_tests_module,
+        .filters = test_filters,
+    });
+
+    const run_corpus_unit_tests = b.addRunArtifact(corpus_unit_tests);
+
     // const exe_unit_tests = b.addTest(.{
     //     .root_source_file = b.path("src/main.zig"),
     //     .target = target,
@@ -56,6 +69,20 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_module_unit_tests.step);
 
     // test_step.dependOn(&run_exe_unit_tests.step);
+
+    const corpus_step = b.step("corpus", "Run offline corpus-backed tests");
+    corpus_step.dependOn(&run_corpus_unit_tests.step);
+
+    const refresh_corpus = b.addSystemCommand(&.{
+        "/Users/atman/Dropbox/deck/m/skills/.venv/bin/python",
+    });
+    refresh_corpus.addFileArg(b.path("tools/refresh_corpus.py"));
+
+    const refresh_corpus_step = b.step(
+        "refresh-corpus",
+        "Refresh checked-in Wikipedia corpus fixtures",
+    );
+    refresh_corpus_step.dependOn(&refresh_corpus.step);
 
     const run_kcov = b.addSystemCommand(&.{
         "kcov",
