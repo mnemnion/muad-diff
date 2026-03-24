@@ -235,23 +235,25 @@ fn expectPatchesEqual(expected: dmp.Patch, actual: dmp.Patch) !void {
 }
 
 fn assertRevisionPairInvariant(
-    diff_match_patch: dmp,
+    diff_config: dmp.DiffConfig,
+    patch_config: dmp,
     before: RevisionFixture,
     after: RevisionFixture,
 ) !void {
-    var diffs = try diff_match_patch.diff(testing.allocator, before.body, after.body, true);
-    defer dmp.deinitDiffList(testing.allocator, &diffs);
-    try expectDiffListUtf8(diffs);
+    var diff = dmp.Diff.initOptions(diff_config);
+    defer diff.deinit(testing.allocator);
+    _ = try diff.diff(testing.allocator, before.body, after.body);
+    try expectDiffListUtf8(diff.edits);
 
-    const rebuilt_before = try dmp.diffBeforeText(testing.allocator, diffs);
+    const rebuilt_before = try diff.beforeText(testing.allocator);
     defer testing.allocator.free(rebuilt_before);
     try testing.expectEqualStrings(before.body, rebuilt_before);
 
-    const rebuilt_after = try dmp.diffAfterText(testing.allocator, diffs);
+    const rebuilt_after = try diff.afterText(testing.allocator);
     defer testing.allocator.free(rebuilt_after);
     try testing.expectEqualStrings(after.body, rebuilt_after);
 
-    var patches = try diff_match_patch.makePatch(testing.allocator, before.body, diffs);
+    var patches = try patch_config.makePatch(testing.allocator, before.body, diff.edits);
     defer dmp.deinitPatchList(testing.allocator, &patches);
     try expectPatchUtf8(patches);
 
@@ -264,7 +266,7 @@ fn assertRevisionPairInvariant(
     try expectPatchUtf8(reparsed_patches);
     try expectPatchesEqual(patches, reparsed_patches);
 
-    const patched_text, const success = try diff_match_patch.patchApply(
+    const patched_text, const success = try patch_config.patchApply(
         testing.allocator,
         &patches,
         before.body,
@@ -341,7 +343,8 @@ test "corpus revision pairs satisfy diff and patch invariants" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const diff_match_patch = dmp.default;
+    const diff_config: dmp.DiffConfig = .{ .check_line_threshold = 1024 * 1024, .timeout = 0 };
+    const patch_config: dmp = .{ .diff_check_lines_over = 1024 * 1024, .diff_timeout = 0 };
 
     var fixtures = try loadCorpusFixtures(arena);
     defer fixtures.deinit();
@@ -353,7 +356,7 @@ test "corpus revision pairs satisfy diff and patch invariants" {
         const after = fixtures.items[i];
         if (!std.mem.eql(u8, before.group, after.group)) continue;
 
-        try assertRevisionPairInvariant(diff_match_patch, before, after);
+        try assertRevisionPairInvariant(diff_config, patch_config, before, after);
         pair_count += 1;
     }
 

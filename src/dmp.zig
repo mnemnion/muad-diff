@@ -28,6 +28,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const ArrayList = std.array_list.Managed;
+
 pub const DiffList = ArrayListUnmanaged(Edit);
 pub const Patch = ArrayListUnmanaged(Hunk);
 
@@ -38,6 +39,95 @@ pub const DiffError = error{
 
 const OutOfMemory = error.OutOfMemory;
 
+pub const DiffConfig = struct {
+    /// Number of milliseconds to map a diff before giving up (0 for infinity).
+    timeout: u64 = 1000,
+    /// Cost of an empty edit operation in terms of edit characters.
+    edit_cost: u16 = 4,
+    /// If true, use the initial line-mode speedup when inputs are large enough.
+    check_lines: bool = true,
+    /// Number of bytes in each string needed to trigger a line-based diff
+    check_line_threshold: u32 = 100,
+};
+
+pub const Diff = struct {
+    config: DiffConfig = .{},
+    edits: DiffList = .empty,
+
+    pub fn init() Diff {
+        return .{};
+    }
+
+    pub fn initOptions(config: DiffConfig) Diff {
+        return .{ .config = config };
+    }
+
+    pub fn clone(self: Diff, allocator: Allocator) !Diff {
+        return .{
+            .config = self.config,
+            .edits = try cloneDiffList(allocator, self.edits),
+        };
+    }
+
+    pub fn deinit(self: *Diff, allocator: Allocator) void {
+        deinitDiffList(allocator, &self.edits);
+        self.edits = .empty;
+    }
+
+    pub fn diff(
+        self: *Diff,
+        allocator: Allocator,
+        before: []const u8,
+        after: []const u8,
+    ) error{OutOfMemory}!*Diff {
+        if (self.edits.items.len != 0) {
+            deinitDiffList(allocator, &self.edits);
+            self.edits = .empty;
+        }
+        self.edits = try diffWithConfig(self.config, allocator, before, after);
+        return self;
+    }
+
+    pub fn cleanupSemantic(self: *Diff, allocator: Allocator) error{OutOfMemory}!*Diff {
+        try diffCleanupSemantic(allocator, &self.edits);
+        return self;
+    }
+
+    pub fn cleanupSemanticLossless(self: *Diff, allocator: Allocator) error{OutOfMemory}!*Diff {
+        try diffCleanupSemanticLossless(allocator, &self.edits);
+        return self;
+    }
+
+    pub fn cleanupEfficiency(self: *Diff, allocator: Allocator) error{OutOfMemory}!*Diff {
+        try diffCleanupEfficiencyConfig(self.config, allocator, &self.edits);
+        return self;
+    }
+
+    pub fn prettyFormat(self: Diff, allocator: Allocator, deco: DiffDecorations) ![]const u8 {
+        return try diffPrettyFormat(allocator, self.edits, deco);
+    }
+
+    pub fn writePrettyFormat(self: Diff, allocator: Allocator, writer: anytype, deco: DiffDecorations) !usize {
+        return try writeDiffPrettyFormat(allocator, writer, self.edits, deco);
+    }
+
+    pub fn beforeText(self: Diff, allocator: Allocator) error{OutOfMemory}![]const u8 {
+        return try diffBeforeText(allocator, self.edits);
+    }
+
+    pub fn afterText(self: Diff, allocator: Allocator) error{OutOfMemory}![]const u8 {
+        return try diffAfterText(allocator, self.edits);
+    }
+
+    pub fn levenshtein(self: Diff) f64 {
+        return diffLevenshtein(self.edits);
+    }
+
+    pub fn index(self: Diff, loc: usize) usize {
+        return diffIndex(self.edits, loc);
+    }
+};
+
 //| Fields
 
 /// Number of milliseconds to map a diff before giving up (0 for infinity).
@@ -46,7 +136,7 @@ diff_timeout: u64 = 1000,
 diff_edit_cost: u16 = 4,
 
 /// Number of bytes in each string needed to trigger a line-based diff
-diff_check_lines_over: u64 = 100,
+diff_check_lines_over: u32 = 100,
 
 /// At what point is no match declared (0.0 = perfection, 1.0 = very loose).
 /// This defaults to 0.05, on the premise that the library will mostly be
@@ -63,7 +153,7 @@ match_max_bits: u8 = @bitSizeOf(usize),
 
 /// When deleting a large block of text (over ~64 characters), how close
 /// do the contents have to be to match the expected contents. (0.0 =
-/// perfection, 1.0 = very loose).  Note that Match_Threshold controls
+/// perfection, 1.0 = very loose).  Note that `match_threshold` controls
 /// how closely the end points of a delete need to match.
 patch_delete_threshold: f32 = 0.5,
 
@@ -78,6 +168,69 @@ pub fn deinitDiffList(allocator: Allocator, diffs: *DiffList) void {
     defer diffs.deinit(allocator);
     for (diffs.items) |d| {
         allocator.free(d.text);
+    }
+}
+
+fn cloneDiffList(allocator: Allocator, diffs: DiffList) !DiffList {
+    var new_diffs: DiffList = .empty;
+    try new_diffs.ensureTotalCapacity(allocator, diffs.items.len);
+    errdefer deinitDiffList(allocator, &new_diffs);
+    for (diffs.items) |d| {
+        new_diffs.appendAssumeCapacity(try d.clone(allocator));
+    }
+    return new_diffs;
+}
+
+test "Diff lifecycle" {
+    const allocator = testing.allocator;
+
+    {
+        var diff_obj = Diff.init();
+        defer diff_obj.deinit(allocator);
+        try testing.expectEqualDeep(DiffConfig{}, diff_obj.config);
+        try testing.expectEqual(@as(usize, 0), diff_obj.edits.items.len);
+    }
+
+    {
+        const options: DiffConfig = .{
+            .timeout = 0,
+            .edit_cost = 9,
+            .check_lines = false,
+            .check_line_threshold = 33,
+        };
+        var diff_obj = Diff.initOptions(options);
+        defer diff_obj.deinit(allocator);
+        try testing.expectEqualDeep(options, diff_obj.config);
+    }
+
+    {
+        var diff_obj = Diff.initOptions(.{ .timeout = 0 });
+        defer diff_obj.deinit(allocator);
+        _ = try diff_obj.diff(allocator, "cat", "coat");
+        var cloned = try diff_obj.clone(allocator);
+        defer cloned.deinit(allocator);
+        try testing.expectEqualDeep(diff_obj.config, cloned.config);
+        try testing.expectEqualDeep(diff_obj.edits.items, cloned.edits.items);
+    }
+
+    {
+        var diff_obj = Diff.initOptions(.{ .timeout = 0 });
+        _ = try diff_obj.diff(allocator, "abc", "axc");
+        try testing.expect(diff_obj.edits.items.len != 0);
+        diff_obj.deinit(allocator);
+        try testing.expectEqual(@as(usize, 0), diff_obj.edits.items.len);
+    }
+
+    {
+        var diff_obj = Diff.initOptions(.{ .timeout = 0 });
+        defer diff_obj.deinit(allocator);
+        _ = try diff_obj.diff(allocator, "abc", "axc");
+        const first_len = diff_obj.edits.items.len;
+        _ = try diff_obj.diff(allocator, "abc", "abc");
+        try testing.expect(first_len != diff_obj.edits.items.len);
+        try testing.expectEqualDeep(@as([]const Edit, &.{
+            Edit.init(.equal, "abc"),
+        }), diff_obj.edits.items);
     }
 }
 
@@ -258,19 +411,37 @@ pub fn diff(
     /// a faster slightly less optimal diff.
     check_lines: bool,
 ) error{OutOfMemory}!DiffList {
-    const deadline = if (dmp.diff_timeout == 0)
-        std.math.maxInt(u64)
-    else
-        @as(u64, @intCast(std.time.milliTimestamp())) + dmp.diff_timeout;
-    return dmp.diffInternal(allocator, before, after, check_lines, deadline);
+    var config = diffConfig(dmp);
+    config.check_lines = check_lines;
+    return diffWithConfig(config, allocator, before, after);
 }
 
-fn diffInternal(
-    dmp: DiffMatchPatch,
+fn diffConfig(dmp: DiffMatchPatch) DiffConfig {
+    return .{
+        .timeout = dmp.diff_timeout,
+        .edit_cost = dmp.diff_edit_cost,
+        .check_line_threshold = dmp.diff_check_lines_over,
+    };
+}
+
+fn diffWithConfig(
+    config: DiffConfig,
     allocator: std.mem.Allocator,
     before: []const u8,
     after: []const u8,
-    check_lines: bool,
+) error{OutOfMemory}!DiffList {
+    const deadline = if (config.timeout == 0)
+        std.math.maxInt(u64)
+    else
+        @as(u64, @intCast(std.time.milliTimestamp())) + config.timeout;
+    return diffInternal(config, allocator, before, after, deadline);
+}
+
+fn diffInternal(
+    config: DiffConfig,
+    allocator: std.mem.Allocator,
+    before: []const u8,
+    after: []const u8,
     deadline: u64,
 ) error{OutOfMemory}!DiffList {
     // Check for equality (speedup).
@@ -300,7 +471,7 @@ fn diffInternal(
     trimmed_after = trimmed_after[0 .. trimmed_after.len - common_length];
 
     // Compute the diff on the middle block.
-    var diffs = try dmp.diffCompute(allocator, trimmed_before, trimmed_after, check_lines, deadline);
+    var diffs = try diffCompute(config, allocator, trimmed_before, trimmed_after, deadline);
     errdefer deinitDiffList(allocator, &diffs);
 
     // Restore the prefix and suffix.
@@ -367,11 +538,10 @@ fn diffCommonSuffix(before: []const u8, after: []const u8) usize {
 /// @param deadline Time when the diff should be complete by.
 /// @return List of Diff objects.
 fn diffCompute(
-    dmp: DiffMatchPatch,
+    config: DiffConfig,
     allocator: std.mem.Allocator,
     before: []const u8,
     after: []const u8,
-    check_lines: bool,
     deadline: u64,
 ) error{OutOfMemory}!DiffList {
     if (before.len == 0) {
@@ -443,24 +613,24 @@ fn diffCompute(
     }
 
     // Check to see if the problem can be split in two.
-    var maybe_half_match = try dmp.diffHalfMatch(allocator, before, after);
+    var maybe_half_match = try diffHalfMatchConfig(config, allocator, before, after);
     defer if (maybe_half_match) |half_match| half_match.deinit(allocator);
     if (maybe_half_match) |*half_match| {
         // A half-match was found, sort out the return data.
         // Send both pairs off for separate processing.
-        var diffs = try dmp.diffInternal(
+        var diffs = try diffInternal(
+            config,
             allocator,
             half_match.prefix_before,
             half_match.prefix_after,
-            check_lines,
             deadline,
         );
         errdefer deinitDiffList(allocator, &diffs);
-        var diffs_b = try dmp.diffInternal(
+        var diffs_b = try diffInternal(
+            config,
             allocator,
             half_match.suffix_before,
             half_match.suffix_after,
-            check_lines,
             deadline,
         );
         defer diffs_b.deinit(allocator);
@@ -482,10 +652,10 @@ fn diffCompute(
         return diffs;
     }
 
-    if (check_lines and before.len > dmp.diff_check_lines_over and after.len > dmp.diff_check_lines_over) {
-        return dmp.diffLineMode(allocator, before, after, deadline);
+    if (config.check_lines and before.len > config.check_line_threshold and after.len > config.check_line_threshold) {
+        return diffLineMode(config, allocator, before, after, deadline);
     }
-    return dmp.diffBisect(allocator, before, after, deadline);
+    return diffBisectConfig(config, allocator, before, after, deadline);
 }
 
 const HalfMatchResult = struct {
@@ -519,7 +689,16 @@ fn diffHalfMatch(
     before: []const u8,
     after: []const u8,
 ) error{OutOfMemory}!?HalfMatchResult {
-    if (dmp.diff_timeout == 0) {
+    return diffHalfMatchConfig(diffConfig(dmp), allocator, before, after);
+}
+
+fn diffHalfMatchConfig(
+    config: DiffConfig,
+    allocator: std.mem.Allocator,
+    before: []const u8,
+    after: []const u8,
+) error{OutOfMemory}!?HalfMatchResult {
+    if (config.timeout == 0) {
         // Don't risk returning a non-optimal diff if we have unlimited time.
         return null;
     }
@@ -531,12 +710,12 @@ fn diffHalfMatch(
     }
 
     // First check if the second quarter is the seed for a half-match.
-    const half_match_1 = try dmp.diffHalfMatchInternal(allocator, long_text, short_text, (long_text.len + 3) / 4);
+    const half_match_1 = try diffHalfMatchInternal(allocator, long_text, short_text, (long_text.len + 3) / 4);
     errdefer {
         if (half_match_1) |h_m| h_m.deinit(allocator);
     }
     // Check again based on the third quarter.
-    const half_match_2 = try dmp.diffHalfMatchInternal(allocator, long_text, short_text, (long_text.len + 1) / 2);
+    const half_match_2 = try diffHalfMatchInternal(allocator, long_text, short_text, (long_text.len + 1) / 2);
     errdefer {
         if (half_match_2) |h_m| h_m.deinit(allocator);
     }
@@ -586,7 +765,6 @@ fn diffHalfMatch(
 ///     suffix of longtext, the prefix of shorttext, the suffix of shorttext
 ///     and the common middle.  Or null if there was no match.
 fn diffHalfMatchInternal(
-    _: DiffMatchPatch,
     allocator: std.mem.Allocator,
     long_text: []const u8,
     short_text: []const u8,
@@ -659,6 +837,16 @@ fn diffHalfMatchInternal(
 /// @return List of Diff objects.
 fn diffBisect(
     dmp: DiffMatchPatch,
+    allocator: std.mem.Allocator,
+    before: []const u8,
+    after: []const u8,
+    deadline: u64,
+) error{OutOfMemory}!DiffList {
+    return diffBisectConfig(diffConfig(dmp), allocator, before, after, deadline);
+}
+
+fn diffBisectConfig(
+    config: DiffConfig,
     allocator: std.mem.Allocator,
     before: []const u8,
     after: []const u8,
@@ -737,7 +925,7 @@ fn diffBisect(
                     const x2 = before_length - v2.items[@intCast(k2_offset)];
                     if (x1 >= x2) {
                         // Overlap detected.
-                        return dmp.diffBisectSplit(allocator, before, after, x1, y1, deadline);
+                        return diffBisectSplit(config, allocator, before, after, x1, y1, deadline);
                     }
                 }
             }
@@ -780,7 +968,7 @@ fn diffBisect(
                     x2 = before_length - v2.items[@intCast(k2_offset)];
                     if (x1 >= x2) {
                         // Overlap detected.
-                        return dmp.diffBisectSplit(allocator, before, after, x1, y1, deadline);
+                        return diffBisectSplit(config, allocator, before, after, x1, y1, deadline);
                     }
                 }
             }
@@ -811,7 +999,7 @@ fn diffBisect(
 /// @param deadline Time at which to bail if not yet complete.
 /// @return LinkedList of Diff objects.
 fn diffBisectSplit(
-    dmp: DiffMatchPatch,
+    config: DiffConfig,
     allocator: std.mem.Allocator,
     text1: []const u8,
     text2: []const u8,
@@ -819,6 +1007,11 @@ fn diffBisectSplit(
     y: isize,
     deadline: u64,
 ) error{OutOfMemory}!DiffList {
+    const text_mode_config = text_mode: {
+        var c = config;
+        c.check_lines = false;
+        break :text_mode c;
+    };
     const x1 = fixSplitForward(text1, @intCast(x));
     const y1 = fixSplitBackward(text2, @intCast(y));
     const text1a = text1[0..x1];
@@ -867,9 +1060,9 @@ fn diffBisectSplit(
     }
 
     // Compute both diffs serially.
-    var diffs = try dmp.diffInternal(allocator, text1a, text2a, false, deadline);
+    var diffs = try diffInternal(text_mode_config, allocator, text1a, text2a, deadline);
     errdefer deinitDiffList(allocator, &diffs);
-    var diffs_b = try dmp.diffInternal(allocator, text1b, text2b, false, deadline);
+    var diffs_b = try diffInternal(text_mode_config, allocator, text1b, text2b, deadline);
     // Free the list, but not the contents:
     defer diffs_b.deinit(allocator);
     errdefer {
@@ -889,12 +1082,17 @@ fn diffBisectSplit(
 /// @param deadline Time when the diff should be complete by.
 /// @return List of Diff objects.
 fn diffLineMode(
-    dmp: DiffMatchPatch,
+    config: DiffConfig,
     allocator: std.mem.Allocator,
     text1_in: []const u8,
     text2_in: []const u8,
     deadline: u64,
 ) error{OutOfMemory}!DiffList {
+    const text_mode_config = text_mode: {
+        var c = config;
+        c.check_lines = false;
+        break :text_mode c;
+    };
     // Scan the text on a line-by-line basis first.
     var a = try diffLinesToChars(allocator, text1_in, text2_in);
     defer a.deinit(allocator);
@@ -902,7 +1100,7 @@ fn diffLineMode(
     const text2 = a.chars_2;
     const line_array = a.line_array;
     var diffs: DiffList = diff_munge: {
-        var char_diffs: DiffList = try dmp.diffInternal(allocator, text1, text2, false, deadline);
+        var char_diffs: DiffList = try diffInternal(text_mode_config, allocator, text1, text2, deadline);
         defer deinitDiffList(allocator, &char_diffs);
         // Convert the diff back to original text.
         break :diff_munge try diffCharsToLines(allocator, &char_diffs, line_array.items);
@@ -952,11 +1150,11 @@ fn diffLineMode(
                         &.{},
                     );
                     pointer = pointer - count_delete - count_insert;
-                    var sub_diff = try dmp.diffInternal(
+                    var sub_diff = try diffInternal(
+                        text_mode_config,
                         allocator,
                         text_delete.items,
                         text_insert.items,
-                        false,
                         deadline,
                     );
                     {
@@ -1682,6 +1880,14 @@ pub fn diffCleanupEfficiency(
     allocator: std.mem.Allocator,
     diffs: *DiffList,
 ) error{OutOfMemory}!void {
+    return diffCleanupEfficiencyConfig(diffConfig(dmp), allocator, diffs);
+}
+
+fn diffCleanupEfficiencyConfig(
+    config: DiffConfig,
+    allocator: std.mem.Allocator,
+    diffs: *DiffList,
+) error{OutOfMemory}!void {
     var changes = false;
     // Stack of indices where equalities are found.
     var equalities = ArrayList(usize).init(allocator);
@@ -1700,7 +1906,7 @@ pub fn diffCleanupEfficiency(
     while (ipointer < diffs.items.len) {
         const pointer: usize = @intCast(ipointer);
         if (diffs.items[pointer].operation == .equal) { // Equality found.
-            if (diffs.items[pointer].text.len < dmp.diff_edit_cost and (post_ins or post_del)) {
+            if (diffs.items[pointer].text.len < config.edit_cost and (post_ins or post_del)) {
                 // Candidate found.
                 try equalities.append(pointer);
                 pre_ins = post_ins;
@@ -1727,7 +1933,7 @@ pub fn diffCleanupEfficiency(
             // <ins>A</ins><del>B</del>X<del>C</del>
             if ((last_equality.len != 0) and
                 ((pre_ins and pre_del and post_ins and post_del) or
-                    ((last_equality.len < dmp.diff_edit_cost / 2) and
+                    ((last_equality.len < config.edit_cost / 2) and
                         (boolInt(pre_ins) + boolInt(pre_del) + boolInt(post_ins) + boolInt(post_del) == 3))))
             {
                 // Duplicate record.
@@ -2402,12 +2608,17 @@ pub fn diffAndMakePatch(
     text1: []const u8,
     text2: []const u8,
 ) error{OutOfMemory}!Patch {
-    var diffs = try dmp.diff(allocator, text1, text2, true);
-    defer deinitDiffList(allocator, &diffs);
-    if (diffs.items.len > 2) {
-        try diffCleanupSemantic(allocator, &diffs);
-        try dmp.diffCleanupEfficiency(allocator, &diffs);
+    var diff_obj = Diff.initOptions(diffConfig(dmp));
+    defer diff_obj.deinit(allocator);
+    diff_obj.config.check_lines = true;
+    _ = try diff_obj.diff(allocator, text1, text2);
+    if (diff_obj.edits.items.len > 2) {
+        _ = try diff_obj.cleanupSemantic(allocator);
+        _ = try diff_obj.cleanupEfficiency(allocator);
     }
+    var diffs = diff_obj.edits;
+    diff_obj.edits = .empty;
+    defer deinitDiffList(allocator, &diffs);
     return try dmp.makePatchInternal(allocator, text1, diffs, .own);
 }
 
@@ -2685,32 +2896,33 @@ pub fn patchApply(
             } else {
                 // Imperfect match.  Run a diff to get a framework of equivalent
                 // indices.
-                var diffs = try dmp.diff(
+                var diff_obj = Diff.initOptions(diffConfig(dmp));
+                defer diff_obj.deinit(allocator);
+                diff_obj.config.check_lines = false;
+                _ = try diff_obj.diff(
                     allocator,
                     text1,
                     text2,
-                    false,
                 );
-                defer deinitDiffList(allocator, &diffs);
                 const t1_l_float: f64 = @floatFromInt(text1.len);
-                const levenshtein: f64 = diffLevenshtein(diffs);
+                const levenshtein: f64 = diff_obj.levenshtein();
                 const bad_match = levenshtein / t1_l_float > dmp.patch_delete_threshold;
                 if (text1.len > m_max_b and bad_match) {
                     // The end points match, but the content is unacceptably bad.
                     // results[x] = false;
                     all_applied = false;
                 } else {
-                    try diffCleanupSemanticLossless(allocator, &diffs);
+                    _ = try diff_obj.cleanupSemanticLossless(allocator);
                     var index1: usize = 0;
                     for (a_patch.diffs.items) |a_diff| {
                         if (a_diff.operation != .equal) {
-                            const index2 = diffIndex(diffs, index1);
+                            const index2 = diff_obj.index(index1);
                             if (a_diff.operation == .insert) {
                                 // Insertion
                                 try text.insertSlice(start + index2, a_diff.text);
                             } else if (a_diff.operation == .delete) {
                                 // Deletion
-                                const delete_at = diffIndex(diffs, index1 + a_diff.text.len) - index2;
+                                const delete_at = diff_obj.index(index1 + a_diff.text.len) - index2;
                                 text.replaceRangeAssumeCapacity(
                                     start + index2,
                                     delete_at,
