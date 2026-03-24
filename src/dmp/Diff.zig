@@ -1,61 +1,32 @@
-// MIT License
-//
-// Copyright (c) 2023 diffz authors
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
+//! Diff represents the difference between two texts.
+//!
+//! A `Diff` owns a `DiffList` of `Edit` values and provides the diff-specific
+//! operations over that list, including diff generation, cleanup passes, and
+//! readback helpers such as pretty formatting and text reconstruction.
+//!
+//! `Diff` is unmanaged.  Use `init()` for the default configuration or
+//! `initOptions()` to provide a custom `DiffConfig`, and later release any
+//! owned storage with `deinit(allocator)`.
+//!
+//! `DiffConfig` controls how the diff is produced:
+//! - `timeout` is the maximum number of milliseconds to spend computing a diff;
+//!   `0` means no timeout.
+//! - `edit_cost` tunes the efficiency cleanup heuristics.
+//! - `check_lines` enables the initial line-mode speedup for large inputs.
+//! - `check_line_threshold` sets the minimum input size for that speedup.
+//!
+//! The usual flow is to initialize a `Diff`, call `diff()`, and then optionally
+//! chain cleanup methods on the result.  The diff object can be reused to diff
+//! two more texts, in which case, the original diff's memory will be released.
 
-const std = @import("std");
-const dmp = @import("../dmp.zig");
-const testing = std.testing;
-const assert = std.debug.assert;
-const Allocator = std.mem.Allocator;
-const ArrayListUnmanaged = std.ArrayListUnmanaged;
-const ArrayList = std.array_list.Managed;
-
-const OutOfMemory = error.OutOfMemory;
+/// The diff configuration, see `DiffConfig`
+config: DiffConfig = .{},
+/// An ArrayList of the individual `Edit`s in this diff.
+edits: DiffList = .empty,
 
 pub const DiffError = dmp.DiffError;
 
-inline fn boolInt(b: bool) u8 {
-    return @intFromBool(b);
-}
-
-inline fn is_follow(byte: u8) bool {
-    return byte & 0b1100_0000 == 0b1000_0000;
-}
-
-inline fn fixSplitForward(text: []const u8, i: usize) usize {
-    var idx = i;
-    while (idx < text.len and is_follow(text[idx])) : (idx += 1) {}
-    return idx;
-}
-
-inline fn fixSplitBackward(text: []const u8, i: usize) usize {
-    var idx = i;
-    if (idx < text.len) while (idx != 0 and is_follow(text[idx])) : (idx -= 1) {};
-    return idx;
-}
-
-inline fn cast(as: type, val: anytype) as {
-    return @as(as, @intCast(val));
-}
-
+/// A single edit of a diff: insertion, deletion, or neither.
 pub const Edit = struct {
     pub const Operation = enum {
         insert,
@@ -87,14 +58,15 @@ pub const Edit = struct {
     pub fn init(operation: Operation, text: []const u8) Edit {
         return .{ .operation = operation, .text = text };
     }
+
     pub fn eql(a: Edit, b: Edit) bool {
         return a.operation == b.operation and std.mem.eql(u8, a.text, b.text);
     }
 
-    pub fn clone(self: Edit, allocator: Allocator) !Edit {
+    pub fn clone(edit: Edit, allocator: Allocator) !Edit {
         return Edit{
-            .operation = self.operation,
-            .text = try allocator.dupe(u8, self.text),
+            .operation = edit.operation,
+            .text = try allocator.dupe(u8, edit.text),
         };
     }
 };
@@ -113,122 +85,166 @@ pub const DiffConfig = struct {
     check_line_threshold: u32 = 100,
 };
 
-pub const Diff = struct {
-    config: DiffConfig = .{},
-    edits: DiffList = .empty,
+pub const HalfMatchResult = struct {
+    prefix_before: []const u8,
+    suffix_before: []const u8,
+    prefix_after: []const u8,
+    suffix_after: []const u8,
+    common_middle: []const u8,
 
-    pub fn init() Diff {
-        return .{};
-    }
-
-    pub fn initOptions(config: DiffConfig) Diff {
-        return .{ .config = config };
-    }
-
-    pub fn clone(self: Diff, allocator: Allocator) !Diff {
-        return .{
-            .config = self.config,
-            .edits = try cloneDiffList(allocator, self.edits),
-        };
-    }
-
-    pub fn deinit(self: *Diff, allocator: Allocator) void {
-        deinitDiffList(allocator, &self.edits);
-        self.edits = .empty;
-    }
-
-    /// Find the differences between two texts.
-    /// @param before Old string to be diffed.
-    /// @param after New string to be diffed.
-    /// @return self.
-    pub fn diff(
-        self: *Diff,
-        allocator: Allocator,
-        before: []const u8,
-        after: []const u8,
-    ) error{OutOfMemory}!*Diff {
-        if (self.edits.items.len != 0) {
-            deinitDiffList(allocator, &self.edits);
-            self.edits = .empty;
-        }
-        self.edits = try diffWithConfig(self.config, allocator, before, after);
-        return self;
-    }
-
-    /// Reduce the number of edits by eliminating semantically trivial
-    /// equalities.
-    /// @return self.
-    pub fn cleanupSemantic(self: *Diff, allocator: Allocator) error{OutOfMemory}!*Diff {
-        try diffCleanupSemantic(allocator, &self.edits);
-        return self;
-    }
-
-    /// Look for single edits surrounded on both sides by equalities
-    /// which can be shifted sideways to align the edit to a word boundary.
-    /// e.g: The c<ins>at c</ins>ame. -> The <ins>cat </ins>came.
-    /// @return self.
-    pub fn cleanupSemanticLossless(self: *Diff, allocator: Allocator) error{OutOfMemory}!*Diff {
-        try diffCleanupSemanticLossless(allocator, &self.edits);
-        return self;
-    }
-
-    /// Reduce the number of edits by eliminating operationally trivial
-    /// equalities.
-    /// @return self.
-    pub fn cleanupEfficiency(self: *Diff, allocator: Allocator) error{OutOfMemory}!*Diff {
-        try diffCleanupEfficiencyConfig(self.config, allocator, &self.edits);
-        return self;
-    }
-
-    /// Return text representing a pretty-formatted `Diff`.
-    /// See `DiffDecorations` for how to customize this output.
-    pub fn prettyFormat(self: Diff, allocator: Allocator, deco: DiffDecorations) ![]const u8 {
-        return try diffPrettyFormat(allocator, self.edits, deco);
-    }
-
-    /// Write a pretty-formatted `Diff` to `writer`.  The `Allocator`
-    /// is only used if a custom text formatter is defined for
-    /// `DiffDecorations`.  Returns number of bytes written.
-    pub fn writePrettyFormat(self: Diff, allocator: Allocator, writer: anytype, deco: DiffDecorations) !usize {
-        return try writeDiffPrettyFormat(allocator, writer, self.edits, deco);
-    }
-
-    ///
-    /// Compute and return the source text (all equalities and deletions).
-    /// @return Source text.
-    ///
-    pub fn beforeText(self: Diff, allocator: Allocator) error{OutOfMemory}![]const u8 {
-        return try diffBeforeText(allocator, self.edits);
-    }
-
-    ///
-    /// Compute and return the destination text (all equalities and insertions).
-    /// @return Destination text.
-    ///
-    pub fn afterText(self: Diff, allocator: Allocator) error{OutOfMemory}![]const u8 {
-        return try diffAfterText(allocator, self.edits);
-    }
-
-    ///
-    /// Compute the Levenshtein distance; the number of inserted,
-    /// deleted or substituted characters.
-    ///
-    /// @return Number of changes.
-    ///
-    pub fn levenshtein(self: Diff) f64 {
-        return diffLevenshtein(self.edits);
-    }
-
-    /// loc is a location in text1, compute and return the equivalent location in
-    /// text2.
-    /// e.g. "The cat" vs "The big cat", 1->1, 5->8
-    /// @param loc Location within text1.
-    /// @return Location within text2.
-    ///
-    pub fn index(self: Diff, loc: usize) usize {
-        return diffIndex(self.edits, loc);
+    // Free the HalfMatchResult's memory.
+    pub fn deinit(hmr: HalfMatchResult, allocator: Allocator) void {
+        allocator.free(hmr.prefix_before);
+        allocator.free(hmr.suffix_before);
+        allocator.free(hmr.prefix_after);
+        allocator.free(hmr.suffix_after);
+        allocator.free(hmr.common_middle);
     }
 };
+
+pub const CHAR_OFFSET = 32;
+
+/// A struct holding bookends for `diffPrittyFormat(diffs)`.
+///
+/// May include a function taking an allocator and the Diff,
+/// which shall return the text of the Diff, appropriately munged.
+/// This allows for tasks like proper HTML escaping.  Note that if
+/// the function is provided, all text returned will be freed, so
+/// it should always return a copy whether or not edits are needed.
+pub const DiffDecorations = struct {
+    delete_start: []const u8 = "",
+    delete_end: []const u8 = "",
+    insert_start: []const u8 = "",
+    insert_end: []const u8 = "",
+    equals_start: []const u8 = "",
+    equals_end: []const u8 = "",
+    pre_process: ?fn (Allocator, Edit) error{OutOfMemory}![]const u8 = null,
+};
+
+/// Decorations for classic Xterm printing: red for delete and
+/// green for insert.
+pub const xterm_classic = DiffDecorations{
+    .delete_start = "\x1b[91m",
+    .delete_end = "\x1b[m",
+    .insert_start = "\x1b[92m",
+    .insert_end = "\x1b[m",
+};
+
+/// Initialize an empty `Diff` with default `DiffConfig`.
+pub fn init() Diff {
+    return .{};
+}
+
+/// Initialize an empty `Diff` with the provided `DiffConfig`.
+pub fn initOptions(config: DiffConfig) Diff {
+    return .{ .config = config };
+}
+
+/// Clone this `Diff`, including its owned edits.
+pub fn clone(difference: Diff, allocator: Allocator) !Diff {
+    return .{
+        .config = difference.config,
+        .edits = try cloneDiffList(allocator, difference.edits),
+    };
+}
+
+/// Release the storage owned by this `Diff`.
+pub fn deinit(difference: *Diff, allocator: Allocator) void {
+    deinitDiffList(allocator, &difference.edits);
+    difference.edits = .empty;
+}
+
+/// Find the differences between two texts.
+/// @param before Old string to be diffed.
+/// @param after New string to be diffed.
+/// @return self.
+pub fn diff(
+    difference: *Diff,
+    allocator: Allocator,
+    before: []const u8,
+    after: []const u8,
+) error{OutOfMemory}!*Diff {
+    if (difference.edits.items.len != 0) {
+        deinitDiffList(allocator, &difference.edits);
+        difference.edits = .empty;
+    }
+    difference.edits = try diffWithConfig(difference.config, allocator, before, after);
+    return difference;
+}
+
+/// Reduce the number of edits by eliminating semantically trivial
+/// equalities.
+/// @return self.
+pub fn cleanupSemantic(difference: *Diff, allocator: Allocator) error{OutOfMemory}!*Diff {
+    try diffCleanupSemantic(allocator, &difference.edits);
+    return difference;
+}
+
+/// Look for single edits surrounded on both sides by equalities
+/// which can be shifted sideways to align the edit to a word boundary.
+/// e.g: The c<ins>at c</ins>ame. -> The <ins>cat </ins>came.
+/// @return self.
+pub fn cleanupSemanticLossless(difference: *Diff, allocator: Allocator) error{OutOfMemory}!*Diff {
+    try diffCleanupSemanticLossless(allocator, &difference.edits);
+    return difference;
+}
+
+/// Reduce the number of edits by eliminating operationally trivial
+/// equalities.
+/// @return self.
+pub fn cleanupEfficiency(difference: *Diff, allocator: Allocator) error{OutOfMemory}!*Diff {
+    try diffCleanupEfficiencyConfig(difference.config, allocator, &difference.edits);
+    return difference;
+}
+
+/// Return text representing a pretty-formatted `Diff`.
+/// See `DiffDecorations` for how to customize this output.
+pub fn prettyFormat(difference: Diff, allocator: Allocator, deco: DiffDecorations) ![]const u8 {
+    return try diffPrettyFormat(allocator, difference.edits, deco);
+}
+
+/// Write a pretty-formatted `Diff` to `writer`.  The `Allocator`
+/// is only used if a custom text formatter is defined for
+/// `DiffDecorations`.  Returns number of bytes written.
+pub fn writePrettyFormat(difference: Diff, allocator: Allocator, writer: anytype, deco: DiffDecorations) !usize {
+    return try writeDiffPrettyFormat(allocator, writer, difference.edits, deco);
+}
+
+///
+/// Compute and return the source text (all equalities and deletions).
+/// @return Source text.
+///
+pub fn beforeText(difference: Diff, allocator: Allocator) error{OutOfMemory}![]const u8 {
+    return try diffBeforeText(allocator, difference.edits);
+}
+
+///
+/// Compute and return the destination text (all equalities and insertions).
+/// @return Destination text.
+///
+pub fn afterText(difference: Diff, allocator: Allocator) error{OutOfMemory}![]const u8 {
+    return try diffAfterText(allocator, difference.edits);
+}
+
+///
+/// Compute the Levenshtein distance; the number of inserted,
+/// deleted or substituted characters.
+///
+/// @return Number of changes.
+///
+pub fn levenshtein(difference: Diff) f64 {
+    return diffLevenshtein(difference.edits);
+}
+
+/// loc is a location in text1, compute and return the equivalent location in
+/// text2.
+/// e.g. "The cat" vs "The big cat", 1->1, 5->8
+/// @param loc Location within text1.
+/// @return Location within text2.
+///
+pub fn index(difference: Diff, loc: usize) usize {
+    return diffIndex(difference.edits, loc);
+}
 
 /// Deinit an `ArrayListUnmanaged(Diff)` and the allocated slices of
 /// text in each `Diff`.
@@ -239,6 +255,7 @@ pub fn deinitDiffList(allocator: Allocator, diffs: *DiffList) void {
     }
 }
 
+/// Clone a `DiffList`, including each edit's owned text.
 pub fn cloneDiffList(allocator: Allocator, diffs: DiffList) !DiffList {
     var new_diffs: DiffList = .empty;
     try new_diffs.ensureTotalCapacity(allocator, diffs.items.len);
@@ -264,74 +281,7 @@ pub fn diffListFromConfig(
     return diffs;
 }
 
-test "Diff lifecycle" {
-    const allocator = testing.allocator;
-
-    {
-        var diff_obj = Diff.init();
-        defer diff_obj.deinit(allocator);
-        try testing.expectEqualDeep(DiffConfig{}, diff_obj.config);
-        try testing.expectEqual(@as(usize, 0), diff_obj.edits.items.len);
-    }
-
-    {
-        const options: DiffConfig = .{
-            .timeout = 0,
-            .edit_cost = 9,
-            .check_lines = false,
-            .check_line_threshold = 33,
-        };
-        var diff_obj = Diff.initOptions(options);
-        defer diff_obj.deinit(allocator);
-        try testing.expectEqualDeep(options, diff_obj.config);
-    }
-
-    {
-        var diff_obj = Diff.initOptions(.{ .timeout = 0 });
-        defer diff_obj.deinit(allocator);
-        _ = try diff_obj.diff(allocator, "cat", "coat");
-        var cloned = try diff_obj.clone(allocator);
-        defer cloned.deinit(allocator);
-        try testing.expectEqualDeep(diff_obj.config, cloned.config);
-        try testing.expectEqualDeep(diff_obj.edits.items, cloned.edits.items);
-    }
-
-    {
-        var diff_obj = Diff.initOptions(.{ .timeout = 0 });
-        _ = try diff_obj.diff(allocator, "abc", "axc");
-        try testing.expect(diff_obj.edits.items.len != 0);
-        diff_obj.deinit(allocator);
-        try testing.expectEqual(@as(usize, 0), diff_obj.edits.items.len);
-    }
-
-    {
-        var diff_obj = Diff.initOptions(.{ .timeout = 0 });
-        defer diff_obj.deinit(allocator);
-        _ = try diff_obj.diff(allocator, "abc", "axc");
-        const first_len = diff_obj.edits.items.len;
-        _ = try diff_obj.diff(allocator, "abc", "abc");
-        try testing.expect(first_len != diff_obj.edits.items.len);
-        try testing.expectEqualDeep(@as([]const Edit, &.{
-            Edit.init(.equal, "abc"),
-        }), diff_obj.edits.items);
-    }
-}
-
-/// Free a range of Diffs inside a list.  Used during cleanups and
-/// edits.
-fn freeRangeDiffList(
-    allocator: Allocator,
-    diffs: *DiffList,
-    start: usize,
-    len: usize,
-) void {
-    const after_range = start + len;
-    const range = diffs.items[start..after_range];
-    for (range) |d| {
-        allocator.free(d.text);
-    }
-}
-
+/// Compute a `DiffList` using the provided `DiffConfig`.
 pub fn diffWithConfig(
     config: DiffConfig,
     allocator: std.mem.Allocator,
@@ -345,6 +295,8 @@ pub fn diffWithConfig(
     return diffInternal(config, allocator, before, after, deadline);
 }
 
+/// Internal diff entrypoint which carries the computed deadline through the
+/// recursive diff pipeline.
 pub fn diffInternal(
     config: DiffConfig,
     allocator: std.mem.Allocator,
@@ -474,7 +426,7 @@ pub fn diffCompute(
     const long_text = if (before.len > after.len) before else after;
     const short_text = if (before.len > after.len) after else before;
 
-    if (std.mem.indexOf(u8, long_text, short_text)) |index| {
+    if (std.mem.indexOf(u8, long_text, short_text)) |match_index| {
         // Shorter text is inside the longer text (speedup).
         var diffs: DiffList = .empty;
         errdefer deinitDiffList(allocator, &diffs);
@@ -485,7 +437,7 @@ pub fn diffCompute(
         try diffs.ensureUnusedCapacity(allocator, 3);
         diffs.appendAssumeCapacity(Edit.init(
             op,
-            try allocator.dupe(u8, long_text[0..index]),
+            try allocator.dupe(u8, long_text[0..match_index]),
         ));
         diffs.appendAssumeCapacity(Edit.init(
             .equal,
@@ -493,7 +445,7 @@ pub fn diffCompute(
         ));
         diffs.appendAssumeCapacity(Edit.init(
             op,
-            try allocator.dupe(u8, long_text[index + short_text.len ..]),
+            try allocator.dupe(u8, long_text[match_index + short_text.len ..]),
         ));
         return diffs;
     }
@@ -560,23 +512,6 @@ pub fn diffCompute(
     }
     return diffBisectConfig(config, allocator, before, after, deadline);
 }
-
-pub const HalfMatchResult = struct {
-    prefix_before: []const u8,
-    suffix_before: []const u8,
-    prefix_after: []const u8,
-    suffix_after: []const u8,
-    common_middle: []const u8,
-
-    // Free the HalfMatchResult's memory.
-    pub fn deinit(hmr: HalfMatchResult, allocator: Allocator) void {
-        allocator.free(hmr.prefix_before);
-        allocator.free(hmr.suffix_before);
-        allocator.free(hmr.prefix_after);
-        allocator.free(hmr.suffix_after);
-        allocator.free(hmr.common_middle);
-    }
-};
 
 pub fn diffHalfMatchConfig(
     config: DiffConfig,
@@ -1055,8 +990,6 @@ pub fn diffLineMode(
 const UNICODE_MAX = 0x10ffdf;
 const UNICODE_TWO_THIRDS = 742724;
 const UNICODE_ONE_THIRD = 371355;
-pub const CHAR_OFFSET = 32;
-
 comptime {
     assert(UNICODE_TWO_THIRDS + UNICODE_ONE_THIRD == UNICODE_MAX);
     assert(UNICODE_TWO_THIRDS + UNICODE_ONE_THIRD + CHAR_OFFSET == 0x10ffff);
@@ -1937,32 +1870,6 @@ pub fn diffIndex(diffs: DiffList, u_loc: usize) usize {
     return @intCast(last_chars2 + (loc - last_chars1));
 }
 
-/// A struct holding bookends for `diffPrittyFormat(diffs)`.
-///
-/// May include a function taking an allocator and the Diff,
-/// which shall return the text of the Diff, appropriately munged.
-/// This allows for tasks like proper HTML escaping.  Note that if
-/// the function is provided, all text returned will be freed, so
-/// it should always return a copy whether or not edits are needed.
-pub const DiffDecorations = struct {
-    delete_start: []const u8 = "",
-    delete_end: []const u8 = "",
-    insert_start: []const u8 = "",
-    insert_end: []const u8 = "",
-    equals_start: []const u8 = "",
-    equals_end: []const u8 = "",
-    pre_process: ?fn (Allocator, Edit) error{OutOfMemory}![]const u8 = null,
-};
-
-/// Decorations for classic Xterm printing: red for delete and
-/// green for insert.
-pub const xterm_classic = DiffDecorations{
-    .delete_start = "\x1b[91m",
-    .delete_end = "\x1b[m",
-    .insert_start = "\x1b[92m",
-    .insert_end = "\x1b[m",
-};
-
 /// Return text representing a pretty-formatted `DiffList`.
 /// See `DiffDecorations` for how to customize this output.
 pub fn diffPrettyFormat(
@@ -2071,7 +1978,7 @@ pub fn diffLevenshtein(diffs: DiffList) f64 {
     // much what happens when this isn't even UTF-8.
     var inserts: usize = 0;
     var deletes: usize = 0;
-    var levenshtein: usize = 0;
+    var distance: usize = 0;
     for (diffs.items) |a_diff| {
         switch (a_diff.operation) {
             .insert => {
@@ -2086,14 +1993,112 @@ pub fn diffLevenshtein(diffs: DiffList) f64 {
             },
             .equal => {
                 // A deletion and an insertion is one substitution.
-                levenshtein = @max(inserts, deletes);
+                distance += @max(inserts, deletes);
                 inserts = 0;
                 deletes = 0;
             },
         }
     }
 
-    return @floatFromInt(levenshtein + @max(inserts, deletes));
+    return @floatFromInt(distance + @max(inserts, deletes));
+}
+
+/// Free a range of Diffs inside a list.  Used during cleanups and
+/// edits.
+fn freeRangeDiffList(
+    allocator: Allocator,
+    diffs: *DiffList,
+    start: usize,
+    len: usize,
+) void {
+    const after_range = start + len;
+    const range = diffs.items[start..after_range];
+    for (range) |d| {
+        allocator.free(d.text);
+    }
+}
+
+const Diff = @This();
+
+const OOM = error.OutOfMemory;
+
+inline fn boolInt(b: bool) u8 {
+    return @intFromBool(b);
+}
+
+inline fn is_follow(byte: u8) bool {
+    return byte & 0b1100_0000 == 0b1000_0000;
+}
+
+inline fn fixSplitForward(text: []const u8, i: usize) usize {
+    var idx = i;
+    while (idx < text.len and is_follow(text[idx])) : (idx += 1) {}
+    return idx;
+}
+
+inline fn fixSplitBackward(text: []const u8, i: usize) usize {
+    var idx = i;
+    if (idx < text.len) while (idx != 0 and is_follow(text[idx])) : (idx -= 1) {};
+    return idx;
+}
+
+inline fn cast(as: type, val: anytype) as {
+    return @as(as, @intCast(val));
+}
+
+//| Tests
+
+test "Diff lifecycle" {
+    const allocator = testing.allocator;
+
+    {
+        var diff_obj = Diff.init();
+        defer diff_obj.deinit(allocator);
+        try testing.expectEqualDeep(DiffConfig{}, diff_obj.config);
+        try testing.expectEqual(@as(usize, 0), diff_obj.edits.items.len);
+    }
+
+    {
+        const options: DiffConfig = .{
+            .timeout = 0,
+            .edit_cost = 9,
+            .check_lines = false,
+            .check_line_threshold = 33,
+        };
+        var diff_obj = Diff.initOptions(options);
+        defer diff_obj.deinit(allocator);
+        try testing.expectEqualDeep(options, diff_obj.config);
+    }
+
+    {
+        var diff_obj = Diff.initOptions(.{ .timeout = 0 });
+        defer diff_obj.deinit(allocator);
+        _ = try diff_obj.diff(allocator, "cat", "coat");
+        var cloned = try diff_obj.clone(allocator);
+        defer cloned.deinit(allocator);
+        try testing.expectEqualDeep(diff_obj.config, cloned.config);
+        try testing.expectEqualDeep(diff_obj.edits.items, cloned.edits.items);
+    }
+
+    {
+        var diff_obj = Diff.initOptions(.{ .timeout = 0 });
+        _ = try diff_obj.diff(allocator, "abc", "axc");
+        try testing.expect(diff_obj.edits.items.len != 0);
+        diff_obj.deinit(allocator);
+        try testing.expectEqual(@as(usize, 0), diff_obj.edits.items.len);
+    }
+
+    {
+        var diff_obj = Diff.initOptions(.{ .timeout = 0 });
+        defer diff_obj.deinit(allocator);
+        _ = try diff_obj.diff(allocator, "abc", "axc");
+        const first_len = diff_obj.edits.items.len;
+        _ = try diff_obj.diff(allocator, "abc", "abc");
+        try testing.expect(first_len != diff_obj.edits.items.len);
+        try testing.expectEqualDeep(@as([]const Edit, &.{
+            Edit.init(.equal, "abc"),
+        }), diff_obj.edits.items);
+    }
 }
 
 test diffLevenshtein {
@@ -2130,3 +2135,12 @@ test diffLevenshtein {
         try testing.expectEqual(7, diffLevenshtein(diffs));
     }
 }
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const ArrayList = std.array_list.Managed;
+const assert = std.debug.assert;
+const testing = std.testing;
+
+const dmp = @import("../dmp.zig");
