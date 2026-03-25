@@ -4,7 +4,7 @@
 //! operations over that list, including diff generation, cleanup passes, and
 //! readback helpers such as pretty formatting and text reconstruction.
 //!
-//! `Diff` is unmanaged.  Use `init()` for the default configuration or
+//! `Diff` is unmanaged.  Use `.default` for the default configuration or
 //! `initOptions()` to provide a custom `DiffConfig`, and later release any
 //! owned storage with `deinit(allocator)`.
 //!
@@ -20,7 +20,7 @@
 //! two more texts, in which case, the original diff's memory will be released.
 
 /// The diff configuration, see `DiffConfig`
-config: DiffConfig = .{},
+config: DiffConfig = .default,
 /// An ArrayList of the individual `Edit`s in this diff.
 edits: DiffList = .empty,
 
@@ -73,14 +73,21 @@ pub const DiffList = ArrayListUnmanaged(Edit);
 
 pub const DiffConfig = struct {
     /// Number of milliseconds to map a diff before giving up (0 for infinity).
-    timeout: u64 = 1000,
+    timeout: u64,
     /// Cost of an empty edit operation in terms of edit characters.
-    edit_cost: u16 = 4,
+    edit_cost: u16,
     /// If true, use the initial line-mode speedup when inputs are large enough.
-    check_lines: bool = true,
+    check_lines: bool,
     /// Number of bytes in each string needed to trigger a line-based diff.
     /// Ignored if check_lines is `false`.
-    check_line_threshold: u32 = 100,
+    check_line_threshold: u32,
+
+    pub const default: DiffConfig = .{
+        .timeout = 1000,
+        .edit_cost = 4,
+        .check_lines = true,
+        .check_line_threshold = 100,
+    };
 };
 
 pub const HalfMatchResult = struct {
@@ -128,13 +135,13 @@ pub const DiffDecorations = struct {
     };
 };
 
-/// Initialize an empty `Diff` with default `DiffConfig`.
-pub fn init() Diff {
-    return .{};
-}
+pub const default: Diff = .{
+    .config = .default,
+    .edits = .empty,
+};
 
 /// Initialize an empty `Diff` with the provided `DiffConfig`.
-pub fn initOptions(config: DiffConfig) Diff {
+pub fn init(config: DiffConfig) Diff {
     return .{ .config = config };
 }
 
@@ -267,7 +274,7 @@ fn diffListFromConfig(
     before: []const u8,
     after: []const u8,
 ) !DiffList {
-    var diff_obj = Diff.initOptions(config);
+    var diff_obj = Diff.init(config);
     defer diff_obj.deinit(allocator);
     _ = try diff_obj.diff(allocator, before, after);
     const diffs = diff_obj.edits;
@@ -2003,9 +2010,9 @@ test "Diff lifecycle" {
     const allocator = testing.allocator;
 
     {
-        var diff_obj = Diff.init();
+        var diff_obj: Diff = .default;
         defer diff_obj.deinit(allocator);
-        try testing.expectEqualDeep(DiffConfig{}, diff_obj.config);
+        try testing.expectEqualDeep(DiffConfig.default, diff_obj.config);
         try testing.expectEqual(@as(usize, 0), diff_obj.edits.items.len);
     }
 
@@ -2016,13 +2023,15 @@ test "Diff lifecycle" {
             .check_lines = false,
             .check_line_threshold = 33,
         };
-        var diff_obj = Diff.initOptions(options);
+        var diff_obj = Diff.init(options);
         defer diff_obj.deinit(allocator);
         try testing.expectEqualDeep(options, diff_obj.config);
     }
 
     {
-        var diff_obj = Diff.initOptions(.{ .timeout = 0 });
+        var options: DiffConfig = .default;
+        options.timeout = 0;
+        var diff_obj = Diff.init(options);
         defer diff_obj.deinit(allocator);
         _ = try diff_obj.diff(allocator, "cat", "coat");
         var cloned = try diff_obj.clone(allocator);
@@ -2032,7 +2041,9 @@ test "Diff lifecycle" {
     }
 
     {
-        var diff_obj = Diff.initOptions(.{ .timeout = 0 });
+        var options: DiffConfig = .default;
+        options.timeout = 0;
+        var diff_obj = Diff.init(options);
         _ = try diff_obj.diff(allocator, "abc", "axc");
         try testing.expect(diff_obj.edits.items.len != 0);
         diff_obj.deinit(allocator);
@@ -2040,7 +2051,9 @@ test "Diff lifecycle" {
     }
 
     {
-        var diff_obj = Diff.initOptions(.{ .timeout = 0 });
+        var options: DiffConfig = .default;
+        options.timeout = 0;
+        var diff_obj = Diff.init(options);
         defer diff_obj.deinit(allocator);
         _ = try diff_obj.diff(allocator, "abc", "axc");
         const first_len = diff_obj.edits.items.len;
@@ -2089,7 +2102,7 @@ fn testDiffHalfMatch(
 }
 
 fn testDiffHalfMatchLeak(allocator: Allocator) !void {
-    const config = DiffConfig{};
+    const config = DiffConfig.default;
     const text1 = "The quick brown fox jumps over the lazy dog.";
     const text2 = "That quick brown fox jumped over a lazy dog.";
     var diffs = try diffListFromConfig(allocator, config, text2, text1);
@@ -2101,7 +2114,11 @@ test "diffHalfMatch leak regression test" {
 }
 
 test "diffHalfMatch" {
-    const one_timeout: DiffConfig = .{ .timeout = 1 };
+    const one_timeout: DiffConfig = blk: {
+        var config: DiffConfig = .default;
+        config.timeout = 1;
+        break :blk config;
+    };
 
     try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
         .config = one_timeout,
@@ -2222,7 +2239,11 @@ test "diffHalfMatch" {
     }});
 
     try testing.checkAllAllocationFailures(testing.allocator, testDiffHalfMatch, .{TestHalfMatch{
-        .config = .{ .timeout = 0 },
+        .config = blk: {
+            var cfg: DiffConfig = .default;
+            cfg.timeout = 0;
+            break :blk cfg;
+        },
         .before = "qHilloHelloHew",
         .after = "xHelloHeHulloy",
         .expected = null,
@@ -2745,7 +2766,11 @@ fn testDiffBisect(
 }
 
 test "diffBisect" {
-    const config: DiffConfig = .{ .timeout = 0 };
+    const config: DiffConfig = blk: {
+        var config: DiffConfig = .default;
+        config.timeout = 0;
+        break :blk config;
+    };
     try testing.checkAllAllocationFailures(testing.allocator, testDiffBisect, .{TBisect{
         .config = config,
         .before = "cat",
@@ -2788,7 +2813,12 @@ fn testDiff(
 }
 
 test "diff" {
-    const config: DiffConfig = .{ .timeout = 0, .check_lines = false };
+    const config: DiffConfig = blk: {
+        var config: DiffConfig = .default;
+        config.timeout = 0;
+        config.check_lines = false;
+        break :blk config;
+    };
 
     try testing.checkAllAllocationFailures(testing.allocator, testDiff, .{TDiff{
         .config = config,
@@ -2843,10 +2873,12 @@ fn testDiffLineMode(
     before: []const u8,
     after: []const u8,
 ) !void {
-    const checked_config: DiffConfig = .{
-        .timeout = 0,
-        .check_lines = true,
-        .check_line_threshold = threshold,
+    const checked_config: DiffConfig = blk: {
+        var config: DiffConfig = .default;
+        config.timeout = 0;
+        config.check_lines = true;
+        config.check_line_threshold = threshold;
+        break :blk config;
     };
     var diff_checked = try diffListFromConfig(allocator, checked_config, before, after);
     defer deinitDiffList(allocator, &diff_checked);
@@ -2889,8 +2921,18 @@ fn diffRoundTrip(allocator: Allocator, config: DiffConfig, diff_slice: []const E
 
 test "Unicode diffs" {
     const allocator = testing.allocator;
-    const config: DiffConfig = .{ .timeout = 0, .check_lines = false };
-    const roundtrip_config: DiffConfig = .{ .timeout = 0, .check_lines = false };
+    const config: DiffConfig = blk: {
+        var cfg: DiffConfig = .default;
+        cfg.timeout = 0;
+        cfg.check_lines = false;
+        break :blk cfg;
+    };
+    const roundtrip_config: DiffConfig = blk: {
+        var cfg: DiffConfig = .default;
+        cfg.timeout = 0;
+        cfg.check_lines = false;
+        break :blk cfg;
+    };
     {
         var greek_diff = try diffListFromConfig(allocator, config, "αβγ", "αβδ");
         defer deinitDiffList(allocator, &greek_diff);
@@ -2958,14 +3000,22 @@ fn testDiffCleanupEfficiency(
 
 test "diffCleanupEfficiency" {
     const allocator = testing.allocator;
-    const config: DiffConfig = .{ .edit_cost = 4 };
+    const config: DiffConfig = blk: {
+        var config: DiffConfig = .default;
+        config.edit_cost = 4;
+        break :blk config;
+    };
     var diffs: DiffList = .empty;
     try diffCleanupEfficiencyConfig(config, allocator, &diffs);
     try testing.expectEqualDeep(DiffList.empty, diffs);
 }
 
 test "diff before and after text" {
-    const config: DiffConfig = .{ .check_lines = false };
+    const config: DiffConfig = blk: {
+        var config: DiffConfig = .default;
+        config.check_lines = false;
+        break :blk config;
+    };
     const allocator = testing.allocator;
     const before = "The cat in the hat.";
     const after = "The bat in the belfry.";
@@ -2980,7 +3030,11 @@ test "diff before and after text" {
 }
 
 test diffIndex {
-    const config: DiffConfig = .{ .check_lines = false };
+    const config: DiffConfig = blk: {
+        var config: DiffConfig = .default;
+        config.check_lines = false;
+        break :blk config;
+    };
     var diffs = try diffListFromConfig(testing.allocator, config, "The midnight train", "The blue midnight train");
     defer deinitDiffList(testing.allocator, &diffs);
     try testing.expectEqual(0, diffIndex(diffs, 0));
@@ -2996,7 +3050,11 @@ test diffPrettyFormat {
         .equals_start = "<=>",
         .equals_end = "</=>",
     };
-    const config: DiffConfig = .{ .check_lines = false };
+    const config: DiffConfig = blk: {
+        var config: DiffConfig = .default;
+        config.check_lines = false;
+        break :blk config;
+    };
     const allocator = testing.allocator;
     var diffs = try diffListFromConfig(allocator, config, "A thing of beauty is a joy forever", "Singular beauty is enjoyed forever");
     defer deinitDiffList(allocator, &diffs);

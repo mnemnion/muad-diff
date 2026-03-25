@@ -240,7 +240,7 @@ fn assertRevisionPairInvariant(
     before: RevisionFixture,
     after: RevisionFixture,
 ) !void {
-    var diff = dmp.Diff.initOptions(diff_config);
+    var diff = dmp.Diff.init(diff_config);
     defer diff.deinit(testing.allocator);
     _ = try diff.diff(testing.allocator, before.body, after.body);
     try expectDiffListUtf8(diff.edits);
@@ -253,7 +253,7 @@ fn assertRevisionPairInvariant(
     defer testing.allocator.free(rebuilt_after);
     try testing.expectEqualStrings(after.body, rebuilt_after);
 
-    var patches = dmp.Patch.initOptions(patch_config);
+    var patches = dmp.Patch.init(patch_config);
     defer patches.deinit(testing.allocator);
     _ = try patches.make(testing.allocator, before.body, diff.edits);
     try expectPatchUtf8(patches.hunks);
@@ -262,7 +262,7 @@ fn assertRevisionPairInvariant(
     defer testing.allocator.free(patch_text);
     try expectValidUtf8(patch_text);
 
-    var reparsed_patches = dmp.Patch.init();
+    var reparsed_patches: dmp.Patch = .default;
     defer reparsed_patches.deinit(testing.allocator);
     _ = try reparsed_patches.fromTextPatch(testing.allocator, patch_text);
     try expectPatchUtf8(reparsed_patches.hunks);
@@ -341,8 +341,13 @@ test "corpus revision pairs satisfy diff and patch invariants" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const diff_config: dmp.Diff.DiffConfig = .{ .check_line_threshold = 1024 * 1024, .timeout = 0 };
-    const patch_config: dmp.Patch.PatchConfig = .{};
+    const diff_config: dmp.Diff.DiffConfig = blk: {
+        var config: dmp.Diff.DiffConfig = .default;
+        config.check_line_threshold = 1024 * 1024;
+        config.timeout = 0;
+        break :blk config;
+    };
+    const patch_config: dmp.Patch.PatchConfig = .default;
 
     var fixtures = try loadCorpusFixtures(arena);
     defer fixtures.deinit();
