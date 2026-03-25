@@ -163,12 +163,31 @@ pub fn init(config: PatchConfig) Patch {
     return .{ .config = config };
 }
 
+/// Own all diffs in the Patch.  After this operation it is safe
+/// to dispose of the original strings.
+pub fn own(self: *Patch, allocator: Allocator) error{OutOfMemory}!void {
+    for (self.hunks.items) |*patch| {
+        for (patch.diffs.items) |*edit| {
+            try edit.own(allocator);
+        }
+    }
+}
+
 /// Make a deep clone of the entire Patch, this will own all
 /// associated memory down to every slice.
 pub fn clone(self: Patch, allocator: Allocator) !Patch {
     return .{
         .config = self.config,
         .hunks = try clonePatchList(allocator, self.hunks),
+    };
+}
+
+/// Make a copy of the Patch.  Each Edit in the new copy will have the
+/// same ownership status as that of the original.
+pub fn copy(self: Patch, allocator: Allocator) error{OutOfMemory}!Patch {
+    return .{
+        .config = self.config,
+        .hunks = try copyPatchList(allocator, self.hunks),
     };
 }
 
@@ -282,6 +301,28 @@ fn clonePatchList(allocator: Allocator, patches: PatchList) !PatchList {
     try new_patches.ensureTotalCapacity(allocator, patches.items.len);
     for (patches.items) |patch| {
         new_patches.appendAssumeCapacity(try patch.clone(allocator));
+    }
+    return new_patches;
+}
+
+fn copyPatchList(allocator: Allocator, patches: PatchList) !PatchList {
+    var new_patches: PatchList = .empty;
+    errdefer deinitPatchList(allocator, &new_patches);
+    try new_patches.ensureTotalCapacity(allocator, patches.items.len);
+    for (patches.items) |patch| {
+        var new_diffs: DiffList = .empty;
+        errdefer deinitDiffList(allocator, &new_diffs);
+        try new_diffs.ensureTotalCapacity(allocator, patch.diffs.items.len);
+        for (patch.diffs.items) |*edit| {
+            new_diffs.appendAssumeCapacity(try edit.copy(allocator));
+        }
+        new_patches.appendAssumeCapacity(.{
+            .diffs = new_diffs,
+            .start1 = patch.start1,
+            .length1 = patch.length1,
+            .start2 = patch.start2,
+            .length2 = patch.length2,
+        });
     }
     return new_patches;
 }
@@ -616,11 +657,6 @@ fn patchAddContext(
 /// Functions which operate on an existing DiffList should use `.copy`:
 /// as the name indicates, copies of the Diffs will be made, and the
 /// original memory must be freed separately.
-const DiffHandling = enum {
-    copy,
-    own,
-};
-
 fn diffAndMakePatchWithConfig(
     config: PatchConfig,
     allocator: Allocator,
@@ -638,7 +674,7 @@ fn diffAndMakePatchWithConfig(
     var diffs = diff_obj.edits;
     diff_obj.edits = .empty;
     defer deinitDiffList(allocator, &diffs);
-    return try makePatchInternal(config, allocator, text1, diffs, .own);
+    return try makePatchInternal(config, allocator, text1, diffs);
 }
 
 /// @return List of Patch objects.
@@ -647,7 +683,6 @@ fn makePatchInternal(
     allocator: Allocator,
     text: []const u8,
     diffs: DiffList,
-    diff_act: DiffHandling,
 ) error{OutOfMemory}!PatchList {
     var patches: PatchList = .empty;
     errdefer deinitPatchList(allocator, &patches);
@@ -694,14 +729,9 @@ fn makePatchInternal(
             .insert => {
                 try patch.diffs.ensureUnusedCapacity(allocator, 1);
                 const d = the_diff: {
-                    if (diff_act == .copy) {
-                        const new = try a_diff.clone(allocator);
-                        break :the_diff new;
-                    } else {
-                        assert(a_diff.eql(diffs.items[i]));
-                        diffs.items[i] = dummy_diff;
-                        break :the_diff a_diff;
-                    }
+                    assert(a_diff.eql(diffs.items[i]));
+                    diffs.items[i] = dummy_diff;
+                    break :the_diff a_diff;
                 };
                 patch.diffs.appendAssumeCapacity(d);
                 patch.length2 += a_diff.text.len;
@@ -710,43 +740,34 @@ fn makePatchInternal(
             .delete => {
                 try patch.diffs.ensureUnusedCapacity(allocator, 1);
                 const d = the_diff: {
-                    if (diff_act == .copy) {
-                        const new = try a_diff.clone(allocator);
-                        break :the_diff new;
-                    } else {
-                        assert(a_diff.eql(diffs.items[i]));
-                        diffs.items[i] = dummy_diff;
-                        break :the_diff a_diff;
-                    }
+                    assert(a_diff.eql(diffs.items[i]));
+                    diffs.items[i] = dummy_diff;
+                    break :the_diff a_diff;
                 };
                 patch.diffs.appendAssumeCapacity(d);
                 patch.length1 += a_diff.text.len;
                 try postpatch.replaceRange(char_count2, a_diff.text.len, "");
             },
             .equal => {
-                //
+                var current_transferred = false;
                 if (a_diff.text.len <= 2 * config.margin and patch.diffs.items.len != 0 and !a_diff.eql(diffs.getLast())) {
                     // Small equality inside a patch.
                     try patch.diffs.ensureUnusedCapacity(allocator, 1);
                     const d = the_diff: {
-                        if (diff_act == .copy) {
-                            const new = try a_diff.clone(allocator);
-                            break :the_diff new;
-                        } else {
-                            assert(a_diff.eql(diffs.items[i]));
-                            diffs.items[i] = dummy_diff;
-                            break :the_diff a_diff;
-                        }
+                        assert(a_diff.eql(diffs.items[i]));
+                        diffs.items[i] = dummy_diff;
+                        break :the_diff a_diff;
                     };
                     patch.diffs.appendAssumeCapacity(d);
                     patch.length1 += a_diff.text.len;
                     patch.length2 += a_diff.text.len;
+                    current_transferred = true;
                 }
                 if (a_diff.text.len >= 2 * config.margin) {
                     // Time for a new patch.
                     if (patch.diffs.items.len != 0) {
                         // Free the Diff if we own it.
-                        if (diff_act == .own) {
+                        if (!current_transferred) {
                             assert(a_diff.eql(diffs.items[i]));
                             diffs.items[i] = dummy_diff;
                             var diff_to_deinit = a_diff;
@@ -801,7 +822,16 @@ fn makePatchWithConfig(
     text: []const u8,
     diffs: DiffList,
 ) error{OutOfMemory}!PatchList {
-    return try makePatchInternal(config, allocator, text, diffs, .copy);
+    var difference: Diff = .{
+        .config = .default,
+        .edits = diffs,
+    };
+    var copied = try difference.copy(allocator);
+    defer copied.deinit(allocator);
+    var copied_diffs = copied.edits;
+    copied.edits = .empty;
+    defer deinitDiffList(allocator, &copied_diffs);
+    return try makePatchInternal(config, allocator, text, copied_diffs);
 }
 
 fn makePatchFromDiffWithConfig(
@@ -811,7 +841,12 @@ fn makePatchFromDiffWithConfig(
 ) error{OutOfMemory}!PatchList {
     const text1 = try difference.beforeText(allocator);
     defer allocator.free(text1);
-    return try makePatchWithConfig(config, allocator, text1, difference.edits);
+    var copied = try difference.copy(allocator);
+    defer copied.deinit(allocator);
+    var copied_diffs = copied.edits;
+    copied.edits = .empty;
+    defer deinitDiffList(allocator, &copied_diffs);
+    return try makePatchInternal(config, allocator, text1, copied_diffs);
 }
 
 /// Merge a set of patches onto the text.  Returns a tuple: the first of which

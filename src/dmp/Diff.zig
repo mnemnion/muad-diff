@@ -96,7 +96,19 @@ pub const Edit = struct {
         return a.operation == b.operation and std.mem.eql(u8, a.text, b.text);
     }
 
-    pub fn clone(edit: Edit, allocator: Allocator) !Edit {
+    /// Copy the Edit.  An owned Edit will copy its text, a borrowed
+    /// Edit will continue to be borrowed.
+    pub fn copy(edit: *const Edit, allocator: Allocator) !Edit {
+        if (edit.owned) {
+            return edit.clone(allocator);
+        } else {
+            return edit.*;
+        }
+    }
+
+    /// Clone the edit.  The returned edit will always own a copy
+    /// of the text.
+    pub fn clone(edit: *const Edit, allocator: Allocator) !Edit {
         return Edit{
             .operation = edit.operation,
             .owned = true,
@@ -183,11 +195,29 @@ pub fn init(config: DiffConfig) Diff {
     return .{ .config = config };
 }
 
-/// Clone this `Diff`, including its owned edits.
-pub fn clone(difference: Diff, allocator: Allocator) !Diff {
+/// Own all edits in the Diff.  After this operation it is safe
+/// to dispose of the original strings.
+pub fn own(difference: *Diff, allocator: Allocator) OOM!Diff {
+    for (difference.edits.items) |*e| {
+        try e.own(allocator);
+    }
+}
+
+/// Clone this `Diff`, including its owned edits.  The clone is
+/// fully-owned, the ownership in the original does not change.
+pub fn clone(difference: *const Diff, allocator: Allocator) OOM!Diff {
     return .{
         .config = difference.config,
-        .edits = try cloneDiffList(allocator, difference.edits),
+        .edits = try cloneDiffList(allocator, &difference.edits),
+    };
+}
+
+/// Make a copy of the Diff.  Each Edit in the new copy will have the
+/// same ownership status as that of the original.
+pub fn copy(difference: *const Diff, allocator: Allocator) OOM!Diff {
+    return .{
+        .config = difference.config,
+        .edits = try copyDiffList(allocator, &difference.edits),
     };
 }
 
@@ -295,12 +325,24 @@ pub fn index(difference: Diff, loc: usize) usize {
 const deinitDiffList = common.deinitDiffList;
 
 /// Clone a `DiffList`, including each edit's owned text.
-fn cloneDiffList(allocator: Allocator, diffs: DiffList) !DiffList {
+fn cloneDiffList(allocator: Allocator, diffs: *const DiffList) !DiffList {
     var new_diffs: DiffList = .empty;
     try new_diffs.ensureTotalCapacity(allocator, diffs.items.len);
     errdefer deinitDiffList(allocator, &new_diffs);
-    for (diffs.items) |d| {
+    for (diffs.items) |*d| {
         new_diffs.appendAssumeCapacity(try d.clone(allocator));
+    }
+    return new_diffs;
+}
+
+/// Copy a `Difflist`, preserving the ownership status of the
+/// original.
+fn copyDiffList(allocator: Allocator, diffs: *const DiffList) !DiffList {
+    var new_diffs: DiffList = .empty;
+    try new_diffs.ensureTotalCapacity(allocator, diffs.items.len);
+    errdefer deinitDiffList(allocator, &new_diffs);
+    for (diffs.items) |*d| {
+        new_diffs.appendAssumeCapacity(try d.copy(allocator));
     }
     return new_diffs;
 }
