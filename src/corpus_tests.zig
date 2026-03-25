@@ -222,6 +222,15 @@ fn expectPatchUtf8(patches: dmp.Patch.PatchList) !void {
     }
 }
 
+fn expectEqualDiff(expected: []const dmp.Diff.Edit, actual: []const dmp.Diff.Edit) !void {
+    try testing.expectEqual(expected.len, actual.len);
+
+    for (expected, actual) |expected_edit, actual_edit| {
+        try testing.expectEqual(expected_edit.operation, actual_edit.operation);
+        try testing.expectEqualStrings(expected_edit.text, actual_edit.text);
+    }
+}
+
 fn expectPatchesEqual(expected: dmp.Patch.PatchList, actual: dmp.Patch.PatchList) !void {
     try testing.expectEqual(expected.items.len, actual.items.len);
 
@@ -230,7 +239,7 @@ fn expectPatchesEqual(expected: dmp.Patch.PatchList, actual: dmp.Patch.PatchList
         try testing.expectEqual(expected_patch.length1, actual_patch.length1);
         try testing.expectEqual(expected_patch.start2, actual_patch.start2);
         try testing.expectEqual(expected_patch.length2, actual_patch.length2);
-        try testing.expectEqualDeep(expected_patch.diffs.items, actual_patch.diffs.items);
+        try expectEqualDiff(expected_patch.diffs.items, actual_patch.diffs.items);
     }
 }
 
@@ -344,6 +353,7 @@ test "corpus revision pairs satisfy diff and patch invariants" {
     const diff_config: dmp.Diff.DiffConfig = blk: {
         var config: dmp.Diff.DiffConfig = .default;
         config.check_line_threshold = 1024 * 1024;
+        config.check_lines = false;
         config.timeout = 0;
         break :blk config;
     };

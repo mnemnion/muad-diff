@@ -574,9 +574,10 @@ fn patchAddContext(
     };
     if (prefix.len != 0) {
         try patch.diffs.ensureUnusedCapacity(allocator, 1);
-        patch.diffs.insertAssumeCapacity(0, Edit.init(
+        patch.diffs.insertAssumeCapacity(0, try Edit.asOwn(
+            allocator,
             .equal,
-            try allocator.dupe(u8, prefix),
+            prefix,
         ));
     }
     // Add the suffix.
@@ -590,9 +591,10 @@ fn patchAddContext(
     if (suffix.len != 0) {
         try patch.diffs.ensureUnusedCapacity(allocator, 1);
         patch.diffs.appendAssumeCapacity(
-            Edit.init(
+            try Edit.asOwn(
+                allocator,
                 .equal,
-                try allocator.dupe(u8, suffix),
+                suffix,
             ),
         );
     }
@@ -677,7 +679,7 @@ fn makePatchInternal(
         }
     }
     const extra_u: usize = if (extra > 0) @intCast(extra) else 0;
-    const dummy_diff = Edit{ .operation = .equal, .text = "" };
+    const dummy_diff: Edit = .{ .operation = .equal, .owned = false, .text = "" };
     var postpatch = try ArrayList(u8).initCapacity(allocator, text.len + extra_u);
     defer postpatch.deinit();
     postpatch.appendSliceAssumeCapacity(text);
@@ -746,8 +748,9 @@ fn makePatchInternal(
                         // Free the Diff if we own it.
                         if (diff_act == .own) {
                             assert(a_diff.eql(diffs.items[i]));
-                            allocator.free(a_diff.text);
                             diffs.items[i] = dummy_diff;
+                            var diff_to_deinit = a_diff;
+                            diff_to_deinit.deinit(allocator);
                         }
                         try patchAddContext(config, allocator, &patch, prepatch_text);
                         try patches.ensureUnusedCapacity(allocator, 1);
@@ -1008,11 +1011,14 @@ fn patchSplitMax(
                 try patch.diffs.ensureUnusedCapacity(allocator, 1);
                 guard_precontext = false;
                 patch.diffs.appendAssumeCapacity(
-                    Edit{
+                    .{
                         .operation = .equal,
+                        .owned = true,
                         .text = precontext,
                     },
                 );
+                precontext = try allocator.alloc(u8, 0);
+                guard_precontext = true;
             }
             while (bigpatch.diffs.items.len != 0 and patch.length1 < max_patch_len) {
                 const diff_type = bigpatch.diffs.items[0].operation;
@@ -1059,16 +1065,19 @@ fn patchSplitMax(
                         patch.diffs.appendAssumeCapacity(bigpatch.diffs.orderedRemove(0));
                     } else {
                         // Free and dupe
-                        patch.diffs.appendAssumeCapacity(Edit{
+                        patch.diffs.appendAssumeCapacity(.{
                             .operation = diff_type,
+                            .owned = true,
                             .text = try allocator.dupe(u8, new_diff_text),
                         });
                         const old_diff = bigpatch.diffs.items[0];
-                        bigpatch.diffs.items[0] = Edit{
+                        bigpatch.diffs.items[0] = .{
                             .operation = diff_type,
+                            .owned = true,
                             .text = try allocator.dupe(u8, diff_text[new_diff_text.len..]),
                         };
-                        allocator.free(old_diff.text);
+                        var old_diff_to_deinit = old_diff;
+                        old_diff_to_deinit.deinit(allocator);
                     }
                 }
             }
@@ -1093,12 +1102,19 @@ fn patchSplitMax(
             // need it.
             if (bigpatch.diffs.items.len != 0) {
                 const after_text = try (Diff{ .edits = patch.diffs }).afterText(allocator);
-                if (patch_margin > after_text.len) {
-                    precontext = after_text;
-                } else {
-                    defer allocator.free(after_text);
-                    precontext = try allocator.dupe(u8, after_text[after_text.len - patch_margin ..]);
-                }
+                const next_precontext = blk: {
+                    if (patch_margin > after_text.len) {
+                        break :blk after_text;
+                    } else {
+                        defer allocator.free(after_text);
+                        break :blk try allocator.dupe(
+                            u8,
+                            after_text[after_text.len - patch_margin ..],
+                        );
+                    }
+                };
+                allocator.free(precontext);
+                precontext = next_precontext;
                 guard_precontext = true;
             }
             if (postcontext.len != 0) {
@@ -1108,27 +1124,36 @@ fn patchSplitMax(
                 const last_diff = patch.diffs.getLastOrNull();
                 if (last_diff != null and last_diff.?.operation == .equal) {
                     // Free this diff and swap in a new one.
+                    const removed_last_diff = patch.diffs.orderedRemove(patch.diffs.items.len - 1);
                     defer {
-                        allocator.free(last_diff.?.text);
+                        var diff_to_deinit = removed_last_diff;
+                        diff_to_deinit.deinit(allocator);
                         allocator.free(postcontext);
                         guard_postcontext = false;
                     }
-                    patch.diffs.items.len -= 1;
                     const new_diff_text = try std.mem.concat(
                         allocator,
                         u8,
                         &.{
-                            last_diff.?.text,
+                            removed_last_diff.text,
                             postcontext,
                         },
                     );
                     patch.diffs.appendAssumeCapacity(
-                        Edit{ .operation = .equal, .text = new_diff_text },
+                        .{
+                            .operation = .equal,
+                            .owned = true,
+                            .text = new_diff_text,
+                        },
                     );
                 } else {
                     // New diff from postcontext.
                     patch.diffs.appendAssumeCapacity(
-                        Edit{ .operation = .equal, .text = postcontext },
+                        .{
+                            .operation = .equal,
+                            .owned = true,
+                            .text = postcontext,
+                        },
                     );
                 }
                 guard_postcontext = false;
@@ -1142,7 +1167,7 @@ fn patchSplitMax(
                 patch.deinit(allocator);
             }
         } // We don't use the last precontext
-        // allocator.free(precontext);
+        allocator.free(precontext);
     }
 }
 
@@ -1179,8 +1204,9 @@ fn patchAddPadding(
         try diffs_start.ensureUnusedCapacity(allocator, 1);
         diffs_start.insertAssumeCapacity(
             0,
-            Edit{
+            .{
                 .operation = .equal,
+                .owned = true,
                 .text = try allocator.dupe(u8, paddingcodes.items),
             },
         );
@@ -1194,15 +1220,20 @@ fn patchAddPadding(
         // patches.items[0].diffs = diffs_start;
     } else if (pad_len > diffs_start.items[0].text.len) {
         // Grow first equality.
-        var diff1 = &diffs_start.items[0];
-        const old_diff_text = diff1.text;
+        const diff1 = &diffs_start.items[0];
         const extra_len = pad_len - diff1.text.len;
-        diff1.text = try std.mem.concat(
-            allocator,
-            u8,
-            &.{ paddingcodes.items[diff1.text.len..], diff1.text },
-        );
-        allocator.free(old_diff_text);
+        const old_diff = diff1.*;
+        diff1.* = .{
+            .operation = old_diff.operation,
+            .owned = true,
+            .text = try std.mem.concat(
+                allocator,
+                u8,
+                &.{ paddingcodes.items[old_diff.text.len..], old_diff.text },
+            ),
+        };
+        var old_diff_to_deinit = old_diff;
+        old_diff_to_deinit.deinit(allocator);
         patch_start.start1 -= extra_len;
         patch_start.start2 -= extra_len;
         patch_start.length1 += extra_len;
@@ -1215,8 +1246,9 @@ fn patchAddPadding(
         // Add nullPadding equality.
         try diffs_end.ensureUnusedCapacity(allocator, 1);
         diffs_end.appendAssumeCapacity(
-            Edit{
+            .{
                 .operation = .equal,
+                .owned = true,
                 .text = try allocator.dupe(u8, paddingcodes.items),
             },
         );
@@ -1224,15 +1256,20 @@ fn patchAddPadding(
         patch_end.length2 += pad_len;
     } else if (pad_len > diffs_end.getLast().text.len) {
         // Grow last equality.
-        var last_diff = &diffs_end.items[diffs_end.items.len - 1];
-        const old_diff_text = last_diff.text;
+        const last_diff = &diffs_end.items[diffs_end.items.len - 1];
         const extra_len = pad_len - last_diff.text.len;
-        last_diff.text = try std.mem.concat(
-            allocator,
-            u8,
-            &.{ last_diff.text, paddingcodes.items[0..extra_len] },
-        );
-        allocator.free(old_diff_text);
+        const old_diff = last_diff.*;
+        last_diff.* = .{
+            .operation = old_diff.operation,
+            .owned = true,
+            .text = try std.mem.concat(
+                allocator,
+                u8,
+                &.{ old_diff.text, paddingcodes.items[0..extra_len] },
+            ),
+        };
+        var old_diff_to_deinit = old_diff;
+        old_diff_to_deinit.deinit(allocator);
         patch_end.length2 += extra_len;
         patch_end.length1 += extra_len;
     }
@@ -1360,38 +1397,46 @@ fn patchFromHeader(allocator: Allocator, text: []const u8) Error!struct { usize,
                 else => return error.BadPatchString,
             }
         };
-        errdefer allocator.free(diff_line);
+        var transferred = false;
+        errdefer if (!transferred) allocator.free(diff_line);
         switch (line[0]) {
             '+' => { // Insertion
                 try patch.diffs.append(
                     allocator,
-                    Edit{
+                    .{
                         .operation = .insert,
+                        .owned = true,
                         .text = diff_line,
                     },
                 );
+                transferred = true;
             },
             '-' => { // Deletion
                 try patch.diffs.append(
                     allocator,
-                    Edit{
+                    .{
                         .operation = .delete,
+                        .owned = true,
                         .text = diff_line,
                     },
                 );
+                transferred = true;
             },
             ' ' => { // Minor equality
                 try patch.diffs.append(
                     allocator,
-                    Edit{
+                    .{
                         .operation = .equal,
+                        .owned = true,
                         .text = diff_line,
                     },
                 );
+                transferred = true;
             },
             '@' => { // Start of next patch
                 // back out cursor
                 allocator.free(diff_line);
+                transferred = true;
                 cursor -= line.len + 1;
                 break :patch_loop;
             },
@@ -1598,9 +1643,9 @@ test diffLevenshtein {
         var diffs: DiffList = .empty;
         defer diffs.deinit(allocator);
         try diffs.appendSlice(allocator, &.{
-            Edit.init(.delete, "abc"),
-            Edit.init(.insert, "1234"),
-            Edit.init(.equal, "xyz"),
+            Edit.asBorrow(.delete, "abc"),
+            Edit.asBorrow(.insert, "1234"),
+            Edit.asBorrow(.equal, "xyz"),
         });
         try testing.expectEqual(4, diffLevenshtein(diffs));
     }
@@ -1608,9 +1653,9 @@ test diffLevenshtein {
         var diffs: DiffList = .empty;
         defer diffs.deinit(allocator);
         try diffs.appendSlice(allocator, &.{
-            Edit.init(.equal, "xyz"),
-            Edit.init(.delete, "abc"),
-            Edit.init(.insert, "1234"),
+            Edit.asBorrow(.equal, "xyz"),
+            Edit.asBorrow(.delete, "abc"),
+            Edit.asBorrow(.insert, "1234"),
         });
         try testing.expectEqual(4, diffLevenshtein(diffs));
     }
@@ -1618,9 +1663,9 @@ test diffLevenshtein {
         var diffs: DiffList = .empty;
         defer diffs.deinit(allocator);
         try diffs.appendSlice(allocator, &.{
-            Edit.init(.delete, "abc"),
-            Edit.init(.equal, "xyz"),
-            Edit.init(.insert, "1234"),
+            Edit.asBorrow(.delete, "abc"),
+            Edit.asBorrow(.equal, "xyz"),
+            Edit.asBorrow(.insert, "1234"),
         });
         try testing.expectEqual(7, diffLevenshtein(diffs));
     }
@@ -1650,9 +1695,10 @@ fn sliceToDiffList(allocator: Allocator, diff_slice: []const Edit) !DiffList {
     errdefer deinitDiffList(allocator, &diff_list);
     try diff_list.ensureTotalCapacity(allocator, diff_slice.len);
     for (diff_slice) |d| {
-        diff_list.appendAssumeCapacity(Edit.init(
+        diff_list.appendAssumeCapacity(try Edit.asOwn(
+            allocator,
             d.operation,
-            try allocator.dupe(u8, d.text),
+            d.text,
         ));
     }
     return diff_list;
@@ -2018,13 +2064,13 @@ fn testPatchToText(allocator: Allocator) !void {
         .length1 = 18,
         .length2 = 17,
         .diffs = try sliceToDiffList(allocator, &.{
-            .{ .operation = .equal, .text = "jump" },
-            .{ .operation = .delete, .text = "s" },
-            .{ .operation = .insert, .text = "ed" },
-            .{ .operation = .equal, .text = " over " },
-            .{ .operation = .delete, .text = "the" },
-            .{ .operation = .insert, .text = "a" },
-            .{ .operation = .equal, .text = "\nlaz" },
+            .{ .operation = .equal, .owned = false, .text = "jump" },
+            .{ .operation = .delete, .owned = false, .text = "s" },
+            .{ .operation = .insert, .owned = false, .text = "ed" },
+            .{ .operation = .equal, .owned = false, .text = " over " },
+            .{ .operation = .delete, .owned = false, .text = "the" },
+            .{ .operation = .insert, .owned = false, .text = "a" },
+            .{ .operation = .equal, .owned = false, .text = "\nlaz" },
         }),
     };
     defer p.deinit(allocator);
@@ -2319,8 +2365,8 @@ fn testMakePatch(allocator: Allocator) !void {
     }
     {
         var diffs = try sliceToDiffList(allocator, &.{
-            .{ .operation = .delete, .text = "`1234567890-=[]\\;',./" },
-            .{ .operation = .insert, .text = "~!@#$%^&*()_+{}|:\"<>?" },
+            .{ .operation = .delete, .owned = false, .text = "`1234567890-=[]\\;',./" },
+            .{ .operation = .insert, .owned = false, .text = "~!@#$%^&*()_+{}|:\"<>?" },
         });
         defer deinitDiffList(allocator, &diffs);
         const difference = Diff{ .edits = diffs };
