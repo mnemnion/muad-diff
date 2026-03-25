@@ -76,6 +76,14 @@ pub const Edit = struct {
         };
     }
 
+    /// Create an Edit with the provided ownership status
+    pub fn asBool(allocator: Allocator, operation: Operation, owned: bool, text: []const u8) OOM!Edit {
+        if (owned)
+            return Edit.asOwn(allocator, operation, text)
+        else
+            return Edit.asBorrow(operation, text);
+    }
+
     /// Turn a borrowed Edit into an owned Edit.  If the Edit is
     /// already owned, this has no effect.
     pub fn own(edit: *Edit, allocator: Allocator) OOM!void {
@@ -92,7 +100,6 @@ pub const Edit = struct {
         return Edit{
             .operation = edit.operation,
             .owned = true,
-            // ANN: dupe
             // Clone must own an independent copy of the edit text.
             .text = try allocator.dupe(u8, edit.text),
         };
@@ -369,7 +376,6 @@ fn diffInternal(
     // Restore the prefix and suffix.
     if (common_prefix.len != 0) {
         try diffs.ensureUnusedCapacity(allocator, 1);
-        // ANN: borrow
         diffs.insertAssumeCapacity(0, Edit.asBorrow(
             .equal,
             common_prefix,
@@ -377,7 +383,6 @@ fn diffInternal(
     }
     if (common_suffix.len != 0) {
         try diffs.ensureUnusedCapacity(allocator, 1);
-        // ANN: borrow
         diffs.appendAssumeCapacity(Edit.asBorrow(
             .equal,
             common_suffix,
@@ -438,7 +443,6 @@ fn diffCompute(
         var diffs: DiffList = .empty;
         errdefer deinitDiffList(allocator, &diffs);
         try diffs.ensureUnusedCapacity(allocator, 1);
-        // ANN: borrow
         diffs.appendAssumeCapacity(Edit.asBorrow(
             .insert,
             after,
@@ -451,7 +455,6 @@ fn diffCompute(
         var diffs: DiffList = .empty;
         errdefer deinitDiffList(allocator, &diffs);
         try diffs.ensureUnusedCapacity(allocator, 1);
-        // ANN: borrow
         diffs.appendAssumeCapacity(Edit.asBorrow(
             .delete,
             before,
@@ -471,17 +474,14 @@ fn diffCompute(
         else
             .insert;
         try diffs.ensureUnusedCapacity(allocator, 3);
-        // ANN: borrow
         diffs.appendAssumeCapacity(Edit.asBorrow(
             op,
             long_text[0..match_index],
         ));
-        // ANN: borrow
         diffs.appendAssumeCapacity(Edit.asBorrow(
             .equal,
             short_text,
         ));
-        // ANN: borrow
         diffs.appendAssumeCapacity(Edit.asBorrow(
             op,
             long_text[match_index + short_text.len ..],
@@ -495,12 +495,10 @@ fn diffCompute(
         var diffs: DiffList = .empty;
         errdefer deinitDiffList(allocator, &diffs);
         try diffs.ensureUnusedCapacity(allocator, 2);
-        // ANN: borrow
         diffs.appendAssumeCapacity(Edit.asBorrow(
             .delete,
             before,
         ));
-        // ANN: borrow
         diffs.appendAssumeCapacity(Edit.asBorrow(
             .insert,
             after,
@@ -541,7 +539,6 @@ fn diffCompute(
         // Merge the results.
         try diffs.ensureUnusedCapacity(allocator, 1);
         diffs.appendAssumeCapacity(
-            // ANN: borrow
             Edit.asBorrow(.equal, half_match.common_middle),
         );
         half_match.common_middle = "";
@@ -660,15 +657,10 @@ fn diffHalfMatchInternal(
     }
     if (best_common.len * 2 >= long_text.len) {
         return .{
-            // ANN: borrow
             .prefix_before = best_long_text_a,
-            // ANN: borrow
             .suffix_before = best_long_text_b,
-            // ANN: borrow
             .prefix_after = best_short_text_a,
-            // ANN: borrow
             .suffix_after = best_short_text_b,
-            // ANN: borrow
             .common_middle = best_common,
         };
     } else {
@@ -812,12 +804,10 @@ fn diffBisectConfig(
     try diffs.ensureUnusedCapacity(allocator, 2);
     diffs.appendAssumeCapacity(Edit.asBorrow(
         .delete,
-        // ANN: borrow
         before,
     ));
     diffs.appendAssumeCapacity(Edit.asBorrow(
         .insert,
-        // ANN: borrow
         after,
     ));
     return diffs;
@@ -858,12 +848,10 @@ fn diffBisectSplit(
         try diffs.ensureUnusedCapacity(allocator, 2);
         diffs.appendAssumeCapacity(Edit.asBorrow(
             .delete,
-            // ANN: borrow
             text1b,
         ));
         diffs.appendAssumeCapacity(Edit.asBorrow(
             .insert,
-            // ANN: borrow
             text2b,
         ));
         return diffs;
@@ -873,12 +861,10 @@ fn diffBisectSplit(
         try diffs.ensureUnusedCapacity(allocator, 2);
         diffs.appendAssumeCapacity(Edit.asBorrow(
             .delete,
-            // ANN: borrow
             text2b,
         ));
         diffs.appendAssumeCapacity(Edit.asBorrow(
             .insert,
-            // ANN: borrow
             text2a,
         ));
         return diffs;
@@ -1255,8 +1241,6 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void {
                                 equal_to_deinit.deinit(allocator);
                             } else {
                                 try diffs.ensureUnusedCapacity(allocator, 1);
-                                // ANN: dupe
-                                // This equality is materialized from the scratch merge buffer.
                                 diffs.insertAssumeCapacity(0, try Edit.asOwn(allocator, .equal, text_insert.items[0..common_length]));
                                 pointer += 1;
                             }
@@ -1289,15 +1273,11 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void {
 
                     if (text_delete.items.len != 0) {
                         try diffs.ensureUnusedCapacity(allocator, 1);
-                        // ANN: dupe
-                        // This delete block is synthesized from aggregated scratch text.
                         diffs.insertAssumeCapacity(pointer, try Edit.asOwn(allocator, .delete, text_delete.items));
                         pointer += 1;
                     }
                     if (text_insert.items.len != 0) {
                         try diffs.ensureUnusedCapacity(allocator, 1);
-                        // ANN: dupe
-                        // This insert block is synthesized from aggregated scratch text.
                         diffs.insertAssumeCapacity(pointer, try Edit.asOwn(allocator, .insert, text_insert.items));
                         pointer += 1;
                     }
@@ -1492,11 +1472,10 @@ fn diffCleanupSemantic(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void 
         if (diffs.items[pointer - 1].operation == .delete and
             diffs.items[pointer].operation == .insert)
         {
-            // ANN: NOTE: each of these comes from an Edit, which will either itself
-            // be borrowed or owned.  Where it says follow-original, those have to be
-            // either a borrow or another own, depending on which case applies.
-            const deletion = diffs.items[pointer - 1].text;
-            const insertion = diffs.items[pointer].text;
+            const delete_edit = diffs.items[pointer - 1];
+            const insert_edit = diffs.items[pointer];
+            const deletion = delete_edit.text;
+            const insertion = insert_edit.text;
             const overlap_length1: usize = diffCommonOverlap(deletion, insertion);
             const overlap_length2: usize = diffCommonOverlap(insertion, deletion);
             if (overlap_length1 >= overlap_length2) {
@@ -1508,21 +1487,27 @@ fn diffCleanupSemantic(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void 
                     try diffs.ensureUnusedCapacity(allocator, 1);
                     diffs.insertAssumeCapacity(
                         pointer,
-                        try Edit.asOwn(
-                            allocator,
-                            .equal,
-                            // ANN: follow-original
-                            insertion[0..overlap_length1],
-                        ),
+                        try Edit.asBool(allocator, .equal, insert_edit.owned, insertion[0..overlap_length1]),
                     );
-                    diffs.items[pointer - 1].text =
-                        // ANN: follow-original
-                        try allocator.dupe(u8, deletion[0 .. deletion.len - overlap_length1]);
-                    allocator.free(deletion);
-                    diffs.items[pointer + 1].text =
-                        // ANN: follow-original
-                        try allocator.dupe(u8, insertion[overlap_length1..]);
-                    allocator.free(insertion);
+                    var new_minus = try Edit.asBool(
+                        allocator,
+                        .delete,
+                        delete_edit.owned,
+                        deletion[0 .. deletion.len - overlap_length1],
+                    );
+                    errdefer new_minus.deinit(allocator);
+                    const new_plus = try Edit.asBool(
+                        allocator,
+                        .insert,
+                        insert_edit.owned,
+                        insertion[overlap_length1..],
+                    );
+                    var delete_to_deinit = delete_edit;
+                    delete_to_deinit.deinit(allocator);
+                    var insert_to_deinit = insert_edit;
+                    insert_to_deinit.deinit(allocator);
+                    diffs.items[pointer - 1] = new_minus;
+                    diffs.items[pointer + 1] = new_plus;
                     pointer += 1;
                 }
             } else {
@@ -1534,24 +1519,27 @@ fn diffCleanupSemantic(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void 
                     try diffs.ensureUnusedCapacity(allocator, 1);
                     diffs.insertAssumeCapacity(
                         pointer,
-                        try Edit.asOwn(
-                            allocator,
-                            .equal,
-                            // ANN: follow-original
-                            deletion[0..overlap_length2],
-                        ),
+                        try Edit.asBool(allocator, .equal, delete_edit.owned, deletion[0..overlap_length2]),
                     );
-                    // ANN: follow-original
-                    const new_minus = try allocator.dupe(u8, insertion[0 .. insertion.len - overlap_length2]);
-                    errdefer allocator.free(new_minus); // necessary due to swap
-                    // ANN: follow-original
-                    const new_plus = try allocator.dupe(u8, deletion[overlap_length2..]);
-                    allocator.free(deletion);
-                    allocator.free(insertion);
-                    diffs.items[pointer - 1].operation = .insert;
-                    diffs.items[pointer - 1].text = new_minus;
-                    diffs.items[pointer + 1].operation = .delete;
-                    diffs.items[pointer + 1].text = new_plus;
+                    var new_minus = try Edit.asBool(
+                        allocator,
+                        .insert,
+                        insert_edit.owned,
+                        insertion[0 .. insertion.len - overlap_length2],
+                    );
+                    errdefer new_minus.deinit(allocator);
+                    const new_plus = try Edit.asBool(
+                        allocator,
+                        .delete,
+                        delete_edit.owned,
+                        deletion[overlap_length2..],
+                    );
+                    var delete_to_deinit = delete_edit;
+                    delete_to_deinit.deinit(allocator);
+                    var insert_to_deinit = insert_edit;
+                    insert_to_deinit.deinit(allocator);
+                    diffs.items[pointer - 1] = new_minus;
+                    diffs.items[pointer + 1] = new_plus;
                     pointer += 1;
                 }
             }
@@ -1590,15 +1578,11 @@ fn diffCleanupSemanticLossless(
             // First, shift the edit as far left as possible.
             const common_offset = diffCommonSuffix(equality_1.items, edit.items);
             if (common_offset > 0) {
-                // ANN: dupe
-                // This is scratch text used while reshaping the local window.
                 const common_string = try allocator.dupe(u8, edit.items[edit.items.len - common_offset ..]);
                 defer allocator.free(common_string);
 
                 equality_1.items.len = equality_1.items.len - common_offset;
 
-                // ANN: dupe
-                // This is scratch text used while reshaping the local window.
                 const not_common = try allocator.dupe(u8, edit.items[0 .. edit.items.len - common_offset]);
                 defer allocator.free(not_common);
 
@@ -1656,8 +1640,6 @@ fn diffCleanupSemanticLossless(
                 // We have an improvement, save it back to the diff.
                 if (best_equality_1.items.len != 0) {
                     const old_text = diffs.items[pointer - 1].text;
-                    // ANN: dupe
-                    // The best-fit text comes from scratch buffers, not stable source slices.
                     diffs.items[pointer - 1].text = try allocator.dupe(u8, best_equality_1.items);
                     allocator.free(old_text);
                 } else {
@@ -1666,14 +1648,10 @@ fn diffCleanupSemanticLossless(
                     pointer -= 1;
                 }
                 const old_text1 = diffs.items[pointer].text;
-                // ANN: dupe
-                // The best-fit text comes from scratch buffers, not stable source slices.
                 diffs.items[pointer].text = try allocator.dupe(u8, best_edit.items);
                 defer allocator.free(old_text1);
                 if (best_equality_2.items.len != 0) {
                     const old_text2 = diffs.items[pointer + 1].text;
-                    // ANN: dupe
-                    // The best-fit text comes from scratch buffers, not stable source slices.
                     diffs.items[pointer + 1].text = try allocator.dupe(u8, best_equality_2.items);
                     allocator.free(old_text2);
                 } else {
@@ -1799,8 +1777,6 @@ fn diffCleanupEfficiencyConfig(
                     try Edit.asOwn(
                         allocator,
                         .delete,
-                        // ANN: dupe
-                        // This path needs a second live copy of the equality text.
                         last_equality,
                     ),
                 );
