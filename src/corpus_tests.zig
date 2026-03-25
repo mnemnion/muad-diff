@@ -258,13 +258,13 @@ fn assertRevisionPairInvariant(
     _ = try patches.make(testing.allocator, before.body, diff.edits);
     try expectPatchUtf8(patches.hunks);
 
-    const patch_text = try patches.toText(testing.allocator);
+    const patch_text = try patches.toTextPatch(testing.allocator);
     defer testing.allocator.free(patch_text);
     try expectValidUtf8(patch_text);
 
     var reparsed_patches = dmp.Patch.init();
     defer reparsed_patches.deinit(testing.allocator);
-    _ = try reparsed_patches.fromText(testing.allocator, patch_text);
+    _ = try reparsed_patches.fromTextPatch(testing.allocator, patch_text);
     try expectPatchUtf8(reparsed_patches.hunks);
     try expectPatchesEqual(patches.hunks, reparsed_patches.hunks);
 
