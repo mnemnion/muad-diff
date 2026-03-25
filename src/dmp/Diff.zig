@@ -24,7 +24,10 @@ config: DiffConfig = .{},
 /// An ArrayList of the individual `Edit`s in this diff.
 edits: DiffList = .empty,
 
-pub const DiffError = dmp.DiffError;
+pub const DiffError = error{
+    OutOfMemory,
+    BadPatchString,
+};
 
 /// A single edit of a diff: insertion, deletion, or neither.
 pub const Edit = struct {

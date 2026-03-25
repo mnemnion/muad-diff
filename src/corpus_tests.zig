@@ -210,19 +210,19 @@ fn expectValidUtf8(text: []const u8) !void {
     try testing.expect(std.unicode.utf8ValidateSlice(text));
 }
 
-fn expectDiffListUtf8(diffs: dmp.DiffList) !void {
+fn expectDiffListUtf8(diffs: dmp.Diff.DiffList) !void {
     for (diffs.items) |diff| {
         try expectValidUtf8(diff.text);
     }
 }
 
-fn expectPatchUtf8(patches: dmp.PatchList) !void {
+fn expectPatchUtf8(patches: dmp.Patch.PatchList) !void {
     for (patches.items) |patch| {
         try expectDiffListUtf8(patch.diffs);
     }
 }
 
-fn expectPatchesEqual(expected: dmp.PatchList, actual: dmp.PatchList) !void {
+fn expectPatchesEqual(expected: dmp.Patch.PatchList, actual: dmp.Patch.PatchList) !void {
     try testing.expectEqual(expected.items.len, actual.items.len);
 
     for (expected.items, actual.items) |expected_patch, actual_patch| {
@@ -235,8 +235,8 @@ fn expectPatchesEqual(expected: dmp.PatchList, actual: dmp.PatchList) !void {
 }
 
 fn assertRevisionPairInvariant(
-    diff_config: dmp.DiffConfig,
-    patch_config: dmp.PatchConfig,
+    diff_config: dmp.Diff.DiffConfig,
+    patch_config: dmp.Patch.PatchConfig,
     before: RevisionFixture,
     after: RevisionFixture,
 ) !void {
@@ -341,8 +341,8 @@ test "corpus revision pairs satisfy diff and patch invariants" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const diff_config: dmp.DiffConfig = .{ .check_line_threshold = 1024 * 1024, .timeout = 0 };
-    const patch_config: dmp.PatchConfig = .{};
+    const diff_config: dmp.Diff.DiffConfig = .{ .check_line_threshold = 1024 * 1024, .timeout = 0 };
+    const patch_config: dmp.Patch.PatchConfig = .{};
 
     var fixtures = try loadCorpusFixtures(arena);
     defer fixtures.deinit();
