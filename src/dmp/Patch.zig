@@ -204,38 +204,38 @@ pub fn deinit(self: *Patch, allocator: Allocator) void {
 /// @param diffs Array of Diff objects for text1 to text2.
 /// @return self.
 pub fn make(
-    self: *Patch,
+    patch: *Patch,
     allocator: Allocator,
     text: []const u8,
     diffs: DiffList,
 ) error{OutOfMemory}!*Patch {
-    if (self.hunks.items.len > 0) self.deinit(allocator);
-    self.hunks = try makePatchWithConfig(self.config, allocator, text, diffs);
-    return self;
+    if (patch.hunks.items.len > 0) patch.deinit(allocator);
+    patch.hunks = try patch.makePatch(allocator, text, diffs);
+    return patch;
 }
 
 /// Compute a list of patches from an existing `Diff`.
 /// @return self.
 pub fn fromDiff(
-    self: *Patch,
+    patch: *Patch,
     allocator: Allocator,
     difference: *const Diff,
 ) error{OutOfMemory}!*Patch {
-    self.deinit(allocator);
-    self.hunks = try makePatchFromDiffWithConfig(self.config, allocator, difference);
-    return self;
+    patch.deinit(allocator);
+    patch.hunks = try patch.makePatchFromDiff(allocator, difference);
+    return patch;
 }
 
 /// @return self.
 pub fn fromTexts(
-    self: *Patch,
+    patch: *Patch,
     allocator: Allocator,
     text1: []const u8,
     text2: []const u8,
 ) error{OutOfMemory}!*Patch {
-    self.deinit(allocator);
-    self.hunks = try diffAndMakePatchWithConfig(self.config, allocator, text1, text2);
-    return self;
+    patch.deinit(allocator);
+    patch.hunks = try patch.diffAndMakePatch(allocator, text1, text2);
+    return patch;
 }
 
 /// Parse a textual representation of patches and return a List of Patch
@@ -268,11 +268,11 @@ pub fn fromTextPatch(
 /// @return Two element Object array, containing the new text and an array of
 ///      bool values.
 pub fn apply(
-    self: Patch,
+    patch: Patch,
     allocator: Allocator,
     og_text: []const u8,
 ) error{OutOfMemory}!struct { []const u8, bool } {
-    return try patchApplyWithConfig(self.config, allocator, self.hunks, og_text);
+    return try patch.applyInternal(allocator, og_text);
 }
 
 /// Take a list of patches and return a textual representation.
@@ -657,8 +657,8 @@ fn patchAddContext(
 /// Functions which operate on an existing DiffList should use `.copy`:
 /// as the name indicates, copies of the Diffs will be made, and the
 /// original memory must be freed separately.
-fn diffAndMakePatchWithConfig(
-    config: PatchConfig,
+fn diffAndMakePatch(
+    patch: *const Patch,
     allocator: Allocator,
     text1: []const u8,
     text2: []const u8,
@@ -674,7 +674,7 @@ fn diffAndMakePatchWithConfig(
     var diffs = diff_obj.edits;
     diff_obj.edits = .empty;
     defer deinitDiffList(allocator, &diffs);
-    return try makePatchInternal(config, allocator, text1, diffs);
+    return try makePatchInternal(patch.config, allocator, text1, diffs);
 }
 
 /// @return List of Patch objects.
@@ -816,8 +816,8 @@ fn makePatchInternal(
 ///
 /// @param text1 Old text.
 /// @param diffs Array of Diff objects for text1 to text2.
-fn makePatchWithConfig(
-    config: PatchConfig,
+fn makePatch(
+    patch: *const Patch,
     allocator: Allocator,
     text: []const u8,
     diffs: DiffList,
@@ -831,11 +831,11 @@ fn makePatchWithConfig(
     var copied_diffs = copied.edits;
     copied.edits = .empty;
     defer deinitDiffList(allocator, &copied_diffs);
-    return try makePatchInternal(config, allocator, text, copied_diffs);
+    return try makePatchInternal(patch.config, allocator, text, copied_diffs);
 }
 
-fn makePatchFromDiffWithConfig(
-    config: PatchConfig,
+fn makePatchFromDiff(
+    patch: *const Patch,
     allocator: Allocator,
     difference: *const Diff,
 ) error{OutOfMemory}!PatchList {
@@ -846,7 +846,7 @@ fn makePatchFromDiffWithConfig(
     var copied_diffs = copied.edits;
     copied.edits = .empty;
     defer deinitDiffList(allocator, &copied_diffs);
-    return try makePatchInternal(config, allocator, text1, copied_diffs);
+    return try makePatchInternal(patch.config, allocator, text1, copied_diffs);
 }
 
 /// Merge a set of patches onto the text.  Returns a tuple: the first of which
@@ -864,13 +864,12 @@ fn makePatchFromDiffWithConfig(
 /// @param text Old text.
 /// @return Two element Object array, containing the new text and an array of
 ///      bool values.
-fn patchApplyWithConfig(
-    config: PatchConfig,
+fn applyInternal(
+    patch: *const Patch,
     allocator: Allocator,
-    og_patches: PatchList,
     og_text: []const u8,
 ) error{OutOfMemory}!struct { []const u8, bool } {
-    if (og_patches.items.len == 0) {
+    if (patch.hunks.items.len == 0) {
         // As silly as this is, we dupe the text, because something
         // passing an empty patchset isn't going to check, and will
         // end up double-freeing if we don't.  Going with 'true' as
@@ -880,16 +879,16 @@ fn patchApplyWithConfig(
     // So we can report if all patches were applied:
     var all_applied = true;
     // Deep copy the patches so that no changes are made to originals.
-    var patches = try clonePatchList(allocator, og_patches);
+    var patches = try clonePatchList(allocator, patch.hunks);
     defer deinitPatchList(allocator, &patches);
-    const null_padding = try patchAddPadding(config, allocator, &patches);
+    const null_padding = try patchAddPadding(patch.config, allocator, &patches);
     defer allocator.free(null_padding);
     var text = try ArrayList(u8).initCapacity(allocator, og_text.len + 2 * null_padding.len);
     defer text.deinit();
     text.appendSliceAssumeCapacity(null_padding);
     text.appendSliceAssumeCapacity(og_text);
     text.appendSliceAssumeCapacity(null_padding);
-    try patchSplitMax(config, allocator, &patches);
+    try patchSplitMax(patch.config, allocator, &patches);
     // delta keeps track of the offset between the expected and actual
     // location of the previous patch.  If there are patches expected at
     // positions 10 and 20, but the first patch was found at 12, delta is 2
@@ -901,16 +900,16 @@ fn patchApplyWithConfig(
         defer allocator.free(text1);
         var maybe_start: ?usize = null;
         var maybe_end: ?usize = null;
-        const m_max_b = config.match_max_bits;
+        const m_max_b = patch.config.match_max_bits;
         if (text1.len > m_max_b) {
             // patchSplitMax will only provide an oversized pattern
             // in the case of a monster delete.
-            maybe_start = try matchMain(config, allocator, text.items, text1[0..m_max_b], expected_loc);
+            maybe_start = try matchMain(patch.config, allocator, text.items, text1[0..m_max_b], expected_loc);
             if (maybe_start) |start| {
                 // Ok because we tested and text1.len is larger.
                 const e_start = text1.len - m_max_b;
                 maybe_end = try matchMain(
-                    config,
+                    patch.config,
                     allocator,
                     text.items,
                     text1[e_start..],
@@ -926,7 +925,7 @@ fn patchApplyWithConfig(
                 }
             }
         } else {
-            maybe_start = try matchMain(config, allocator, text.items, text1, expected_loc);
+            maybe_start = try matchMain(patch.config, allocator, text.items, text1, expected_loc);
         }
         if (maybe_start) |start| {
             // Found a match.  :)
@@ -954,10 +953,10 @@ fn patchApplyWithConfig(
                     allocator,
                     text1,
                     text2,
-                );
+                ); 
                 const t1_l_float: f64 = @floatFromInt(text1.len);
                 const levenshtein_d: f64 = levenshtein(diff_obj);
-                const bad_match = levenshtein_d / t1_l_float > config.delete_threshold;
+                const bad_match = levenshtein_d / t1_l_float > patch.config.delete_threshold;
                 if (text1.len > m_max_b and bad_match) {
                     // The end points match, but the content is unacceptably bad.
                     // results[x] = false;
