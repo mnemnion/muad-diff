@@ -1191,25 +1191,15 @@ fn patchSplitMax(
         // We have a big ol' patch.
         var bigpatch = patches.orderedRemove(x);
         defer bigpatch.deinit(allocator);
-        // BUGFIX: this papers over problems caused by Diff borrowing,
-        // but is not the intended solution.
-        // TODO: revisit.
-        for (bigpatch.diffs.items) |*edit| {
-            try edit.own(allocator);
-        }
         // Prevent incrementing past the next patch:
         x_i -= 1;
         var start1 = bigpatch.start1;
         var start2 = bigpatch.start2;
-        // start with an empty precontext so that we can deinit consistently
-        var precontext: []const u8 = try allocator.alloc(u8, 0);
+        var precontext: []const u8 = "";
+        var precontext_owned = false;
+        var precontext_backing: []const u8 = "";
+        defer if (precontext_owned) allocator.free(precontext_backing);
         while (bigpatch.diffs.items.len != 0) {
-            var guard_precontext = true;
-            errdefer {
-                if (guard_precontext) {
-                    allocator.free(precontext);
-                }
-            }
             // Create one of several smaller patches.
             var hunk = Hunk{};
             errdefer hunk.deinit(allocator);
@@ -1220,16 +1210,12 @@ fn patchSplitMax(
                 hunk.length2 = precontext.len;
                 hunk.length1 = precontext.len;
                 try hunk.diffs.ensureUnusedCapacity(allocator, 1);
-                guard_precontext = false;
-                hunk.diffs.appendAssumeCapacity(
-                    .{
-                        .operation = .equal,
-                        .owned = true,
-                        .text = precontext,
-                    },
-                );
-                precontext = try allocator.alloc(u8, 0);
-                guard_precontext = true;
+                hunk.diffs.appendAssumeCapacity(try Edit.asBool(
+                    allocator,
+                    .equal,
+                    precontext_owned,
+                    precontext,
+                ));
             }
             while (bigpatch.diffs.items.len != 0 and hunk.length1 < max_patch_len) {
                 const diff_type = bigpatch.diffs.items[0].operation;
@@ -1275,58 +1261,43 @@ fn patchSplitMax(
                         // We can reuse the diff.
                         hunk.diffs.appendAssumeCapacity(bigpatch.diffs.orderedRemove(0));
                     } else {
-                        // Free and dupe
-                        hunk.diffs.appendAssumeCapacity(.{
-                            .operation = diff_type,
-                            .owned = true,
-                            .text = try allocator.dupe(u8, new_diff_text),
-                        });
                         const old_diff = bigpatch.diffs.items[0];
-                        bigpatch.diffs.items[0] = .{
-                            .operation = diff_type,
-                            .owned = true,
-                            .text = try allocator.dupe(u8, diff_text[new_diff_text.len..]),
-                        };
+                        hunk.diffs.appendAssumeCapacity(try Edit.asBool(
+                            allocator,
+                            diff_type,
+                            old_diff.owned,
+                            new_diff_text,
+                        ));
+                        bigpatch.diffs.items[0] = try Edit.asBool(
+                            allocator,
+                            diff_type,
+                            old_diff.owned,
+                            diff_text[new_diff_text.len..],
+                        );
                         var old_diff_to_deinit = old_diff;
                         old_diff_to_deinit.deinit(allocator);
                     }
                 }
             }
             // Append the end context for this patch.
-            const post_text = try (Diff{ .edits = bigpatch.diffs }).beforeText(allocator);
-            const postcontext = post: {
-                if (post_text.len > patch_margin) {
-                    defer allocator.free(post_text);
-                    const truncated = try allocator.dupe(u8, post_text[0..patch_margin]);
-                    break :post truncated;
-                } else {
-                    break :post post_text;
-                }
-            };
-            var guard_postcontext = true;
-            errdefer {
-                if (guard_postcontext) {
-                    allocator.free(postcontext);
-                }
-            }
+            const postcontext_backing = try (Diff{ .edits = bigpatch.diffs }).beforeText(allocator);
+            defer allocator.free(postcontext_backing);
+            const postcontext_owned = true;
+            const postcontext = if (postcontext_backing.len > patch_margin)
+                postcontext_backing[0..patch_margin]
+            else
+                postcontext_backing;
             // Compute the head context for the next patch, if we're going to
             // need it.
             if (bigpatch.diffs.items.len != 0) {
                 const after_text = try (Diff{ .edits = hunk.diffs }).afterText(allocator);
-                const next_precontext = blk: {
-                    if (patch_margin > after_text.len) {
-                        break :blk after_text;
-                    } else {
-                        defer allocator.free(after_text);
-                        break :blk try allocator.dupe(
-                            u8,
-                            after_text[after_text.len - patch_margin ..],
-                        );
-                    }
-                };
-                allocator.free(precontext);
-                precontext = next_precontext;
-                guard_precontext = true;
+                if (precontext_owned) allocator.free(precontext_backing);
+                precontext_backing = after_text;
+                precontext_owned = true;
+                precontext = if (patch_margin > after_text.len)
+                    after_text
+                else
+                    after_text[after_text.len - patch_margin ..];
             }
             if (postcontext.len != 0) {
                 try hunk.diffs.ensureUnusedCapacity(allocator, 1);
@@ -1339,8 +1310,6 @@ fn patchSplitMax(
                     defer {
                         var diff_to_deinit = removed_last_diff;
                         diff_to_deinit.deinit(allocator);
-                        allocator.free(postcontext);
-                        guard_postcontext = false;
                     }
                     const new_diff_text = try std.mem.concat(
                         allocator,
@@ -1350,24 +1319,20 @@ fn patchSplitMax(
                             postcontext,
                         },
                     );
-                    hunk.diffs.appendAssumeCapacity(
-                        .{
-                            .operation = .equal,
-                            .owned = true,
-                            .text = new_diff_text,
-                        },
-                    );
+                    hunk.diffs.appendAssumeCapacity(.{
+                        .operation = .equal,
+                        .owned = true,
+                        .text = new_diff_text,
+                    });
                 } else {
                     // New diff from postcontext.
-                    hunk.diffs.appendAssumeCapacity(
-                        .{
-                            .operation = .equal,
-                            .owned = true,
-                            .text = postcontext,
-                        },
-                    );
+                    hunk.diffs.appendAssumeCapacity(try Edit.asBool(
+                        allocator,
+                        .equal,
+                        postcontext_owned,
+                        postcontext,
+                    ));
                 }
-                guard_postcontext = false;
             }
             if (!empty) {
                 // Insert the next patch
@@ -1378,7 +1343,6 @@ fn patchSplitMax(
                 hunk.deinit(allocator);
             }
         } // We don't use the last precontext
-        allocator.free(precontext);
     }
 }
 
