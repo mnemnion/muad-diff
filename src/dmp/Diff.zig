@@ -951,51 +951,49 @@ fn diffLineMode(
         var char_diffs: DiffList = try diffInternal(text_mode_config, allocator, text1, text2, deadline);
         defer deinitDiffList(allocator, &char_diffs);
         // Convert the diff back to original text.
-        // TODO: pass in the texts so we can rehydrate consolidated views.
-        break :diff_munge try diffCharsToLines(allocator, &char_diffs, line_array.items);
+        break :diff_munge try diffCharsToLines(allocator, &char_diffs, line_array.items, text1_in, text2_in);
     };
     errdefer deinitDiffList(allocator, &diffs);
     // Eliminate freak matches (e.g. blank lines)
+    // TODO: This happens to pass the tests without triggering any
+    // assertions, but that seems very brittle.  More investigation
+    // is needed.
     try diffCleanupSemantic(allocator, &diffs);
 
     // Rediff any replacement blocks, this time character-by-character.
-    // Add a dummy entry at the end.
+    // Add a dummy entry at the end, to trigger a final sub-diff if needed.
     try diffs.append(allocator, Edit.asBorrow(.equal, ""));
 
+    // Here we collect deletes and inserts, and stop after any .equal to
+    // run a character diff on the lines.  Any two deletes are contiguous
+    // unless separated by an equal, and likewise with inserts, so here
+    // again we just add lengths to a base pointer.
     var pointer: usize = 0;
     var count_delete: usize = 0;
     var count_insert: usize = 0;
-    var text_delete = ArrayListUnmanaged(u8){};
-    var text_insert = ArrayListUnmanaged(u8){};
-    defer {
-        text_delete.deinit(allocator);
-        text_insert.deinit(allocator);
-    }
-
-    // TODO: once we have borrows back on the coalesced diffs, we should be
-    // able to make up-to-no extra copies:
-    // One text_insert and one text_delete, we just use the Edit, which
-    // is not borrowed, and:
-    // ---
-    // If one or both has multiples, those stretches should actually be
-    // contiguous in the document, which we can very with pointer math.
-    // If that's not true then we need to bail and copy, but I think it
-    // basically has to be true.  If we see two inserts without seeing
-    // an equals, I cannot imagine how they would not be contiguous,
-    // given that we've rehydrated the edits.
-    // ---
-    // We don't even have test data which
-    // triggers this condition, but the one-and-one case is considerable
-    // savings.
+    var delete_run: []const u8 = "";
+    var insert_run: []const u8 = "";
     while (pointer < diffs.items.len) : (pointer += 1) {
         switch (diffs.items[pointer].operation) {
             .insert => {
                 count_insert += 1;
-                try text_insert.appendSlice(allocator, diffs.items[pointer].text);
+                const text = diffs.items[pointer].text;
+                if (count_insert == 1) {
+                    insert_run = text;
+                } else {
+                    dbgassert(insert_run.ptr + insert_run.len == text.ptr);
+                    insert_run = insert_run.ptr[0 .. insert_run.len + text.len];
+                }
             },
             .delete => {
                 count_delete += 1;
-                try text_delete.appendSlice(allocator, diffs.items[pointer].text);
+                const text = diffs.items[pointer].text;
+                if (count_delete == 1) {
+                    delete_run = text;
+                } else {
+                    dbgassert(delete_run.ptr + delete_run.len == text.ptr);
+                    delete_run = delete_run.ptr[0 .. delete_run.len + text.len];
+                }
             },
             .equal => {
                 // Upon reaching an equality, check for prior redundancies.
@@ -1004,8 +1002,8 @@ fn diffLineMode(
                     var sub_diff = try diffInternal(
                         text_mode_config,
                         allocator,
-                        text_delete.items,
-                        text_insert.items,
+                        delete_run,
+                        insert_run,
                         deadline,
                     );
                     {
@@ -1028,20 +1026,19 @@ fn diffLineMode(
                     defer sub_diff.deinit(allocator);
                     const new_diff = diffs.addManyAtAssumeCapacity(pointer, sub_diff.items.len);
                     @memcpy(new_diff, sub_diff.items);
-                    for (new_diff) |*d| {
-                        try d.own(allocator);
-                    }
                     pointer = pointer + sub_diff.items.len;
                 }
                 count_insert = 0;
                 count_delete = 0;
-                text_delete.items.len = 0;
-                text_insert.items.len = 0;
+                delete_run = "";
+                insert_run = "";
             },
         }
     }
     diffs.items.len -= 1; // Remove the dummy entry at the end.
 
+    // TODO: calling this, here, breaks things.  This is itself a problem.
+    // try diffCleanupSemantic(allocator, &diffs);
     return diffs;
 }
 
@@ -1148,7 +1145,7 @@ fn diffIteratorToCharsMunge(
 ) OOM![]const u8 {
     // Because we rebase the codepoint off the already counted segments,
     // this makes the unreachables in the function legitimate:
-    assert(max_segments <= UNICODE_MAX);
+    dbgassert(max_segments <= UNICODE_MAX);
     var chars = ArrayListUnmanaged(u8){};
     defer chars.deinit(allocator);
     var codepoint: u21 = CHAR_OFFSET + cast(u21, segment_array.items.len);
@@ -1178,25 +1175,24 @@ fn diffIteratorToCharsMunge(
 }
 
 /// Rehydrate the text in a diff from a string of line hashes to real lines
-/// of text.
-/// @param diffs List of Diff objects.
-/// @param lineArray List of unique strings.
+/// of text.  The line_array deduplicates lines, by the nature of a hash map,
+/// and we want to stick to borrows, so we coalesce the lines we find as views
+/// into the original text.  The identity is asserted in debug mode, in
+/// production code it's simply arithmetic.
 fn diffCharsToLines(
     allocator: Allocator,
     char_diffs: *DiffList,
     line_array: []const []const u8,
+    before_text: []const u8,
+    after_text: []const u8,
 ) OOM!DiffList {
-    // TODO: we'll pass in the texts, and using the retrieved lines as
-    // literal reference points, coalesce the Edits as borrowed views
-    // into the lines:
-    // - An .equal moves the before and after cursors, borrows from either
-    // - An .insert moves the after cursor, borrows from after
-    // - A .delete moves and borrows from before
     var text = ArrayListUnmanaged(u8){};
     defer text.deinit(allocator);
     var diffs: DiffList = .empty;
     errdefer deinitDiffList(allocator, &diffs);
     try diffs.ensureUnusedCapacity(allocator, char_diffs.items.len);
+    var before_cursor: usize = 0;
+    var after_cursor: usize = 0;
     for (char_diffs.items) |*d| {
         var cursor: usize = 0;
         while (cursor < d.text.len) {
@@ -1209,11 +1205,32 @@ fn diffCharsToLines(
             try text.appendSlice(allocator, line_array[cp - CHAR_OFFSET]);
             cursor += cp_len;
         }
-        diffs.appendAssumeCapacity(.{
-            .operation = d.operation,
-            .owned = true,
-            .text = try text.toOwnedSlice(allocator),
-        });
+        switch (d.operation) {
+            .equal => {
+                const span = before_text[before_cursor..][0..text.items.len];
+                dbgassert(std.mem.startsWith(u8, before_text[before_cursor..], text.items));
+                dbgassert(std.mem.startsWith(u8, after_text[after_cursor..], text.items));
+                dbgassert(std.mem.eql(u8, span, text.items));
+                before_cursor += text.items.len;
+                after_cursor += text.items.len;
+                diffs.appendAssumeCapacity(Edit.asBorrow(.equal, span));
+            },
+            .delete => {
+                const span = before_text[before_cursor..][0..text.items.len];
+                dbgassert(std.mem.startsWith(u8, before_text[before_cursor..], text.items));
+                dbgassert(std.mem.eql(u8, span, text.items));
+                before_cursor += text.items.len;
+                diffs.appendAssumeCapacity(Edit.asBorrow(.delete, span));
+            },
+            .insert => {
+                const span = after_text[after_cursor..][0..text.items.len];
+                dbgassert(std.mem.startsWith(u8, after_text[after_cursor..], text.items));
+                dbgassert(std.mem.eql(u8, span, text.items));
+                after_cursor += text.items.len;
+                diffs.appendAssumeCapacity(Edit.asBorrow(.insert, span));
+            },
+        }
+        text.items.len = 0;
     }
     return diffs;
 }
@@ -1272,7 +1289,7 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void {
         switch (diffs.items[pointer].operation) {
             .insert => {
                 count_insert += 1;
-                assert(pointer < diffs.items.len);
+                dbgassert(pointer < diffs.items.len);
                 try text_insert.appendSlice(allocator, diffs.items[pointer].text);
                 pointer += 1;
             },
@@ -2115,6 +2132,12 @@ inline fn i2u(val: isize) usize {
     return @intCast(val);
 }
 
+inline fn dbgassert(ok: bool) void {
+    if (is_debug) {
+        assert(ok);
+    }
+}
+
 //| Tests
 
 fn expectEqualDiff(expected: []const Edit, actual: []const Edit) !void {
@@ -2440,6 +2463,8 @@ test diffLinesToChars {
 }
 
 const TCharLines = struct {
+    before: []const u8,
+    after: []const u8,
     diffs: []const Edit,
     line_array: []const []const u8,
     expected: []const Edit,
@@ -2456,7 +2481,7 @@ fn testDiffCharsToLines(
         char_diffs.appendAssumeCapacity(.{ .operation = item.operation, .owned = true, .text = try allocator.dupe(u8, item.text) });
     }
 
-    var diffs = try diffCharsToLines(allocator, &char_diffs, params.line_array);
+    var diffs = try diffCharsToLines(allocator, &char_diffs, params.line_array, params.before, params.after);
     defer deinitDiffList(allocator, &diffs);
 
     try expectEqualDiff(params.expected, diffs.items);
@@ -2474,6 +2499,8 @@ test diffCharsToLines {
         testing.allocator,
         testDiffCharsToLines,
         .{TCharLines{
+            .before = "alpha\nbeta\nalpha\n",
+            .after = "alpha\nbeta\nalpha\nbeta\nalpha\nbeta\n",
             .diffs = diff_list.items,
             .line_array = &[_][]const u8{
                 "alpha\n",
@@ -3193,6 +3220,9 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const ArrayList = std.array_list.Managed;
 const assert = std.debug.assert;
 const testing = std.testing;
+
+const builtin = @import("builtin");
+const is_debug = builtin.mode == .Debug;
 
 const Patch = @import("Patch.zig");
 const PatchConfig = Patch.PatchConfig;
