@@ -1636,7 +1636,7 @@ fn diffCleanupSemanticLossless(
 ) OOM!void {
     var pointer: usize = 1;
     // Intentionally ignore the first and last element (don't need checking).
-    while (pointer < @as(isize, @intCast(diffs.items.len)) - 1) {
+    while (pointer < u2i(diffs.items.len) - 1) {
         if (diffs.items[pointer - 1].operation == .equal and
             diffs.items[pointer + 1].operation == .equal)
         {
@@ -1717,24 +1717,34 @@ fn diffCleanupSemanticLossless(
             if (!std.mem.eql(u8, diffs.items[pointer - 1].text, best_equality_1.items)) {
                 // We have an improvement, save it back to the diff.
                 if (best_equality_1.items.len != 0) {
-                    const old_text = diffs.items[pointer - 1].text;
-                    diffs.items[pointer - 1].text = try allocator.dupe(u8, best_equality_1.items);
-                    allocator.free(old_text);
+                    const new_diff = try Edit.asOwn(allocator, .equal, best_equality_1.items);
+                    errdefer comptime unreachable;
+                    var old_diff = diffs.items[pointer - 1];
+                    diffs.items[pointer - 1] = new_diff;
+                    old_diff.deinit(allocator);
                 } else {
                     var old_diff = diffs.orderedRemove(pointer - 1);
                     old_diff.deinit(allocator);
                     pointer -= 1;
                 }
-                const old_text1 = diffs.items[pointer].text;
-                diffs.items[pointer].text = try allocator.dupe(u8, best_edit.items);
-                defer allocator.free(old_text1);
-                if (best_equality_2.items.len != 0) {
-                    const old_text2 = diffs.items[pointer + 1].text;
-                    diffs.items[pointer + 1].text = try allocator.dupe(u8, best_equality_2.items);
-                    allocator.free(old_text2);
-                } else {
-                    var old_diff = diffs.orderedRemove(pointer + 1);
+                {
+                    const new_diff = try Edit.asOwn(allocator, diffs.items[pointer].operation, best_edit.items);
+                    errdefer comptime unreachable;
+                    var old_diff = diffs.items[pointer];
+                    diffs.items[pointer] = new_diff;
                     old_diff.deinit(allocator);
+                }
+                if (best_equality_2.items.len != 0) {
+                    {
+                        const new_diff = try Edit.asOwn(allocator, .equal, best_equality_2.items);
+                        errdefer comptime unreachable;
+                        var old_diff = diffs.items[pointer + 1];
+                        diffs.items[pointer + 1] = new_diff;
+                        old_diff.deinit(allocator);
+                    }
+                } else {
+                    var removed_diff = diffs.orderedRemove(pointer + 1);
+                    removed_diff.deinit(allocator);
                     pointer -= 1;
                 }
             }
