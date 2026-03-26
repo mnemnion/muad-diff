@@ -23,11 +23,15 @@
 //! `fromDiff()`, `fromTexts()`, or `fromTextPatch()`, and then call `apply()`
 //! or one of the text formatting helpers.
 
+//| Fields
+
 /// Configuration controlling patch construction and application behavior.
 config: PatchConfig = .default,
 
 /// Owned collection of hunks making up this patch.
 hunks: PatchList = .empty,
+
+//| Public Declarations
 
 /// Error set for Patch operations.
 pub const Error = error{ OutOfMemory, BadPatchString };
@@ -158,6 +162,8 @@ pub const PatchConfig = struct {
     };
 };
 
+//| Public Functions
+
 /// Initialize a Patch with configurable options.
 pub fn init(config: PatchConfig) Patch {
     return .{ .config = config };
@@ -215,7 +221,6 @@ pub fn make(
 }
 
 /// Compute a list of patches from an existing `Diff`.
-/// @return self.
 pub fn fromDiff(
     patch: *Patch,
     allocator: Allocator,
@@ -226,7 +231,7 @@ pub fn fromDiff(
     return patch;
 }
 
-/// @return self.
+/// Compute a list of patches from both texts.
 pub fn fromTexts(
     patch: *Patch,
     allocator: Allocator,
@@ -240,9 +245,6 @@ pub fn fromTexts(
 
 /// Parse a textual representation of patches and return a List of Patch
 /// objects.
-/// @param textline Text representation of patches.
-/// @return self.
-/// @throws ArgumentException If invalid input.
 pub fn fromTextPatch(
     self: *Patch,
     allocator: Allocator,
@@ -263,16 +265,23 @@ pub fn fromTextPatch(
 /// again, or used directly in an error message, or the slop turned up on the
 /// dmp object and the patch reattempted. The delta allows us to adjust any
 /// failed patches so they "fit" the next text.
-///
-/// @param text Old text.
-/// @return Two element Object array, containing the new text and an array of
-///      bool values.
 pub fn apply(
     patch: *const Patch,
     allocator: Allocator,
-    og_text: []const u8,
+    text: []const u8,
 ) error{OutOfMemory}!struct { []const u8, bool } {
-    return try patch.applyPatch(allocator, og_text);
+    return try patch.applyPatch(allocator, text);
+}
+
+/// Merge a set of patches into the text, mutating the patchset in the process.
+/// The Patch still needs to be de-initialized, but is no longer suitable for
+/// other operations.
+pub fn applyDestructively(
+    patch: *Patch,
+    allocator: Allocator,
+    text: []const u8,
+) OOM!struct { []const u8, bool } {
+    return try patch.applyDestructive(allocator, text);
 }
 
 /// Take a list of patches and return a textual representation.
@@ -879,10 +888,21 @@ fn applyPatch(
     // Make a shallow copy of the patch to avoid mutating the original.
     var patches = try patch.copy(allocator);
     defer patches.deinit(allocator);
-    const null_padding = try patchAddPadding(patches.config, allocator, &patches.hunks);
+    return patches.applyDestructive(allocator, og_text);
+}
+
+/// Apply a patch destructively: this will mutate the patch.  After
+/// this, it's still possible to emit the patch as text, but it will
+/// not have the result you want, due to padding and other splits.
+pub fn applyDestructive(
+    patch: *Patch,
+    allocator: Allocator,
+    og_text: []const u8,
+) OOM!struct { []const u8, bool } {
+    const pre, const post = patch.textMaxBounds(og_text.len);
+    const null_padding = try patchAddPadding(patch.config, allocator, &patch.hunks);
     defer allocator.free(null_padding);
-    try patches.patchSplitMax(allocator);
-    const pre, const post = textMaxBounds(&patches, og_text.len);
+    try patch.patchSplitMax(allocator);
     var tm = try TextManager.init(allocator, og_text, null_padding, pre, post);
     errdefer tm.errDeinit(allocator);
     var all_applied = true;
@@ -891,7 +911,7 @@ fn applyPatch(
     // positions 10 and 20, but the first patch was found at 12, delta is 2
     // and the second patch has an effective expected position of 22.
     var delta: isize = 0;
-    for (patches.hunks.items) |a_patch| {
+    for (patch.hunks.items) |a_patch| {
         const expected_loc = cast(usize, cast(isize, a_patch.start2) + delta);
         // TODO: make this a borrow when possible.
         const text1 = try (Diff{ .edits = a_patch.diffs }).beforeText(allocator);
@@ -956,7 +976,16 @@ fn applyPatch(
                     // results[x] = false;
                     all_applied = false;
                 } else {
-                    _ = try diff_obj.cleanupSemanticLossless(allocator);
+                    // We're reasonably sure that cleanupSemanticLossless cannot change
+                    // the byte count, but it's worth asserting.
+                    if (is_debug) {
+                        const before = diff_obj.changeInBytes();
+                        _ = try diff_obj.cleanupSemanticLossless(allocator);
+                        const after = diff_obj.changeInBytes();
+                        assert(before == after);
+                    } else {
+                        _ = try diff_obj.cleanupSemanticLossless(allocator);
+                    }
                     var index1: usize = 0;
                     for (a_patch.diffs.items) |a_diff| {
                         if (a_diff.operation != .equal) {
@@ -2927,17 +2956,21 @@ test "patching does not affect patches" {
     try testing.expectEqualStrings(patch2_str, patch2_str_after);
 }
 
+const Patch = @This();
+
 const std = @import("std");
-const dmp = @import("../dmp.zig");
-const common = @import("common.zig");
-const Diff = @import("Diff.zig");
 const testing = std.testing;
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const OOM = Allocator.Error;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const ArrayList = std.array_list.Managed;
-const Patch = @This();
+const builtin = @import("builtin");
+const is_debug = builtin.mode == .Debug;
 
+const dmp = @import("../dmp.zig");
+const common = @import("common.zig");
+const Diff = @import("Diff.zig");
 const Edit = Diff.Edit;
 const DiffConfig = Diff.DiffConfig;
 const DiffList = Diff.DiffList;

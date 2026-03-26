@@ -325,6 +325,21 @@ pub fn index(difference: Diff, loc: usize) usize {
     return diffIndex(difference.edits, loc);
 }
 
+/// Answers the number of bytes total be added or removed by
+/// applying this diff, in other words, the difference in length
+/// between the before and after texts.
+pub fn changeInBytes(difference: *const Diff) isize {
+    var count: isize = 0;
+    for (difference.edits.items) |edit| {
+        switch (edit.operation) {
+            .insert => count += u2i(edit.text.len),
+            .delete => count -= u2i(edit.text.len),
+            .equal => {},
+        }
+    }
+    return count;
+}
+
 //| Private
 
 /// Free all memory of the ArrayList of Edits in a Diff.
