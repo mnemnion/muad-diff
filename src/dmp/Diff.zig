@@ -4,9 +4,9 @@
 //! operations over that list, including diff generation, cleanup passes, and
 //! readback helpers such as pretty formatting and text reconstruction.
 //!
-//! `Diff` is unmanaged.  Use `.default` for the default configuration or
-//! `initOptions()` to provide a custom `DiffConfig`, and later release any
-//! owned storage with `deinit(allocator)`.
+//! `Diff` has several configurable parameters.  Use `.default` for the default
+//! configuration, or `.init(cfg)` to provide a custom `DiffConfig`. Release
+//! when finished with `diff.deinit(allocator)`.
 //!
 //! `DiffConfig` controls how the diff is produced:
 //! - `timeout` is the maximum number of milliseconds to spend computing a diff;
@@ -15,14 +15,40 @@
 //! - `check_lines` enables the initial line-mode speedup for large inputs.
 //! - `check_line_threshold` sets the minimum input size for that speedup.
 //!
-//! The usual flow is to initialize a `Diff`, call `diff()`, and then optionally
-//! chain cleanup methods on the result.  The diff object can be reused to diff
-//! two more texts, in which case, the original diff's memory will be released.
+//! The diff object starts empty.  To populate it with a diff:
+//!
+//!     try diff.diff(allocator, before, after);
+//!
+//! The diffing algorithm only allocates memory when it has to, so most of a
+//! typical diff will consist of views into the compared strings.  These must
+//! therefore stay in memory, or at your option, you may call `.own(allocator)`
+//! to own that memory.
+//!
 
 /// The diff configuration, see `DiffConfig`
 config: DiffConfig = .default,
 /// An ArrayList of the individual `Edit`s in this diff.
 edits: DiffList = .empty,
+
+/// The configurable parameters for a Diff object.
+pub const DiffConfig = struct {
+    /// Number of milliseconds to map a diff before giving up (0 for infinity).
+    timeout: u64,
+    /// Cost of an empty edit operation in terms of edit characters.
+    edit_cost: u16,
+    /// If true, use the initial line-mode speedup when inputs are large enough.
+    check_lines: bool,
+    /// Number of bytes in each string needed to trigger a line-based diff.
+    /// Ignored if check_lines is `false`.
+    check_line_threshold: u32,
+
+    pub const default: DiffConfig = .{
+        .timeout = 1000,
+        .edit_cost = 4,
+        .check_lines = true,
+        .check_line_threshold = 100,
+    };
+};
 
 /// A single edit of a diff: insertion, deletion, or neither.
 pub const Edit = struct {
@@ -31,13 +57,6 @@ pub const Edit = struct {
         delete,
         equal,
     };
-
-    // TODO: The algorithm as a whole requires some text to be copied,
-    // at least it does without some very heavyweight reimagination.
-    // But not all.  Since this is aligned with a slice, it's three
-    // usize, and our enum is tiny, so we can add a boolean recording
-    // copy status 'for free' and use views for the great majority of
-    // text.
 
     operation: Operation,
     owned: bool,
@@ -120,41 +139,12 @@ pub const Edit = struct {
 
 pub const DiffList = ArrayListUnmanaged(Edit);
 
-pub const DiffConfig = struct {
-    /// Number of milliseconds to map a diff before giving up (0 for infinity).
-    timeout: u64,
-    /// Cost of an empty edit operation in terms of edit characters.
-    edit_cost: u16,
-    /// If true, use the initial line-mode speedup when inputs are large enough.
-    check_lines: bool,
-    /// Number of bytes in each string needed to trigger a line-based diff.
-    /// Ignored if check_lines is `false`.
-    check_line_threshold: u32,
-
-    pub const default: DiffConfig = .{
-        .timeout = 1000,
-        .edit_cost = 4,
-        .check_lines = true,
-        .check_line_threshold = 100,
-    };
-};
-
-pub const HalfMatchResult = struct {
+const HalfMatchResult = struct {
     prefix_before: []const u8,
     suffix_before: []const u8,
     prefix_after: []const u8,
     suffix_after: []const u8,
     common_middle: []const u8,
-
-    // Free the HalfMatchResult's memory.
-    pub fn deinit(hmr: HalfMatchResult, allocator: Allocator) void {
-        _ = .{ hmr, allocator }; // no-op,      XXX: remove
-        // allocator.free(hmr.prefix_before);
-        // allocator.free(hmr.suffix_before);
-        // allocator.free(hmr.prefix_after);
-        // allocator.free(hmr.suffix_after);
-        // allocator.free(hmr.common_middle);
-    }
 };
 
 pub const CHAR_OFFSET = 32;
@@ -291,6 +281,22 @@ pub fn writePrettyFormat(
     deco: DiffDecorations,
 ) !usize {
     return try writeDiffPrettyFormat(allocator, writer, difference.edits, deco);
+}
+
+/// Create a Patch from the Diff with the default PatchOptions.
+pub fn toPatch(difference: *const Diff, allocator: Allocator) OOM!Patch {
+    var the_patch: Patch = .default;
+    return the_patch.fromDiff(allocator, difference);
+}
+
+/// Create a Patch from the Diff with the provided PatchOptions.
+pub fn toPatchConfig(
+    difference: *const Diff,
+    allocator: Allocator,
+    cfg: PatchConfig,
+) OOM!Patch {
+    var the_patch: Patch = .init(cfg);
+    return the_patch.fromDiff(allocator, difference);
 }
 
 ///
@@ -510,7 +516,6 @@ fn diffCompute(
     if (std.mem.indexOf(u8, long_text, short_text)) |match_index| {
         // Shorter text is inside the longer text (speedup).
         var diffs: DiffList = .empty;
-        errdefer deinitDiffList(allocator, &diffs);
         const op: Edit.Operation = if (before.len > after.len)
             .delete
         else
@@ -535,7 +540,6 @@ fn diffCompute(
         // Single character string.
         // After the previous speedup, the character can't be an equality.
         var diffs: DiffList = .empty;
-        errdefer deinitDiffList(allocator, &diffs);
         try diffs.ensureUnusedCapacity(allocator, 2);
         diffs.appendAssumeCapacity(Edit.asBorrow(
             .delete,
@@ -549,8 +553,7 @@ fn diffCompute(
     }
 
     // Check to see if the problem can be split in two.
-    var maybe_half_match = try diffHalfMatchConfig(config, allocator, before, after);
-    defer if (maybe_half_match) |half_match| half_match.deinit(allocator);
+    var maybe_half_match = try diffHalfMatch(config, allocator, before, after);
     if (maybe_half_match) |*half_match| {
         // A half-match was found, sort out the return data.
         // Send both pairs off for separate processing.
@@ -594,7 +597,7 @@ fn diffCompute(
     return diffBisectConfig(config, allocator, before, after, deadline);
 }
 
-fn diffHalfMatchConfig(
+fn diffHalfMatch(
     config: DiffConfig,
     allocator: std.mem.Allocator,
     before: []const u8,
@@ -613,14 +616,8 @@ fn diffHalfMatchConfig(
 
     // First check if the second quarter is the seed for a half-match.
     const half_match_1 = try diffHalfMatchInternal(allocator, long_text, short_text, (long_text.len + 3) / 4);
-    errdefer {
-        if (half_match_1) |h_m| h_m.deinit(allocator);
-    }
     // Check again based on the third quarter.
     const half_match_2 = try diffHalfMatchInternal(allocator, long_text, short_text, (long_text.len + 1) / 2);
-    errdefer {
-        if (half_match_2) |h_m| h_m.deinit(allocator);
-    }
 
     var half_match: ?HalfMatchResult = null;
     if (half_match_1 == null and half_match_2 == null) {
@@ -633,10 +630,8 @@ fn diffHalfMatchConfig(
         // Both matched. Select the longest.
         half_match = half: {
             if (half_match_1.?.common_middle.len > half_match_2.?.common_middle.len) {
-                half_match_2.?.deinit(allocator);
                 break :half half_match_1;
             } else {
-                half_match_1.?.deinit(allocator);
                 break :half half_match_2;
             }
         };
@@ -2220,8 +2215,7 @@ fn testDiffHalfMatch(
     allocator: std.mem.Allocator,
     params: TestHalfMatch,
 ) !void {
-    const maybe_result = try diffHalfMatchConfig(params.config, allocator, params.before, params.after);
-    defer if (maybe_result) |result| result.deinit(allocator);
+    const maybe_result = try diffHalfMatch(params.config, allocator, params.before, params.after);
     try testing.expectEqualDeep(params.expected, maybe_result);
 }
 
