@@ -268,11 +268,11 @@ pub fn fromTextPatch(
 /// @return Two element Object array, containing the new text and an array of
 ///      bool values.
 pub fn apply(
-    patch: Patch,
+    patch: *const Patch,
     allocator: Allocator,
     og_text: []const u8,
 ) error{OutOfMemory}!struct { []const u8, bool } {
-    return try patch.applyInternal(allocator, og_text);
+    return try patch.applyPatch(allocator, og_text);
 }
 
 /// Take a list of patches and return a textual representation.
@@ -864,7 +864,7 @@ fn makePatchFromDiff(
 /// @param text Old text.
 /// @return Two element Object array, containing the new text and an array of
 ///      bool values.
-fn applyInternal(
+fn applyPatch(
     patch: *const Patch,
     allocator: Allocator,
     og_text: []const u8,
@@ -876,46 +876,40 @@ fn applyInternal(
         // the null patchset was successfully 'applied' here.
         return .{ try allocator.dupe(u8, og_text), true };
     }
-    // So we can report if all patches were applied:
-    var all_applied = true;
-    // Deep copy the patches so that no changes are made to originals.
-    var patches = try clonePatchList(allocator, patch.hunks);
-    defer deinitPatchList(allocator, &patches);
-    const null_padding = try patchAddPadding(patch.config, allocator, &patches);
+    // Make a shallow copy of the patch to avoid mutating the original.
+    var patches = try patch.copy(allocator);
+    defer patches.deinit(allocator);
+    const null_padding = try patchAddPadding(patches.config, allocator, &patches.hunks);
     defer allocator.free(null_padding);
-    var text = try ArrayList(u8).initCapacity(allocator, og_text.len + 2 * null_padding.len);
-    defer text.deinit();
-    text.appendSliceAssumeCapacity(null_padding);
-    text.appendSliceAssumeCapacity(og_text);
-    text.appendSliceAssumeCapacity(null_padding);
-    try patchSplitMax(patch.config, allocator, &patches);
+    try patches.patchSplitMax(allocator);
+    const pre, const post = textMaxBounds(&patches, og_text.len);
+    var tm = try TextManager.init(allocator, og_text, null_padding, pre, post);
+    errdefer tm.errDeinit(allocator);
+    var all_applied = true;
     // delta keeps track of the offset between the expected and actual
     // location of the previous patch.  If there are patches expected at
     // positions 10 and 20, but the first patch was found at 12, delta is 2
     // and the second patch has an effective expected position of 22.
     var delta: isize = 0;
-    for (patches.items) |a_patch| {
-        const expected_loc = cast(usize, (cast(isize, a_patch.start2) + delta));
+    for (patches.hunks.items) |a_patch| {
+        const expected_loc = cast(usize, cast(isize, a_patch.start2) + delta);
+        // TODO: make this a borrow when possible.
         const text1 = try (Diff{ .edits = a_patch.diffs }).beforeText(allocator);
         defer allocator.free(text1);
         var maybe_start: ?usize = null;
         var maybe_end: ?usize = null;
         const m_max_b = patch.config.match_max_bits;
         if (text1.len > m_max_b) {
-            // patchSplitMax will only provide an oversized pattern
-            // in the case of a monster delete.
-            maybe_start = try matchMain(patch.config, allocator, text.items, text1[0..m_max_b], expected_loc);
+            maybe_start = try matchMain(patch.config, allocator, tm.asText(), text1[0..m_max_b], expected_loc);
             if (maybe_start) |start| {
-                // Ok because we tested and text1.len is larger.
                 const e_start = text1.len - m_max_b;
                 maybe_end = try matchMain(
                     patch.config,
                     allocator,
-                    text.items,
+                    tm.asText(),
                     text1[e_start..],
                     e_start + expected_loc,
                 );
-                // No match if a) no end_loc or b) the matches cross each other.
                 if (maybe_end) |end| {
                     if (start >= end) {
                         maybe_start = null;
@@ -925,7 +919,7 @@ fn applyInternal(
                 }
             }
         } else {
-            maybe_start = try matchMain(patch.config, allocator, text.items, text1, expected_loc);
+            maybe_start = try matchMain(patch.config, allocator, tm.asText(), text1, expected_loc);
         }
         if (maybe_start) |start| {
             // Found a match.  :)
@@ -933,16 +927,16 @@ fn applyInternal(
             // results[x] = true;
             const text2 = t2: {
                 if (maybe_end) |end| {
-                    break :t2 text.items[start..@min(end + m_max_b, text.items.len)];
+                    break :t2 tm.fetchRange(start, end + m_max_b);
                 } else {
-                    break :t2 text.items[start..@min(start + text1.len, text.items.len)];
+                    break :t2 tm.fetchRange(start, start + text1.len);
                 }
             };
             if (std.mem.eql(u8, text1, text2)) {
                 // Perfect match, just shove the replacement text in.
                 const diff_text = try (Diff{ .edits = a_patch.diffs }).afterText(allocator);
                 defer allocator.free(diff_text);
-                try text.replaceRange(start, text1.len, diff_text);
+                tm.replaceRange(start, text1.len, diff_text);
             } else {
                 // Imperfect match.  Run a diff to get a framework of equivalent
                 // indices.
@@ -953,7 +947,7 @@ fn applyInternal(
                     allocator,
                     text1,
                     text2,
-                ); 
+                );
                 const t1_l_float: f64 = @floatFromInt(text1.len);
                 const levenshtein_d: f64 = levenshtein(diff_obj);
                 const bad_match = levenshtein_d / t1_l_float > patch.config.delete_threshold;
@@ -969,15 +963,11 @@ fn applyInternal(
                             const index2 = diff_obj.index(index1);
                             if (a_diff.operation == .insert) {
                                 // Insertion
-                                try text.insertSlice(start + index2, a_diff.text);
+                                tm.insert(start + index2, a_diff.text);
                             } else if (a_diff.operation == .delete) {
                                 // Deletion
                                 const delete_at = diff_obj.index(index1 + a_diff.text.len) - index2;
-                                text.replaceRangeAssumeCapacity(
-                                    start + index2,
-                                    delete_at,
-                                    &.{},
-                                );
+                                tm.delete(start + index2, delete_at);
                             }
                         }
                         if (a_diff.operation != .delete) {
@@ -993,10 +983,176 @@ fn applyInternal(
             delta -= cast(isize, a_patch.length2) - cast(isize, a_patch.length1);
         }
     }
-    // strip padding
-    text.replaceRangeAssumeCapacity(0, null_padding.len, &.{});
-    text.items.len -= null_padding.len;
-    return .{ try text.toOwnedSlice(), all_applied };
+    return .{ try tm.finish(allocator), all_applied };
+}
+
+/// Manages our text through patch application.
+const TextManager = struct {
+    text: []u8,
+    /// Amount of remaining padding before the text.
+    pre: usize,
+    /// Amount of remaining padding afer the text.
+    post: usize,
+    /// Size of padding: used at the end of patching to trim the text.
+    padding: usize,
+    /// The midpoint of the original text.
+    midpoint: usize,
+
+    fn init(
+        allocator: Allocator,
+        og_text: []const u8,
+        padding: []const u8,
+        pre: usize,
+        post: usize,
+    ) error{OutOfMemory}!TextManager {
+        var text = try allocator.alloc(u8, og_text.len + pre + post + padding.len * 2);
+        const pad_len = padding.len;
+        @memset(text[0..pre], 0);
+        @memcpy(text[pre..][0..pad_len], padding);
+        @memcpy(text[pre + pad_len ..][0..og_text.len], og_text);
+        const text_end = pre + og_text.len + pad_len;
+        @memcpy(text[text_end..][0..pad_len], padding);
+        @memset(text[text_end + pad_len ..], 0);
+
+        return .{
+            .text = text,
+            .pre = pre,
+            .post = post,
+            .padding = pad_len,
+            .midpoint = pad_len + og_text.len / 2,
+        };
+    }
+
+    fn asText(tm: *const TextManager) []const u8 {
+        return tm.text[tm.pre .. tm.text.len - tm.post];
+    }
+
+    fn fetchRange(tm: *const TextManager, start: usize, end: usize) []const u8 {
+        const text = tm.asText();
+        return text[start..@min(end, text.len)];
+    }
+
+    fn replaceRange(
+        tm: *TextManager,
+        start: usize,
+        len: usize,
+        new_text: []const u8,
+    ) void {
+        const r_start = tm.pre + start;
+        const r_end = r_start + len;
+        const text_end = tm.text.len - tm.post;
+
+        if (len == new_text.len) {
+            @memcpy(tm.text[r_start..][0..len], new_text);
+            return;
+        }
+
+        if (start < tm.midpoint) {
+            if (len < new_text.len) {
+                const extra = new_text.len - len;
+                const new_pre = tm.pre - extra;
+                @memmove(
+                    tm.text[new_pre..][0..start],
+                    tm.text[tm.pre..][0..start],
+                );
+                tm.pre = new_pre;
+            } else {
+                const removed = len - new_text.len;
+                @memmove(
+                    tm.text[tm.pre + removed ..][0..start],
+                    tm.text[tm.pre..][0..start],
+                );
+                tm.pre += removed;
+            }
+
+            const range_start = tm.pre + start;
+            @memcpy(tm.text[range_start..][0..new_text.len], new_text);
+        } else {
+            if (len < new_text.len) {
+                const extra = new_text.len - len;
+                @memmove(
+                    tm.text[r_end + extra ..][0 .. text_end - r_end],
+                    tm.text[r_end..][0 .. text_end - r_end],
+                );
+                tm.post -= extra;
+            } else {
+                const removed = len - new_text.len;
+                @memmove(
+                    tm.text[r_start + new_text.len ..][0 .. text_end - r_end],
+                    tm.text[r_end..][0 .. text_end - r_end],
+                );
+                tm.post += removed;
+            }
+
+            @memcpy(tm.text[r_start..][0..new_text.len], new_text);
+        }
+    }
+
+    fn insert(tm: *TextManager, at: usize, new_text: []const u8) void {
+        tm.replaceRange(at, 0, new_text);
+    }
+
+    fn delete(tm: *TextManager, start: usize, len: usize) void {
+        tm.replaceRange(start, len, &.{});
+    }
+
+    fn finish(tm: *TextManager, allocator: Allocator) error{OutOfMemory}![]const u8 {
+        const text_start = tm.pre + tm.padding;
+        const text_len = tm.text.len - tm.pre - tm.post - 2 * tm.padding;
+        @memmove(tm.text[0..text_len], tm.text[text_start..][0..text_len]);
+        const text = try allocator.realloc(tm.text, text_len);
+        tm.text = &.{};
+        return text;
+    }
+
+    fn errDeinit(tm: *TextManager, allocator: Allocator) void {
+        allocator.free(tm.text);
+    }
+};
+
+/// Determine the maximum pre and post room needed to successfully apply the
+/// patches in order.
+fn textMaxBounds(patch: *const Patch, og_text_len: usize) struct { usize, usize } {
+    const midpoint = patch.config.margin + @divTrunc(og_text_len, 2);
+    const margin: isize = patch.config.margin;
+    var before_now: isize = margin;
+    var after_now: isize = margin;
+    var before_max: isize = margin;
+    var after_max: isize = margin;
+    for (patch.hunks.items) |a_patch| {
+        var before_cursor = a_patch.start1;
+        var after_cursor = a_patch.start2;
+        for (a_patch.diffs.items) |a_diff| {
+            switch (a_diff.operation) {
+                .equal => {
+                    before_cursor += a_diff.text.len;
+                    after_cursor += a_diff.text.len;
+                },
+                .insert => {
+                    if (after_cursor < midpoint) {
+                        before_now += @intCast(a_diff.text.len);
+                    } else {
+                        after_now += @intCast(a_diff.text.len);
+                    }
+                    after_cursor += a_diff.text.len;
+                },
+                .delete => {
+                    if (before_cursor < midpoint) {
+                        after_now -= @intCast(a_diff.text.len);
+                    } else {
+                        before_now -= @intCast(a_diff.text.len);
+                    }
+                    before_cursor += a_diff.text.len;
+                },
+            }
+            before_max = @max(before_max, before_now);
+            after_max = @max(after_max, after_now);
+        }
+    }
+    return .{
+        @intCast(@max(margin, before_max)),
+        @intCast(@max(margin, after_max)),
+    };
 }
 
 // Look through the patches and break up any which are longer than the
@@ -1004,10 +1160,11 @@ fn applyInternal(
 // Intended to be called only from within patchApply.
 // @param patches List of Patch objects.
 fn patchSplitMax(
-    config: PatchConfig,
+    patch: *Patch,
     allocator: Allocator,
-    patches: *PatchList,
 ) error{OutOfMemory}!void {
+    const patches = &patch.hunks;
+    const config = patch.config;
     const patch_size = config.match_max_bits;
     const patch_margin = config.margin;
     const max_patch_len = patch_size - patch_margin;
@@ -1034,17 +1191,17 @@ fn patchSplitMax(
                 }
             }
             // Create one of several smaller patches.
-            var patch = Hunk{};
-            errdefer patch.deinit(allocator);
+            var hunk = Hunk{};
+            errdefer hunk.deinit(allocator);
             var empty = true;
-            patch.start1 = start1 - precontext.len;
-            patch.start2 = start2 - precontext.len;
+            hunk.start1 = start1 - precontext.len;
+            hunk.start2 = start2 - precontext.len;
             if (precontext.len != 0) {
-                patch.length2 = precontext.len;
-                patch.length1 = precontext.len;
-                try patch.diffs.ensureUnusedCapacity(allocator, 1);
+                hunk.length2 = precontext.len;
+                hunk.length1 = precontext.len;
+                try hunk.diffs.ensureUnusedCapacity(allocator, 1);
                 guard_precontext = false;
-                patch.diffs.appendAssumeCapacity(
+                hunk.diffs.appendAssumeCapacity(
                     .{
                         .operation = .equal,
                         .owned = true,
@@ -1054,52 +1211,52 @@ fn patchSplitMax(
                 precontext = try allocator.alloc(u8, 0);
                 guard_precontext = true;
             }
-            while (bigpatch.diffs.items.len != 0 and patch.length1 < max_patch_len) {
+            while (bigpatch.diffs.items.len != 0 and hunk.length1 < max_patch_len) {
                 const diff_type = bigpatch.diffs.items[0].operation;
                 const diff_text = bigpatch.diffs.items[0].text;
                 if (diff_type == .insert) {
                     // Insertions are harmless.
-                    patch.length2 += diff_text.len;
+                    hunk.length2 += diff_text.len;
                     start2 += diff_text.len;
                     // Move the patch (transfers ownership)
-                    try patch.diffs.ensureUnusedCapacity(allocator, 1);
-                    patch.diffs.appendAssumeCapacity(bigpatch.diffs.orderedRemove(0));
+                    try hunk.diffs.ensureUnusedCapacity(allocator, 1);
+                    hunk.diffs.appendAssumeCapacity(bigpatch.diffs.orderedRemove(0));
                     empty = false;
-                } else if (patch.diffs.items.len == 1 and
+                } else if (hunk.diffs.items.len == 1 and
                     diff_type == .delete and
-                    patch.diffs.items[0].operation == .equal and
+                    hunk.diffs.items[0].operation == .equal and
                     diff_text.len > 2 * patch_size)
                 {
                     // This is a large deletion.  Let it pass in one chunk.
-                    patch.length1 += diff_text.len;
+                    hunk.length1 += diff_text.len;
                     start1 += diff_text.len;
                     empty = false;
                     // Transfer to patch:
-                    try patch.diffs.ensureUnusedCapacity(allocator, 1);
-                    patch.diffs.appendAssumeCapacity(bigpatch.diffs.orderedRemove(0));
+                    try hunk.diffs.ensureUnusedCapacity(allocator, 1);
+                    hunk.diffs.appendAssumeCapacity(bigpatch.diffs.orderedRemove(0));
                 } else {
                     // Deletion or equality.  Only take as much as we can stomach.
                     // Note: because this is an internal function, we don't care
                     // about codepoint splitting, which won't affect the final
                     // result.
-                    const text_end = @min(diff_text.len, patch_size - patch.length1 - patch_margin);
+                    const text_end = @min(diff_text.len, patch_size - hunk.length1 - patch_margin);
                     const new_diff_text = diff_text[0..text_end];
-                    patch.length1 += new_diff_text.len;
+                    hunk.length1 += new_diff_text.len;
                     start1 += new_diff_text.len;
                     if (diff_type == .equal) {
-                        patch.length2 += new_diff_text.len;
+                        hunk.length2 += new_diff_text.len;
                         start2 += new_diff_text.len;
                     } else {
                         empty = false;
                     }
                     // Now check if we did anything.
-                    try patch.diffs.ensureUnusedCapacity(allocator, 1);
+                    try hunk.diffs.ensureUnusedCapacity(allocator, 1);
                     if (new_diff_text.len == diff_text.len) {
                         // We can reuse the diff.
-                        patch.diffs.appendAssumeCapacity(bigpatch.diffs.orderedRemove(0));
+                        hunk.diffs.appendAssumeCapacity(bigpatch.diffs.orderedRemove(0));
                     } else {
                         // Free and dupe
-                        patch.diffs.appendAssumeCapacity(.{
+                        hunk.diffs.appendAssumeCapacity(.{
                             .operation = diff_type,
                             .owned = true,
                             .text = try allocator.dupe(u8, new_diff_text),
@@ -1135,7 +1292,7 @@ fn patchSplitMax(
             // Compute the head context for the next patch, if we're going to
             // need it.
             if (bigpatch.diffs.items.len != 0) {
-                const after_text = try (Diff{ .edits = patch.diffs }).afterText(allocator);
+                const after_text = try (Diff{ .edits = hunk.diffs }).afterText(allocator);
                 const next_precontext = blk: {
                     if (patch_margin > after_text.len) {
                         break :blk after_text;
@@ -1152,13 +1309,13 @@ fn patchSplitMax(
                 guard_precontext = true;
             }
             if (postcontext.len != 0) {
-                try patch.diffs.ensureUnusedCapacity(allocator, 1);
-                patch.length1 += postcontext.len;
-                patch.length2 += postcontext.len;
-                const last_diff = patch.diffs.getLastOrNull();
+                try hunk.diffs.ensureUnusedCapacity(allocator, 1);
+                hunk.length1 += postcontext.len;
+                hunk.length2 += postcontext.len;
+                const last_diff = hunk.diffs.getLastOrNull();
                 if (last_diff != null and last_diff.?.operation == .equal) {
                     // Free this diff and swap in a new one.
-                    const removed_last_diff = patch.diffs.orderedRemove(patch.diffs.items.len - 1);
+                    const removed_last_diff = hunk.diffs.orderedRemove(hunk.diffs.items.len - 1);
                     defer {
                         var diff_to_deinit = removed_last_diff;
                         diff_to_deinit.deinit(allocator);
@@ -1173,7 +1330,7 @@ fn patchSplitMax(
                             postcontext,
                         },
                     );
-                    patch.diffs.appendAssumeCapacity(
+                    hunk.diffs.appendAssumeCapacity(
                         .{
                             .operation = .equal,
                             .owned = true,
@@ -1182,7 +1339,7 @@ fn patchSplitMax(
                     );
                 } else {
                     // New diff from postcontext.
-                    patch.diffs.appendAssumeCapacity(
+                    hunk.diffs.appendAssumeCapacity(
                         .{
                             .operation = .equal,
                             .owned = true,
@@ -1196,9 +1353,9 @@ fn patchSplitMax(
                 // Insert the next patch
                 // Goes after x, and we need increment to skip:
                 x_i += 1;
-                try patches.insert(allocator, @intCast(x_i), patch);
+                try patches.insert(allocator, @intCast(x_i), hunk);
             } else {
-                patch.deinit(allocator);
+                hunk.deinit(allocator);
             }
         } // We don't use the last precontext
         allocator.free(precontext);
@@ -2443,7 +2600,7 @@ fn testPatchSplitMax(allocator: Allocator) !void {
             "XabXcdXefXghXijXklXmnXopXqrXstXuvXwxXyzX01X23X45X67X89X0",
         );
         const expected_patch = "@@ -1,32 +1,46 @@\n+X\n ab\n+X\n cd\n+X\n ef\n+X\n gh\n+X\n ij\n+X\n kl\n+X\n mn\n+X\n op\n+X\n qr\n+X\n st\n+X\n uv\n+X\n wx\n+X\n yz\n+X\n 012345\n@@ -25,13 +39,18 @@\n zX01\n+X\n 23\n+X\n 45\n+X\n 67\n+X\n 89\n+X\n 0\n";
-        try patchSplitMax(patch.config, allocator, &patch.hunks);
+        try patch.patchSplitMax(allocator);
         const patch_text = try patch.toTextPatch(allocator);
         defer allocator.free(patch_text);
         try testing.expectEqualStrings(expected_patch, patch_text);
@@ -2456,7 +2613,7 @@ fn testPatchSplitMax(allocator: Allocator) !void {
         );
         const text_before = try patch.toTextPatch(allocator);
         defer allocator.free(text_before);
-        try patchSplitMax(patch.config, allocator, &patch.hunks);
+        try patch.patchSplitMax(allocator);
         const text_after = try patch.toTextPatch(allocator);
         defer allocator.free(text_after);
         try testing.expectEqualStrings(text_before, text_after);
@@ -2469,7 +2626,7 @@ fn testPatchSplitMax(allocator: Allocator) !void {
         );
         const pre_patch_text = try patch.toTextPatch(allocator);
         defer allocator.free(pre_patch_text);
-        try patchSplitMax(patch.config, allocator, &patch.hunks);
+        try patch.patchSplitMax(allocator);
         const patch_text = try patch.toTextPatch(allocator);
         defer allocator.free(patch_text);
         try testing.expectEqualStrings(
@@ -2483,7 +2640,7 @@ fn testPatchSplitMax(allocator: Allocator) !void {
             "abcdefghij , h : 0 , t : 1 abcdefghij , h : 0 , t : 1 abcdefghij , h : 0 , t : 1",
             "abcdefghij , h : 1 , t : 1 abcdefghij , h : 1 , t : 1 abcdefghij , h : 0 , t : 1",
         );
-        try patchSplitMax(patch.config, allocator, &patch.hunks);
+        try patch.patchSplitMax(allocator);
         const patch_text = try patch.toTextPatch(allocator);
         defer allocator.free(patch_text);
         try testing.expectEqualStrings(
