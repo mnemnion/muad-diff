@@ -207,7 +207,32 @@ fn containsFourByteCodepoint(text: []const u8) bool {
 }
 
 fn expectValidUtf8(text: []const u8) !void {
-    try testing.expect(std.unicode.utf8ValidateSlice(text));
+    var i: usize = 0;
+    while (i < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch {
+            const start = i -| 16;
+            const end = @min(text.len, i + 16);
+            std.debug.print("invalid utf8 lead byte at offset {d}: 0x{x:0>2}\n", .{ i, text[i] });
+            std.debug.print("context bytes:", .{});
+            for (text[start..end]) |b| {
+                std.debug.print(" {x:0>2}", .{b});
+            }
+            std.debug.print("\n", .{});
+            return error.TestUnexpectedResult;
+        };
+        _ = std.unicode.utf8Decode(text[i..][0..len]) catch {
+            const start = i -| 16;
+            const end = @min(text.len, i + len + 16);
+            std.debug.print("invalid utf8 sequence at offset {d}\n", .{i});
+            std.debug.print("context bytes:", .{});
+            for (text[start..end]) |b| {
+                std.debug.print(" {x:0>2}", .{b});
+            }
+            std.debug.print("\n", .{});
+            return error.TestUnexpectedResult;
+        };
+        i += len;
+    }
 }
 
 fn expectDiffListUtf8(diffs: dmp.Diff.DiffList) !void {
@@ -354,6 +379,36 @@ test "corpus revision pairs satisfy diff and patch invariants" {
         var config: dmp.Diff.DiffConfig = .default;
         config.check_line_threshold = 1024 * 1024;
         config.check_lines = false;
+        config.timeout = 0;
+        break :blk config;
+    };
+    const patch_config: dmp.Patch.PatchConfig = .default;
+
+    var fixtures = try loadCorpusFixtures(arena);
+    defer fixtures.deinit();
+
+    var pair_count: usize = 0;
+    var i: usize = 1;
+    while (i < fixtures.items.len) : (i += 1) {
+        const before = fixtures.items[i - 1];
+        const after = fixtures.items[i];
+        if (!std.mem.eql(u8, before.group, after.group)) continue;
+
+        try assertRevisionPairInvariant(diff_config, patch_config, before, after);
+        pair_count += 1;
+    }
+
+    try testing.expect(pair_count >= 20);
+}
+
+test "corpus revision invariants (line mode)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const diff_config: dmp.Diff.DiffConfig = blk: {
+        var config: dmp.Diff.DiffConfig = .default;
+        config.check_line_threshold = 10;
+        config.check_lines = true;
         config.timeout = 0;
         break :blk config;
     };

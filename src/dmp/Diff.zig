@@ -956,6 +956,7 @@ fn diffLineMode(
         var char_diffs: DiffList = try diffInternal(text_mode_config, allocator, text1, text2, deadline);
         defer deinitDiffList(allocator, &char_diffs);
         // Convert the diff back to original text.
+        // TODO: pass in the texts so we can rehydrate consolidated views.
         break :diff_munge try diffCharsToLines(allocator, &char_diffs, line_array.items);
     };
     errdefer deinitDiffList(allocator, &diffs);
@@ -976,7 +977,22 @@ fn diffLineMode(
         text_insert.deinit(allocator);
     }
 
-    while (pointer < diffs.items.len) {
+    // TODO: once we have borrows back on the coalesced diffs, we should be
+    // able to make up-to-no extra copies:
+    // One text_insert and one text_delete, we just use the Edit, which
+    // is not borrowed, and:
+    // ---
+    // If one or both has multiples, those stretches should actually be
+    // contiguous in the document, which we can very with pointer math.
+    // If that's not true then we need to bail and copy, but I think it
+    // basically has to be true.  If we see two inserts without seeing
+    // an equals, I cannot imagine how they would not be contiguous,
+    // given that we've rehydrated the edits.
+    // ---
+    // We don't even have test data which
+    // triggers this condition, but the one-and-one case is considerable
+    // savings.
+    while (pointer < diffs.items.len) : (pointer += 1) {
         switch (diffs.items[pointer].operation) {
             .insert => {
                 count_insert += 1;
@@ -990,6 +1006,17 @@ fn diffLineMode(
                 // Upon reaching an equality, check for prior redundancies.
                 if (count_delete >= 1 and count_insert >= 1) {
                     // Delete the offending records and add the merged ones.
+                    var sub_diff = try diffInternal(
+                        text_mode_config,
+                        allocator,
+                        text_delete.items,
+                        text_insert.items,
+                        deadline,
+                    );
+                    {
+                        errdefer deinitDiffList(allocator, &sub_diff);
+                        try diffs.ensureUnusedCapacity(allocator, sub_diff.items.len);
+                    }
                     freeRangeDiffList(
                         allocator,
                         &diffs,
@@ -1003,20 +1030,12 @@ fn diffLineMode(
                         &.{},
                     );
                     pointer = pointer - count_delete - count_insert;
-                    var sub_diff = try diffInternal(
-                        text_mode_config,
-                        allocator,
-                        text_delete.items,
-                        text_insert.items,
-                        deadline,
-                    );
-                    {
-                        errdefer deinitDiffList(allocator, &sub_diff);
-                        try diffs.ensureUnusedCapacity(allocator, sub_diff.items.len);
-                    }
                     defer sub_diff.deinit(allocator);
                     const new_diff = diffs.addManyAtAssumeCapacity(pointer, sub_diff.items.len);
                     @memcpy(new_diff, sub_diff.items);
+                    for (new_diff) |*d| {
+                        try d.own(allocator);
+                    }
                     pointer = pointer + sub_diff.items.len;
                 }
                 count_insert = 0;
@@ -1025,7 +1044,6 @@ fn diffLineMode(
                 text_insert.items.len = 0;
             },
         }
-        pointer += 1;
     }
     diffs.items.len -= 1; // Remove the dummy entry at the end.
 
@@ -1173,6 +1191,12 @@ fn diffCharsToLines(
     char_diffs: *DiffList,
     line_array: []const []const u8,
 ) OOM!DiffList {
+    // TODO: we'll pass in the texts, and using the retrieved lines as
+    // literal reference points, coalesce the Edits as borrowed views
+    // into the lines:
+    // - An .equal moves the before and after cursors, borrows from either
+    // - An .insert moves the after cursor, borrows from after
+    // - A .delete moves and borrows from before
     var text = ArrayListUnmanaged(u8){};
     defer text.deinit(allocator);
     var diffs: DiffList = .empty;
@@ -1994,8 +2018,8 @@ fn freeRangeDiffList(
 ) void {
     const after_range = start + len;
     const range = diffs.items[start..after_range];
-    for (range) |*d| {
-        d.deinit(allocator);
+    for (range) |*e| {
+        e.deinit(allocator);
     }
 }
 
@@ -3176,5 +3200,7 @@ const ArrayList = std.array_list.Managed;
 const assert = std.debug.assert;
 const testing = std.testing;
 
+const Patch = @import("Patch.zig");
+const PatchConfig = Patch.PatchConfig;
 const dmp = @import("../dmp.zig");
 const common = @import("common.zig");
