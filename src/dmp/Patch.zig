@@ -207,16 +207,16 @@ pub fn deinit(self: *Patch, allocator: Allocator) void {
 /// text2 is not provided, diffs are the delta between text1 and text2.
 ///
 /// @param text1 Old text.
-/// @param diffs Array of Diff objects for text1 to text2.
+/// @param difference Diff object for text1 to text2.
 /// @return self.
 pub fn make(
     patch: *Patch,
     allocator: Allocator,
     text: []const u8,
-    diffs: DiffList,
+    difference: *const Diff,
 ) error{OutOfMemory}!*Patch {
     if (patch.hunks.items.len > 0) patch.deinit(allocator);
-    patch.hunks = try patch.makePatch(allocator, text, diffs);
+    patch.hunks = try patch.makePatch(allocator, text, difference);
     return patch;
 }
 
@@ -597,9 +597,6 @@ fn patchAddContext(
     text: []const u8,
 ) error{OutOfMemory}!void {
     if (text.len == 0) return;
-    // TODO the fixup logic here might make patterns too large?
-    // It should be ok, because big patches get broken up.  Hmm.
-    // Also, the SimpleNote maintained branch does it this way.
     var padding: usize = 0;
     { // Grow the pattern around the patch until unique, to set padding amount.
         var pattern = text[patch.start2 .. patch.start2 + patch.length1];
@@ -657,14 +654,14 @@ fn patchAddContext(
 }
 
 /// Determines how to handle Diffs in a patch.  Functions which create
-/// the diffs internally can use `.own`: the Diffs will be copied to
-/// the patch list, new ones allocated, and old ones freed.  Then call
-/// `deinit` on the DiffList, but not `deinitDiffList`.  This *must not*
-/// be used if the DiffList is not immediately freed, because some of
-/// the diffs will contain spuriously empty text.
+/// the diffs internally can pass a mutable `Diff`: the edits will be
+/// copied to the patch list, new ones allocated, and old ones freed.
+/// Then call `deinit` on the `Diff`, but not `deinitDiffList`.  This
+/// *must not* be used if the `Diff` is not immediately freed, because
+/// some of the edits will contain spuriously empty text.
 ///
-/// Functions which operate on an existing DiffList should use `.copy`:
-/// as the name indicates, copies of the Diffs will be made, and the
+/// Functions which operate on an existing `Diff` should use `.copy`:
+/// as the name indicates, copies of the edits will be made, and the
 /// original memory must be freed separately.
 fn diffAndMakePatch(
     patch: *const Patch,
@@ -680,10 +677,7 @@ fn diffAndMakePatch(
         _ = try diff_obj.cleanupSemantic(allocator);
         _ = try diff_obj.cleanupEfficiency(allocator);
     }
-    var diffs = diff_obj.edits;
-    diff_obj.edits = .empty;
-    defer deinitDiffList(allocator, &diffs);
-    return try makePatchInternal(patch.config, allocator, text1, diffs);
+    return try makePatchInternal(patch.config, allocator, text1, &diff_obj);
 }
 
 /// @return List of Patch objects.
@@ -691,10 +685,11 @@ fn makePatchInternal(
     config: PatchConfig,
     allocator: Allocator,
     text: []const u8,
-    diffs: DiffList,
+    difference: *Diff,
 ) error{OutOfMemory}!PatchList {
     var patches: PatchList = .empty;
     errdefer deinitPatchList(allocator, &patches);
+    const diffs = &difference.edits;
     if (diffs.items.len == 0) {
         return patches; // Empty diff means empty patchlist
     }
@@ -829,18 +824,11 @@ fn makePatch(
     patch: *const Patch,
     allocator: Allocator,
     text: []const u8,
-    diffs: DiffList,
+    difference: *const Diff,
 ) error{OutOfMemory}!PatchList {
-    var difference: Diff = .{
-        .config = .default,
-        .edits = diffs,
-    };
     var copied = try difference.copy(allocator);
     defer copied.deinit(allocator);
-    var copied_diffs = copied.edits;
-    copied.edits = .empty;
-    defer deinitDiffList(allocator, &copied_diffs);
-    return try makePatchInternal(patch.config, allocator, text, copied_diffs);
+    return try makePatchInternal(patch.config, allocator, text, &copied);
 }
 
 fn makePatchFromDiff(
@@ -852,10 +840,7 @@ fn makePatchFromDiff(
     defer allocator.free(text1);
     var copied = try difference.copy(allocator);
     defer copied.deinit(allocator);
-    var copied_diffs = copied.edits;
-    copied.edits = .empty;
-    defer deinitDiffList(allocator, &copied_diffs);
-    return try makePatchInternal(patch.config, allocator, text1, copied_diffs);
+    return try makePatchInternal(patch.config, allocator, text1, &copied);
 }
 
 /// Merge a set of patches onto the text.  Returns a tuple: the first of which
@@ -1206,6 +1191,12 @@ fn patchSplitMax(
         // We have a big ol' patch.
         var bigpatch = patches.orderedRemove(x);
         defer bigpatch.deinit(allocator);
+        // BUGFIX: this papers over problems caused by Diff borrowing,
+        // but is not the intended solution.
+        // TODO: revisit.
+        for (bigpatch.diffs.items) |*edit| {
+            try edit.own(allocator);
+        }
         // Prevent incrementing past the next patch:
         x_i -= 1;
         var start1 = bigpatch.start1;
@@ -2564,10 +2555,7 @@ fn testMakePatch(allocator: Allocator) !void {
         var diff = Diff.init(config);
         defer diff.deinit(allocator);
         _ = try diff.diff(allocator, text1, text2);
-        var diffs = diff.edits;
-        diff.edits = .empty;
-        defer deinitDiffList(allocator, &diffs);
-        _ = try patch.make(allocator, text1, diffs);
+        _ = try patch.make(allocator, text1, &diff);
         const patch_text_2 = try patch.toTextPatch(allocator);
         defer allocator.free(patch_text_2);
         try testing.expectEqualStrings(expectedPatch, patch_text_2);

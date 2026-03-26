@@ -289,7 +289,7 @@ fn assertRevisionPairInvariant(
 
     var patches = dmp.Patch.init(patch_config);
     defer patches.deinit(testing.allocator);
-    _ = try patches.make(testing.allocator, before.body, diff.edits);
+    _ = try patches.make(testing.allocator, before.body, &diff);
     try expectPatchUtf8(patches.hunks);
 
     const patch_text = try patches.toTextPatch(testing.allocator);
