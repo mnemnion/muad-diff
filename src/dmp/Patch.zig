@@ -16,8 +16,6 @@
 //! - `match_threshold` sets how strict matching is during application.
 //! - `match_distance` sets how far from the expected location matching will
 //!   search.
-//! - `match_max_bits` sets the maximum pattern size used by the internal match
-//!   logic and patch splitting.
 //!
 //! The usual flow is to initialize a `Patch`, populate it with `make()`,
 //! `fromDiff()`, `fromTexts()`, or `fromTextPatch()`, and then call `apply()`
@@ -127,6 +125,8 @@ pub const Hunk = struct {
 /// Synonym for ArrayListUnmanaged(Hunk).
 pub const PatchList = ArrayListUnmanaged(Hunk);
 
+const match_max_bits: u8 = @bitSizeOf(usize);
+
 /// A sensible default for Patch.
 pub const default: Patch = .{
     .config = .default,
@@ -150,15 +150,11 @@ pub const PatchConfig = struct {
     /// A match this many characters away from the expected location will add
     /// 1.0 to the score (0.0 is a perfect match).
     match_distance: u32,
-    /// The number of bits in a usize.
-    match_max_bits: u8,
-
     pub const default: PatchConfig = .{
         .margin = 4,
         .delete_threshold = 0.5,
         .match_threshold = 0.05,
         .match_distance = 1000,
-        .match_max_bits = @bitSizeOf(usize),
     };
 };
 
@@ -273,15 +269,18 @@ pub fn apply(
     return try patch.applyPatch(allocator, text);
 }
 
-/// Merge a set of patches into the text, mutating the patchset in the process.
-/// The Patch still needs to be de-initialized, but is no longer suitable for
-/// other operations.
-pub fn applyDestructively(
+/// Apply a patch destructively: this will mutate the patch.  After
+/// this, it's still possible to emit the patch as text, but it will
+/// not have the result you want, due to padding and other splits.
+pub fn applyDestructive(
     patch: *Patch,
     allocator: Allocator,
-    text: []const u8,
+    og_text: []const u8,
 ) OOM!struct { []const u8, bool } {
-    return try patch.applyDestructive(allocator, text);
+    if (patch.hunks.items.len == 0) {
+        return .{ try allocator.dupe(u8, og_text), true };
+    }
+    return patch.applyDestructiveImpl(allocator, og_text);
 }
 
 /// Take a list of patches and return a textual representation.
@@ -384,18 +383,6 @@ const sh_one: u64 = 1;
 //| clamp off the source text in both directions so we decline to search where
 //| we don't care if there is a match.
 //| ---
-//| I also don't like the hash map we're using for the alphabet, it's a
-//| heavyweight heap-allocated data structure, and what we do with it can be
-//| done simpler.  Stack space is cheap, since we know the total call graph
-//| is shallow, so we can use the sparse array trick.  Two [256]u8, and one
-//| [256]usize: we index sparse with our byte, and if sparse[b] < n, the number
-//| of elements, we check if dense[sparse[b]] == b.  If so, our value is at
-//| val[sparse[b]].  Even for big vector match-maps, 256 bits, this is not a lot
-//| of stack allocation.  Better yet, we have the option to allocate the val
-//| array after building our alphabet, and we only make as many vectors as we
-//| have unique letters.  But it's 'just' a 16KiB stack allocation, even then,
-//| and we use it densely, not sparsely.
-//| ---
 //| Bonus round: making our alphabet bytes does not fit the problem domain,
 //| and this matters: our result will treat drift by wider characters as more
 //| expensive than narrow ones, which is contrary to intuition.  Same issue with
@@ -407,7 +394,7 @@ const sh_one: u64 = 1;
 //| the best.  That heuristic has the advantage of being very easy, at least.
 
 /// Locate the best instance of `pattern` in `text` near `loc` using the
-/// Bitap algorithm.  Returns -1 if no match found.
+/// Bitap algorithm.  Returns `null` if no match found.
 ///
 /// @param text The text to search.
 /// @param pattern The pattern to search for.
@@ -426,15 +413,11 @@ fn matchBitap(
     assert(text.len != 0 and pattern.len != 0);
 
     // Initialise the alphabet.
-    var map = try matchAlphabet(allocator, pattern);
-    defer map.deinit();
+    var map: MatchAlphabet = .{};
+    map.matchAlphabet(pattern);
     // Highest score beyond which we give up.
     var score_threshold = config.match_threshold;
     // Is there a nearby exact match? (speedup)
-    // TODO obviously if we want a speedup here, we do this:
-    // if (threshold == 0.0) return best_loc;  #proof in comments
-    // We don't have to unwrap best_loc because the retval is ?usize already
-    // #proof axiom: threshold is between 0.0 and 1.0 (doc comment)
     var best_loc = std.mem.indexOfPos(u8, text, loc, pattern);
     if (best_loc) |best| { // #proof this returns 0.0 for exact match (see comments in function)
         score_threshold = @min(matchBitapScore(config, 0, best, loc, pattern), score_threshold);
@@ -467,7 +450,6 @@ fn matchBitap(
         bin_min = 0;
         bin_mid = bin_max;
         while (bin_min < bin_mid) {
-            // #proof lemma: if threshold == 0.0, this never happens
             if (matchBitapScore(config, d, @intCast(i_loc + bin_mid), loc, pattern) <= score_threshold) {
                 bin_min = bin_mid;
             } else {
@@ -485,23 +467,24 @@ fn matchBitap(
         rd[finish + 1] = (sh_one << dshift) - 1;
         var j = finish;
         while (j >= start) : (j -= 1) {
-            const char_match: usize = if (text.len <= j - 1 or !map.contains(text[j - 1]))
+            const char_match: usize = if (text.len <= j - 1)
                 // Out of range.
                 0
             else
-                map.get(text[j - 1]).?;
+                map.get(text[j - 1]);
             if (d == 0) {
                 // First pass: exact match.
                 rd[j] = ((rd[j + 1] << 1) | 1) & char_match;
             } else {
                 // Subsequent passes: fuzzy match.
-                rd[j] = ((rd[j + 1] << 1) | 1) & char_match | (((last_rd[j + 1] | last_rd[j]) << 1) | 1) | last_rd[j + 1];
+                rd[j] = ((rd[j + 1] << 1) | 1) & char_match |
+                    (((last_rd[j + 1] | last_rd[j]) << 1) | 1) |
+                    last_rd[j + 1];
             }
             if ((rd[j] & matchmask) != 0) {
                 const score = matchBitapScore(config, d, j - 1, loc, pattern);
                 // This match will almost certainly be better than any existing
                 // match.  But check anyway.
-                // #proof: the smoking gun. This can only be equal not less.
                 if (score <= score_threshold) {
                     // Told you so.
                     score_threshold = score;
@@ -516,8 +499,7 @@ fn matchBitap(
                     }
                 }
             }
-        } // #proof Anything else will do this.
-        // #proof d + 1 starts at 1, so (see function) this will always break.
+        }
         if (matchBitapScore(config, d + 1, loc, loc, pattern) > score_threshold) {
             // No hope for a (better) match at greater error levels.
             allocator.free(rd);
@@ -566,27 +548,43 @@ fn matchBitapScore(
 
 /// Initialise the alphabet for the Bitap algorithm.
 /// @param pattern The text to encode.
-/// @return Hash of character locations.
-fn matchAlphabet(allocator: Allocator, pattern: []const u8) error{OutOfMemory}!std.AutoHashMap(u8, usize) {
-    var map = std.AutoHashMap(u8, usize).init(allocator);
-    errdefer map.deinit();
-    for (pattern) |c| {
-        if (!map.contains(c)) {
-            try map.put(c, 0);
+/// @return Sparse alphabet of character locations.
+const MatchAlphabet = struct {
+    dense: [256]u8 = undefined,
+    sparse: [256]u8 = undefined,
+    values: [256]usize = undefined,
+    count: usize = 0,
+
+    // https://research.swtch.com/sparse
+    fn get(map: *const MatchAlphabet, byte: u8) usize {
+        const index = map.sparse[byte];
+        if (index < map.count and map.dense[index] == byte) {
+            return map.values[index];
+        }
+        return 0;
+    }
+
+    fn matchAlphabet(map: *MatchAlphabet, pattern: []const u8) void {
+        for (pattern) |c| {
+            if (map.get(c) == 0) {
+                const index: u8 = @intCast(map.count);
+                map.dense[index] = c;
+                map.sparse[c] = index;
+                map.count += 1;
+            }
+        }
+        for (pattern, 0..) |c, i| {
+            const shift: u6 = @intCast(pattern.len - i - 1);
+            const index = map.sparse[c];
+            map.values[index] |= (@as(usize, 1) << shift);
         }
     }
-    for (pattern, 0..) |c, i| {
-        const shift: u6 = @intCast(pattern.len - i - 1);
-        const value: usize = map.get(c).? | (@as(usize, 1) << shift);
-        try map.put(c, value);
-    }
-    return map;
-}
+};
 
 //|  PATCH FUNCTIONS
 
 /// Increase the context until it is unique, but don't let the pattern
-/// expand beyond DiffMatchPatch.match_max_bits.
+/// expand beyond `match_max_bits`.
 ///
 /// @param patch The patch to grow.
 /// @param text Source text.
@@ -600,7 +598,7 @@ fn patchAddContext(
     var padding: usize = 0;
     { // Grow the pattern around the patch until unique, to set padding amount.
         var pattern = text[patch.start2 .. patch.start2 + patch.length1];
-        const max_width: usize = config.match_max_bits - (2 * config.margin);
+        const max_width: usize = match_max_bits - (2 * config.margin);
         while (std.mem.indexOf(u8, text, pattern) != std.mem.lastIndexOf(u8, text, pattern) and pattern.len < max_width) {
             padding += config.margin;
             const pat_start = if (padding > patch.start2) 0 else patch.start2 - padding;
@@ -873,13 +871,10 @@ fn applyPatch(
     // Make a shallow copy of the patch to avoid mutating the original.
     var patches = try patch.copy(allocator);
     defer patches.deinit(allocator);
-    return patches.applyDestructive(allocator, og_text);
+    return patches.applyDestructiveImpl(allocator, og_text);
 }
 
-/// Apply a patch destructively: this will mutate the patch.  After
-/// this, it's still possible to emit the patch as text, but it will
-/// not have the result you want, due to padding and other splits.
-pub fn applyDestructive(
+fn applyDestructiveImpl(
     patch: *Patch,
     allocator: Allocator,
     og_text: []const u8,
@@ -903,7 +898,7 @@ pub fn applyDestructive(
         defer allocator.free(text1);
         var maybe_start: ?usize = null;
         var maybe_end: ?usize = null;
-        const m_max_b = patch.config.match_max_bits;
+        const m_max_b = match_max_bits;
         if (text1.len > m_max_b) {
             maybe_start = try matchMain(patch.config, allocator, tm.asText(), text1[0..m_max_b], expected_loc);
             if (maybe_start) |start| {
@@ -1179,7 +1174,7 @@ fn patchSplitMax(
 ) error{OutOfMemory}!void {
     const patches = &patch.hunks;
     const config = patch.config;
-    const patch_size = config.match_max_bits;
+    const patch_size = match_max_bits;
     const patch_margin = config.margin;
     const max_patch_len = patch_size - patch_margin;
     // Mutating an array while iterating it? Sure, lets!
@@ -1342,7 +1337,7 @@ fn patchSplitMax(
             } else {
                 hunk.deinit(allocator);
             }
-        } // We don't use the last precontext
+        }
     }
 }
 
@@ -1879,31 +1874,24 @@ fn sliceToDiffList(allocator: Allocator, diff_slice: []const Edit) !DiffList {
     return diff_list;
 }
 
-fn testMapSubsetEquality(left: anytype, right: anytype) !void {
-    var map_iter = left.iterator();
-    while (map_iter.next()) |entry| {
-        const key = entry.key_ptr.*;
-        const value = entry.value_ptr.*;
-        try testing.expectEqual(value, right.get(key));
-    }
+fn testAlphabetValue(map: *const MatchAlphabet, byte: u8, value: usize) !void {
+    try testing.expectEqual(value, map.get(byte));
 }
 
 test "matchAlphabet" {
-    var map = std.AutoHashMap(u8, usize).init(testing.allocator);
-    defer map.deinit();
-    try map.put('a', 4);
-    try map.put('b', 2);
-    try map.put('c', 1);
-    var bitap_map = try matchAlphabet(testing.allocator, "abc");
-    defer bitap_map.deinit();
-    try testMapSubsetEquality(map, bitap_map);
-    map.clearRetainingCapacity();
-    try map.put('a', 37);
-    try map.put('b', 18);
-    try map.put('c', 8);
-    var bitap_map2 = try matchAlphabet(testing.allocator, "abcaba");
-    defer bitap_map2.deinit();
-    try testMapSubsetEquality(map, bitap_map2);
+    var bitap_map: MatchAlphabet = .{};
+    bitap_map.matchAlphabet("abc");
+    try testAlphabetValue(&bitap_map, 'a', 4);
+    try testAlphabetValue(&bitap_map, 'b', 2);
+    try testAlphabetValue(&bitap_map, 'c', 1);
+    try testAlphabetValue(&bitap_map, 'z', 0);
+
+    var bitap_map2: MatchAlphabet = .{};
+    bitap_map2.matchAlphabet("abcaba");
+    try testAlphabetValue(&bitap_map2, 'a', 37);
+    try testAlphabetValue(&bitap_map2, 'b', 18);
+    try testAlphabetValue(&bitap_map2, 'c', 8);
+    try testAlphabetValue(&bitap_map2, 'z', 0);
 }
 
 const TBitap = struct {
@@ -2486,11 +2474,8 @@ test "testPatchAddContext" {
 }
 
 fn testMakePatch(allocator: Allocator) !void {
-    var patch = Patch.init(blk: {
-        var config: PatchConfig = .default;
-        config.match_max_bits = 32;
-        break :blk config;
-    });
+    try testing.expect(match_max_bits == 32 or match_max_bits == 64);
+    var patch = Patch.init(.default);
     defer patch.deinit(allocator);
     _ = try patch.fromTexts(allocator, "", "");
     const null_patch_text = try patch.toTextPatch(allocator);
@@ -2550,7 +2535,11 @@ fn testMakePatch(allocator: Allocator) !void {
     {
         const text1a = "abcdef" ** 100;
         const text2a = text1a ++ "123";
-        const expected_patch = "@@ -573,28 +573,31 @@\n cdefabcdefabcdefabcdefabcdef\n+123\n";
+        const expected_patch = switch (match_max_bits) {
+            32 => "@@ -573,28 +573,31 @@\n cdefabcdefabcdefabcdefabcdef\n+123\n",
+            64 => "@@ -541,60 +541,63 @@\n abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdef\n+123\n",
+            else => unreachable,
+        };
         _ = try patch.fromTexts(allocator, text1a, text2a);
         const patch_text = try patch.toTextPatch(allocator);
         defer allocator.free(patch_text);
@@ -2568,11 +2557,8 @@ test "makePatch" {
 
 fn testPatchSplitMax(allocator: Allocator) !void {
     // TODO get some tests which cover the max split we actually use: bitsize(usize)
-    var patch = Patch.init(blk: {
-        var config: PatchConfig = .default;
-        config.match_max_bits = 32;
-        break :blk config;
-    });
+    try testing.expect(match_max_bits == 32 or match_max_bits == 64);
+    var patch = Patch.init(.default);
     defer patch.deinit(allocator);
     {
         _ = try patch.fromTexts(
@@ -2580,7 +2566,11 @@ fn testPatchSplitMax(allocator: Allocator) !void {
             "abcdefghijklmnopqrstuvwxyz01234567890",
             "XabXcdXefXghXijXklXmnXopXqrXstXuvXwxXyzX01X23X45X67X89X0",
         );
-        const expected_patch = "@@ -1,32 +1,46 @@\n+X\n ab\n+X\n cd\n+X\n ef\n+X\n gh\n+X\n ij\n+X\n kl\n+X\n mn\n+X\n op\n+X\n qr\n+X\n st\n+X\n uv\n+X\n wx\n+X\n yz\n+X\n 012345\n@@ -25,13 +39,18 @@\n zX01\n+X\n 23\n+X\n 45\n+X\n 67\n+X\n 89\n+X\n 0\n";
+        const expected_patch = switch (match_max_bits) {
+            32 => "@@ -1,32 +1,46 @@\n+X\n ab\n+X\n cd\n+X\n ef\n+X\n gh\n+X\n ij\n+X\n kl\n+X\n mn\n+X\n op\n+X\n qr\n+X\n st\n+X\n uv\n+X\n wx\n+X\n yz\n+X\n 012345\n@@ -25,13 +39,18 @@\n zX01\n+X\n 23\n+X\n 45\n+X\n 67\n+X\n 89\n+X\n 0\n",
+            64 => "@@ -1,37 +1,56 @@\n+X\n ab\n+X\n cd\n+X\n ef\n+X\n gh\n+X\n ij\n+X\n kl\n+X\n mn\n+X\n op\n+X\n qr\n+X\n st\n+X\n uv\n+X\n wx\n+X\n yz\n+X\n 01\n+X\n 23\n+X\n 45\n+X\n 67\n+X\n 89\n+X\n 0\n",
+            else => unreachable,
+        };
         try patch.patchSplitMax(allocator);
         const patch_text = try patch.toTextPatch(allocator);
         defer allocator.free(patch_text);
@@ -2597,7 +2587,12 @@ fn testPatchSplitMax(allocator: Allocator) !void {
         try patch.patchSplitMax(allocator);
         const text_after = try patch.toTextPatch(allocator);
         defer allocator.free(text_after);
-        try testing.expectEqualStrings(text_before, text_after);
+        const expected_text = switch (match_max_bits) {
+            32 => text_before,
+            64 => "@@ -3,64 +3,8 @@\n cdef\n-12345678901234567890123456789012345678901234567890123456\n 7890\n@@ -59,22 +3,8 @@\n cdef\n-78901234567890\n uvwx\n",
+            else => unreachable,
+        };
+        try testing.expectEqualStrings(expected_text, text_after);
     }
     {
         _ = try patch.fromTexts(
@@ -2610,10 +2605,11 @@ fn testPatchSplitMax(allocator: Allocator) !void {
         try patch.patchSplitMax(allocator);
         const patch_text = try patch.toTextPatch(allocator);
         defer allocator.free(patch_text);
-        try testing.expectEqualStrings(
-            "@@ -1,32 +1,4 @@\n-1234567890123456789012345678\n 9012\n@@ -29,32 +1,4 @@\n-9012345678901234567890123456\n 7890\n@@ -57,14 +1,3 @@\n-78901234567890\n+abc\n",
-            patch_text,
-        );
+        try testing.expectEqualStrings(switch (match_max_bits) {
+            32 => "@@ -1,32 +1,4 @@\n-1234567890123456789012345678\n 9012\n@@ -29,32 +1,4 @@\n-9012345678901234567890123456\n 7890\n@@ -57,14 +1,3 @@\n-78901234567890\n+abc\n",
+            64 => "@@ -1,64 +1,4 @@\n-123456789012345678901234567890123456789012345678901234567890\n 1234\n@@ -61,10 +1,3 @@\n-1234567890\n+abc\n",
+            else => unreachable,
+        }, patch_text);
     }
     {
         _ = try patch.fromTexts(
@@ -2624,10 +2620,11 @@ fn testPatchSplitMax(allocator: Allocator) !void {
         try patch.patchSplitMax(allocator);
         const patch_text = try patch.toTextPatch(allocator);
         defer allocator.free(patch_text);
-        try testing.expectEqualStrings(
-            "@@ -2,32 +2,32 @@\n bcdefghij , h : \n-0\n+1\n  , t : 1 abcdef\n@@ -29,32 +29,32 @@\n bcdefghij , h : \n-0\n+1\n  , t : 1 abcdef\n",
-            patch_text,
-        );
+        try testing.expectEqualStrings(switch (match_max_bits) {
+            32 => "@@ -2,32 +2,32 @@\n bcdefghij , h : \n-0\n+1\n  , t : 1 abcdef\n@@ -29,32 +29,32 @@\n bcdefghij , h : \n-0\n+1\n  , t : 1 abcdef\n",
+            64 => "@@ -1,58 +1,58 @@\n abcdefghij , h : \n-0\n+1\n  , t : 1 abcdefghij , h : 0 , t : 1 abcd\n@@ -29,33 +29,33 @@\n bcdefghij , h : \n-0\n+1\n  , t : 1 abcdefg\n",
+            else => unreachable,
+        }, patch_text);
     }
 }
 
@@ -2720,7 +2717,6 @@ test "testPatchApply" {
     config.match_distance = 1000;
     config.match_threshold = 0.5;
     config.delete_threshold = 0.5;
-    config.match_max_bits = 32; // Necessary to get the correct legacy behavior
     // Null case.
     try testing.checkAllAllocationFailures(
         testing.allocator,
@@ -2782,7 +2778,7 @@ test "testPatchApply" {
             "x1234567890123456789012345678901234567890123456789012345678901234567890y",
             "xabcy",
             "x123456789012345678901234567890-----++++++++++-----123456789012345678901234567890y",
-            "xabcy",
+            if (match_max_bits == 32) "xabcy" else "xabc1234567890y",
             true,
         },
     );
@@ -2795,7 +2791,10 @@ test "testPatchApply" {
             "x1234567890123456789012345678901234567890123456789012345678901234567890y",
             "xabcy",
             "x12345678901234567890---------------++++++++++---------------12345678901234567890y",
-            "xabc12345678901234567890---------------++++++++++---------------12345678901234567890y",
+            if (match_max_bits == 32)
+                "xabc12345678901234567890---------------++++++++++---------------12345678901234567890y"
+            else
+                "x12345678901234567890---------------++++++++++---------------123456abcy",
             false,
         },
     );
@@ -2809,8 +2808,11 @@ test "testPatchApply" {
             "x1234567890123456789012345678901234567890123456789012345678901234567890y",
             "xabcy",
             "x12345678901234567890---------------++++++++++---------------12345678901234567890y",
-            "xabcy",
-            true,
+            if (match_max_bits == 32)
+                "xabcy"
+            else
+                "x12345678901234567890---------------++++++++++---------------123456abcy",
+            match_max_bits == 32,
         },
     );
     config.delete_threshold = 0.6;
@@ -2879,9 +2881,8 @@ test "patching does not affect patches" {
         config.match_distance = 1000;
         config.match_threshold = 0.5;
         config.delete_threshold = 0.5;
-        config.match_max_bits = 32;
         break :blk config;
-    }; // Need this so test #2 splits
+    };
     var patches1 = Patch.init(config);
     defer patches1.deinit(allocator);
     _ = try patches1.fromTexts(allocator, "", "test");
