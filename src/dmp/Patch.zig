@@ -2925,8 +2925,7 @@ test "patching does not affect patches" {
 fn testTextManagerReplaceRangeEqualLength(allocator: Allocator) !void {
     var tm = try TextManager.init(allocator, "abcdef", "", 0, 0);
     errdefer {
-        // coverage: errdefer
-        tm.errDeinit(allocator); // coverage: errdefer
+        tm.errDeinit(allocator); // kcov-test-cleanup
     }
     tm.replaceRange(2, 2, "XY");
     const out = try tm.finish(allocator);
@@ -2934,11 +2933,10 @@ fn testTextManagerReplaceRangeEqualLength(allocator: Allocator) !void {
     try testing.expectEqualStrings("abXYef", out);
 }
 
-fn testTextManagerReplaceRangeEqualLengthErrdefer(allocator: Allocator) error{Sentinel, OutOfMemory}!void {
+fn testTextManagerReplaceRangeEqualLengthErrdefer(allocator: Allocator) error{ Sentinel, OutOfMemory }!void {
     var tm = try TextManager.init(allocator, "abcdef", "", 0, 0);
     errdefer {
-        // coverage: errdefer
-        tm.errDeinit(allocator);
+        tm.errDeinit(allocator); // kcov-test-cleanup
     }
     return error.Sentinel;
 }
@@ -2961,8 +2959,7 @@ fn testPatchSplitMaxCoverageLargeDeleteBranch(allocator: Allocator) !void {
 
     var hunk = Hunk{};
     errdefer {
-        // coverage: errdefer
-        hunk.deinit(allocator); // coverage: errdefer
+        hunk.deinit(allocator); // kcov-test-cleanup
     }
 
     const giant_delete = switch (match_max_bits) {
@@ -2987,17 +2984,54 @@ fn testPatchSplitMaxCoverageLargeDeleteBranch(allocator: Allocator) !void {
     try testing.expect(patch.hunks.items.len >= 1);
 }
 
+fn testPatchSplitMaxCoverageMergeTrailingEqual(allocator: Allocator) !void {
+    var patch = Patch.init(.default);
+    defer patch.deinit(allocator);
+
+    var hunk = Hunk{};
+    errdefer {
+        hunk.deinit(allocator); // kcov-test-cleanup
+    }
+
+    const prefix_equal = switch (match_max_bits) {
+        32 => "ABCDEFGHIJKLMNOPQRST",
+        64 => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx",
+        else => unreachable,
+    };
+    const tail_equal = switch (match_max_bits) {
+        32 => "uvwxyzabcdefghijklmn",
+        64 => "yz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        else => unreachable,
+    };
+
+    try hunk.diffs.ensureTotalCapacity(allocator, 3);
+    hunk.diffs.appendAssumeCapacity(Edit.asBorrow(.equal, prefix_equal));
+    hunk.diffs.appendAssumeCapacity(Edit.asBorrow(.delete, "!"));
+    hunk.diffs.appendAssumeCapacity(Edit.asBorrow(.equal, tail_equal));
+    hunk.start1 = 0;
+    hunk.start2 = 0;
+    hunk.length1 = prefix_equal.len + 1 + tail_equal.len;
+    hunk.length2 = prefix_equal.len + tail_equal.len;
+
+    try patch.hunks.ensureTotalCapacity(allocator, 1);
+    patch.hunks.appendAssumeCapacity(hunk);
+    hunk = .{};
+
+    try patch.patchSplitMax(allocator);
+    try testing.expect(patch.hunks.items.len >= 1);
+}
+
 fn testPatchSplitMaxCoverageLargeDeleteBranchErrdefer(allocator: Allocator) error{Sentinel}!void {
     var hunk = Hunk{};
     errdefer {
-        // coverage: errdefer
-        hunk.deinit(allocator); // coverage: errdefer
+        hunk.deinit(allocator); // kcov-test-cleanup
     }
     return error.Sentinel;
 }
 
 test "patchSplitMax coverage large delete branch" {
     try testPatchSplitMaxCoverageLargeDeleteBranch(testing.allocator);
+    try testPatchSplitMaxCoverageMergeTrailingEqual(testing.allocator);
     try testing.expectError(
         error.Sentinel,
         testPatchSplitMaxCoverageLargeDeleteBranchErrdefer(testing.allocator),

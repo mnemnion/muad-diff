@@ -1012,7 +1012,7 @@ fn diffLineMode(
                 if (count_insert == 1) {
                     insert_run = text;
                 } else {
-                    dbgassert(insert_run.ptr + insert_run.len == text.ptr);
+                    dbgassert(insert_run.ptr + insert_run.len == text.ptr); // kcov-miss
                     insert_run = insert_run.ptr[0 .. insert_run.len + text.len];
                 }
             },
@@ -1022,7 +1022,7 @@ fn diffLineMode(
                 if (count_delete == 1) {
                     delete_run = text;
                 } else {
-                    dbgassert(delete_run.ptr + delete_run.len == text.ptr);
+                    dbgassert(delete_run.ptr + delete_run.len == text.ptr); // kcov-miss
                     delete_run = delete_run.ptr[0 .. delete_run.len + text.len];
                 }
             },
@@ -1509,10 +1509,7 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void {
                                 !old_edit.owned and
                                 text_delete.ptr + text_delete.len - common_length == old_edit.text.ptr)
                             {
-                                diffs.items[pointer] = Edit.asBorrow(
-                                    .equal,
-                                    text_delete.ptr[text_delete.len - common_length ..][0 .. common_length + old_edit.text.len],
-                                );
+                                unreachable; // This should be structurally impossible. If it isn't? I want that input!
                             } else {
                                 diffs.items[pointer] = try diffMakeOwnedConcat2(
                                     allocator,
