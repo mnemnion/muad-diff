@@ -2081,6 +2081,54 @@ test "patch from text decodes escaped body chars" {
     );
 }
 
+fn testPatchIssue157GeneratedPatchRoundTrip(allocator: Allocator) !void {
+    const original_json =
+        "{\n" ++
+        "  \"type\": \"module\",\n" ++
+        "  \"dependencies\": {\n" ++
+        "    \"ejs\": \"^3.1.9\",\n" ++
+        "    \"express\": \"^4.18.2\",\n" ++
+        "    \"puppeteer\": \"^21.7.0\"\n" ++
+        "  }\n" ++
+        "}";
+    const expected_json =
+        "{\n" ++
+        "  \"type\": \"module\",\n" ++
+        "  \"dependencies\": {\n" ++
+        "    \"ejs\": \"^3.1.9\",\n" ++
+        "    \"express\": \"^4.18.2\",\n" ++
+        "    \"lodash\": \"^4.17.21\",\n" ++
+        "    \"puppeteer\": \"^21.7.0\"\n" ++
+        "  }\n" ++
+        "}";
+
+    var diff = Diff.init(.default);
+    defer diff.deinit(allocator);
+    _ = try diff.diff(allocator, original_json, expected_json);
+
+    var patch: Patch = .default;
+    defer patch.deinit(allocator);
+    _ = try patch.make(allocator, original_json, &diff);
+
+    const patch_text = try patch.toTextPatch(allocator);
+    std.debug.print("{s}\n", .{patch_text});
+    defer allocator.free(patch_text);
+    try testing.expect(std.mem.indexOf(u8, patch_text, "%0A") != null);
+
+    var round_tripped_patch: Patch = .default;
+    defer round_tripped_patch.deinit(allocator);
+    _ = try round_tripped_patch.fromTextPatch(allocator, patch_text);
+
+    const result, const success = try round_tripped_patch.apply(allocator, original_json);
+    defer allocator.free(result);
+    try testing.expect(success);
+    try testing.expectEqualStrings(expected_json, result);
+}
+
+test "google/diff-match-patch #157: generated patch round trips with newline intact" {
+    try testPatchIssue157GeneratedPatchRoundTrip(testing.allocator);
+}
+
 fn sliceToDiffList(allocator: Allocator, diff_slice: []const Edit) !DiffList {
     var diff_list: DiffList = .empty;
     errdefer deinitDiffList(allocator, &diff_list);
