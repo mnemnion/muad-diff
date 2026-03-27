@@ -2926,7 +2926,7 @@ fn testTextManagerReplaceRangeEqualLength(allocator: Allocator) !void {
     var tm = try TextManager.init(allocator, "abcdef", "", 0, 0);
     errdefer {
         // coverage: errdefer
-        tm.errDeinit(allocator);
+        tm.errDeinit(allocator); // coverage: errdefer
     }
     tm.replaceRange(2, 2, "XY");
     const out = try tm.finish(allocator);
@@ -2962,11 +2962,15 @@ fn testPatchSplitMaxCoverageLargeDeleteBranch(allocator: Allocator) !void {
     var hunk = Hunk{};
     errdefer {
         // coverage: errdefer
-        hunk.deinit(allocator);
+        hunk.deinit(allocator); // coverage: errdefer
     }
 
-    const giant_delete =
-        "12345678901234567890123456789012345678901234567890123456789012345678901234567890";
+    const giant_delete = switch (match_max_bits) {
+        32 => "12345678901234567890123456789012345678901234567890123456789012345678901234567890",
+        64 => "12345678901234567890123456789012345678901234567890123456789012345678901234567890" ++
+            "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghij",
+        else => unreachable,
+    };
     try hunk.diffs.ensureTotalCapacity(allocator, 3);
     hunk.diffs.appendAssumeCapacity(Edit.asBorrow(.equal, "prefix"));
     hunk.diffs.appendAssumeCapacity(Edit.asBorrow(.delete, giant_delete));
@@ -2987,7 +2991,7 @@ fn testPatchSplitMaxCoverageLargeDeleteBranchErrdefer(allocator: Allocator) erro
     var hunk = Hunk{};
     errdefer {
         // coverage: errdefer
-        hunk.deinit(allocator);
+        hunk.deinit(allocator); // coverage: errdefer
     }
     return error.Sentinel;
 }
@@ -3001,69 +3005,100 @@ test "patchSplitMax coverage large delete branch" {
 }
 
 test "patchApply coverage long match branch" {
-    const allocator = testing.allocator;
-    var patch = Patch.init(.default);
-    defer patch.deinit(allocator);
-
     const before = switch (match_max_bits) {
-        32 => "12345678901234567890123456789012",
-        64 => "1234567890123456789012345678901234567890123456789012345678901234",
+        32 => "x1234567890123456789012345678901234567890123456789012345678901234567890y",
+        64 => "x1234567890123456789012345678901234567890123456789012345678901234567890" ++
+            "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijy",
         else => unreachable,
     };
-    const after = before ++ "Z";
-
-    var hunk = Hunk{};
-    errdefer {
-        // coverage: errdefer
-        hunk.deinit(allocator);
-    }
-    try hunk.diffs.ensureTotalCapacity(allocator, 2);
-    hunk.diffs.appendAssumeCapacity(Edit.asBorrow(.equal, before));
-    hunk.diffs.appendAssumeCapacity(Edit.asBorrow(.insert, "Z"));
-    hunk.start1 = 0;
-    hunk.start2 = 0;
-    hunk.length1 = before.len;
-    hunk.length2 = after.len;
-    try patch.hunks.ensureTotalCapacity(allocator, 1);
-    patch.hunks.appendAssumeCapacity(hunk);
-
-    const result, const ok = try patch.apply(allocator, before);
-    defer allocator.free(result);
-    try testing.expect(ok);
-    try testing.expectEqualStrings(after, result);
+    try testPatchApply(
+        testing.allocator,
+        .default,
+        before,
+        "xabcy",
+        before,
+        "xabcy",
+        true,
+    );
 }
 
 test "patchApply coverage oversized beforeText branch" {
-    const allocator = testing.allocator;
-    var patch = Patch.init(.default);
-    defer patch.deinit(allocator);
-
     const before = switch (match_max_bits) {
-        32 => "1234567890123456789012345678901234",
-        64 => "123456789012345678901234567890123456789012345678901234567890123456",
+        32 => "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        64 => "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" ++
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         else => unreachable,
     };
-    const after = before ++ "Z";
+    try testPatchApply(
+        testing.allocator,
+        .default,
+        before,
+        "AA",
+        before,
+        "AA",
+        true,
+    );
+}
 
-    var hunk = Hunk{};
-    errdefer {
-        // coverage: errdefer
-        hunk.deinit(allocator);
-    }
-    try hunk.diffs.ensureTotalCapacity(allocator, 2);
-    hunk.diffs.appendAssumeCapacity(Edit.asBorrow(.equal, before));
-    hunk.diffs.appendAssumeCapacity(Edit.asBorrow(.insert, "Z"));
-    hunk.start1 = 0;
-    hunk.start2 = 0;
-    hunk.length1 = match_max_bits;
-    hunk.length2 = match_max_bits;
-    try patch.hunks.ensureTotalCapacity(allocator, 1);
-    patch.hunks.appendAssumeCapacity(hunk);
+test "patchApply coverage long match suffix miss" {
+    const before = switch (match_max_bits) {
+        32 => "x1234567890123456789012345678901234567890123456789012345678901234567890y",
+        64 => "x1234567890123456789012345678901234567890123456789012345678901234567890" ++
+            "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijy",
+        else => unreachable,
+    };
+    const apply_to = before[0..match_max_bits] ++ "not-the-suffix";
+    try testPatchApply(
+        testing.allocator,
+        .default,
+        before,
+        "xabcy",
+        apply_to,
+        apply_to,
+        false,
+    );
+}
 
-    const result, const ok = try patch.apply(allocator, before);
-    defer allocator.free(result);
-    try testing.expect(ok);
-    try testing.expectEqualStrings(after, result);
+test "patchApply coverage long match repeated endpoints" {
+    const before = switch (match_max_bits) {
+        32 => "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        64 => "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" ++
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        else => unreachable,
+    };
+    try testPatchApply(
+        testing.allocator,
+        .default,
+        before,
+        "AA",
+        before,
+        "AA",
+        true,
+    );
+}
+
+test "patchApply coverage long match bad interior" {
+    var config: PatchConfig = .default;
+    config.delete_threshold = 0.0;
+
+    const before = switch (match_max_bits) {
+        32 => "x1234567890123456789012345678901234567890123456789012345678901234567890y",
+        64 => "x1234567890123456789012345678901234567890123456789012345678901234567890" ++
+            "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijy",
+        else => unreachable,
+    };
+    const prefix = before[0..match_max_bits];
+    const suffix = before[before.len - match_max_bits ..];
+    const apply_to = prefix ++ "MISMATCHED-INTERIOR-WITH-EXTRA-NOISE-TO-FORCE-REJECTION" ++ suffix;
+    try testPatchApply(
+        testing.allocator,
+        config,
+        before,
+        "xabcy",
+        apply_to,
+        apply_to,
+        false,
+    );
 }
 
 const Patch = @This();

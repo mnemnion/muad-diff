@@ -3099,6 +3099,83 @@ test diffCleanupMerge {
         });
     }
 
+    {
+        const before = "xadcy";
+        const after = "xabcy";
+        try testDiffCleanupMergeBorrowed(.{
+            .input = &.{
+                .{ .operation = .equal, .owned = false, .text = before[0..1] },
+                .{ .operation = .delete, .owned = false, .text = before[1..2] },
+                .{ .operation = .insert, .owned = false, .text = after[1..4] },
+                .{ .operation = .delete, .owned = false, .text = before[2..4] },
+                .{ .operation = .equal, .owned = false, .text = before[4..] },
+            },
+            .expected = &.{
+                .{ .operation = .equal, .owned = false, .text = "xa" },
+                .{ .operation = .delete, .owned = false, .text = "d" },
+                .{ .operation = .insert, .owned = false, .text = "b" },
+                .{ .operation = .equal, .owned = false, .text = "cy" },
+            },
+        });
+    }
+
+    {
+        const before = "xady";
+        const after = "xaby";
+        try testDiffCleanupMergeBorrowed(.{
+            .input = &.{
+                .{ .operation = .equal, .owned = false, .text = before[0..1] },
+                .{ .operation = .delete, .owned = false, .text = before[1..3] },
+                .{ .operation = .insert, .owned = false, .text = after[1..3] },
+                .{ .operation = .equal, .owned = false, .text = before[3..] },
+            },
+            .expected = &.{
+                .{ .operation = .equal, .owned = false, .text = "xa" },
+                .{ .operation = .delete, .owned = false, .text = "d" },
+                .{ .operation = .insert, .owned = false, .text = "b" },
+                .{ .operation = .equal, .owned = false, .text = "y" },
+            },
+        });
+    }
+
+    {
+        const before = "xcay";
+        const after = "xbay";
+        try testDiffCleanupMergeBorrowed(.{
+            .input = &.{
+                .{ .operation = .equal, .owned = false, .text = before[0..1] },
+                .{ .operation = .delete, .owned = false, .text = before[1..3] },
+                .{ .operation = .insert, .owned = false, .text = after[1..3] },
+                .{ .operation = .equal, .owned = false, .text = before[3..] },
+            },
+            .expected = &.{
+                .{ .operation = .equal, .owned = false, .text = "x" },
+                .{ .operation = .delete, .owned = false, .text = "c" },
+                .{ .operation = .insert, .owned = false, .text = "b" },
+                .{ .operation = .equal, .owned = false, .text = "ay" },
+            },
+        });
+    }
+
+    {
+        const before = "xcdabz";
+        const after = "xyabz";
+        try testDiffCleanupMergeBorrowed(.{
+            .input = &.{
+                .{ .operation = .equal, .owned = false, .text = before[0..1] },
+                .{ .operation = .delete, .owned = false, .text = before[1..5] },
+                .{ .operation = .insert, .owned = false, .text = after[1..4] },
+                .{ .operation = .equal, .owned = false, .text = before[5..] },
+            },
+            .expected = &.{
+                .{ .operation = .equal, .owned = false, .text = "x" },
+                .{ .operation = .delete, .owned = false, .text = "cd" },
+                .{ .operation = .insert, .owned = false, .text = "y" },
+                .{ .operation = .equal, .owned = false, .text = "abz" },
+            },
+        });
+    }
+
     try testDiffCleanupMergeBorrowed(.{
         .input = &.{
             .{ .operation = .delete, .owned = false, .text = "a" },
@@ -3364,6 +3441,34 @@ test diffCleanupSemanticLossless {
                 .{ .operation = .equal, .owned = false, .text = after[0..6] },
                 .{ .operation = .delete, .owned = false, .text = before[6..9] },
                 .{ .operation = .equal, .owned = false, .text = after[6..] },
+            },
+            before,
+            after,
+        );
+    }
+
+    {
+        const before = "aax";
+        const after = "ax";
+        try testDiffCleanupSemanticLosslessBorrowedRoundTrip(
+            &.{
+                .{ .operation = .equal, .owned = false, .text = before[0..1] },
+                .{ .operation = .delete, .owned = false, .text = before[1..2] },
+                .{ .operation = .equal, .owned = false, .text = before[2..] },
+            },
+            before,
+            after,
+        );
+    }
+
+    {
+        const before = "xaa";
+        const after = "xa";
+        try testDiffCleanupSemanticLosslessBorrowedRoundTrip(
+            &.{
+                .{ .operation = .equal, .owned = false, .text = before[0..1] },
+                .{ .operation = .delete, .owned = false, .text = before[1..2] },
+                .{ .operation = .equal, .owned = false, .text = before[2..] },
             },
             before,
             after,
@@ -3832,6 +3937,31 @@ test diffCleanupSemantic {
             Edit.asBorrow(.insert, "12xy34z56"),
         },
     }});
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{TestIO{
+        .input = &[_]Edit{
+            Edit.asBorrow(.delete, "12"),
+            Edit.asBorrow(.insert, "ab"),
+            Edit.asBorrow(.equal, "WXYZ"),
+            Edit.asBorrow(.delete, "34"),
+            Edit.asBorrow(.insert, "cd"),
+            Edit.asBorrow(.equal, "QRST"),
+            Edit.asBorrow(.delete, "5"),
+            Edit.asBorrow(.insert, "e"),
+            Edit.asBorrow(.equal, "x"),
+            Edit.asBorrow(.delete, "67"),
+            Edit.asBorrow(.insert, "fg"),
+        },
+        .expected = &[_]Edit{
+            Edit.asBorrow(.delete, "12"),
+            Edit.asBorrow(.insert, "ab"),
+            Edit.asBorrow(.equal, "WXYZ"),
+            Edit.asBorrow(.delete, "34"),
+            Edit.asBorrow(.insert, "cd"),
+            Edit.asBorrow(.equal, "QRST"),
+            Edit.asBorrow(.delete, "5x67"),
+            Edit.asBorrow(.insert, "exfg"),
+        },
+    }});
 
     try testing.checkAllAllocationFailures(
         testing.allocator,
@@ -3851,6 +3981,25 @@ test diffCleanupSemantic {
             "12x34y56",
         },
     );
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemantic, .{TestIO{
+        .input = &[_]Edit{
+            Edit.asBorrow(.delete, "ab"),
+            Edit.asBorrow(.insert, "12"),
+            Edit.asBorrow(.equal, "x"),
+            Edit.asBorrow(.delete, "cd"),
+            Edit.asBorrow(.insert, "34"),
+            Edit.asBorrow(.equal, "y"),
+            Edit.asBorrow(.delete, "ef"),
+            Edit.asBorrow(.insert, "56"),
+            Edit.asBorrow(.equal, "z"),
+            Edit.asBorrow(.delete, "gh"),
+            Edit.asBorrow(.insert, "78"),
+        },
+        .expected = &[_]Edit{
+            Edit.asBorrow(.delete, "abxcdyefzgh"),
+            Edit.asBorrow(.insert, "12x34y56z78"),
+        },
+    }});
 }
 
 fn testDiffCleanupEfficiency(
