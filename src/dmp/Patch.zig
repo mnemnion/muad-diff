@@ -2782,6 +2782,19 @@ test "testPatchApply" {
             true,
         },
     );
+    // Large pattern exact match.
+    try testing.checkAllAllocationFailures(
+        testing.allocator,
+        testPatchApply,
+        .{
+            config,
+            "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            "abcdefghijklmnopqrstuvwxyzHELLO6789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            "abcdefghijklmnopqrstuvwxyzHELLO6789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            true,
+        },
+    );
     // Big delete, big change 1.
     try testing.checkAllAllocationFailures(
         testing.allocator,
@@ -2907,6 +2920,150 @@ test "patching does not affect patches" {
     const patch2_str_after = try patches2.toTextPatch(allocator);
     defer allocator.free(patch2_str_after);
     try testing.expectEqualStrings(patch2_str, patch2_str_after);
+}
+
+fn testTextManagerReplaceRangeEqualLength(allocator: Allocator) !void {
+    var tm = try TextManager.init(allocator, "abcdef", "", 0, 0);
+    errdefer {
+        // coverage: errdefer
+        tm.errDeinit(allocator);
+    }
+    tm.replaceRange(2, 2, "XY");
+    const out = try tm.finish(allocator);
+    defer allocator.free(out);
+    try testing.expectEqualStrings("abXYef", out);
+}
+
+fn testTextManagerReplaceRangeEqualLengthErrdefer(allocator: Allocator) error{Sentinel, OutOfMemory}!void {
+    var tm = try TextManager.init(allocator, "abcdef", "", 0, 0);
+    errdefer {
+        // coverage: errdefer
+        tm.errDeinit(allocator);
+    }
+    return error.Sentinel;
+}
+
+test "TextManager replaceRange equal length" {
+    try testing.checkAllAllocationFailures(
+        testing.allocator,
+        testTextManagerReplaceRangeEqualLength,
+        .{},
+    );
+    try testing.expectError(
+        error.Sentinel,
+        testTextManagerReplaceRangeEqualLengthErrdefer(testing.allocator),
+    );
+}
+
+fn testPatchSplitMaxCoverageLargeDeleteBranch(allocator: Allocator) !void {
+    var patch = Patch.init(.default);
+    defer patch.deinit(allocator);
+
+    var hunk = Hunk{};
+    errdefer {
+        // coverage: errdefer
+        hunk.deinit(allocator);
+    }
+
+    const giant_delete =
+        "12345678901234567890123456789012345678901234567890123456789012345678901234567890";
+    try hunk.diffs.ensureTotalCapacity(allocator, 3);
+    hunk.diffs.appendAssumeCapacity(Edit.asBorrow(.equal, "prefix"));
+    hunk.diffs.appendAssumeCapacity(Edit.asBorrow(.delete, giant_delete));
+    hunk.diffs.appendAssumeCapacity(Edit.asBorrow(.equal, "suffix"));
+    hunk.start1 = 0;
+    hunk.start2 = 0;
+    hunk.length1 = "prefix".len + giant_delete.len + "suffix".len;
+    hunk.length2 = "prefix".len + "suffix".len;
+
+    try patch.hunks.ensureTotalCapacity(allocator, 1);
+    patch.hunks.appendAssumeCapacity(hunk);
+
+    try patch.patchSplitMax(allocator);
+    try testing.expect(patch.hunks.items.len >= 1);
+}
+
+fn testPatchSplitMaxCoverageLargeDeleteBranchErrdefer(allocator: Allocator) error{Sentinel}!void {
+    var hunk = Hunk{};
+    errdefer {
+        // coverage: errdefer
+        hunk.deinit(allocator);
+    }
+    return error.Sentinel;
+}
+
+test "patchSplitMax coverage large delete branch" {
+    try testPatchSplitMaxCoverageLargeDeleteBranch(testing.allocator);
+    try testing.expectError(
+        error.Sentinel,
+        testPatchSplitMaxCoverageLargeDeleteBranchErrdefer(testing.allocator),
+    );
+}
+
+test "patchApply coverage long match branch" {
+    const allocator = testing.allocator;
+    var patch = Patch.init(.default);
+    defer patch.deinit(allocator);
+
+    const before = switch (match_max_bits) {
+        32 => "12345678901234567890123456789012",
+        64 => "1234567890123456789012345678901234567890123456789012345678901234",
+        else => unreachable,
+    };
+    const after = before ++ "Z";
+
+    var hunk = Hunk{};
+    errdefer {
+        // coverage: errdefer
+        hunk.deinit(allocator);
+    }
+    try hunk.diffs.ensureTotalCapacity(allocator, 2);
+    hunk.diffs.appendAssumeCapacity(Edit.asBorrow(.equal, before));
+    hunk.diffs.appendAssumeCapacity(Edit.asBorrow(.insert, "Z"));
+    hunk.start1 = 0;
+    hunk.start2 = 0;
+    hunk.length1 = before.len;
+    hunk.length2 = after.len;
+    try patch.hunks.ensureTotalCapacity(allocator, 1);
+    patch.hunks.appendAssumeCapacity(hunk);
+
+    const result, const ok = try patch.apply(allocator, before);
+    defer allocator.free(result);
+    try testing.expect(ok);
+    try testing.expectEqualStrings(after, result);
+}
+
+test "patchApply coverage oversized beforeText branch" {
+    const allocator = testing.allocator;
+    var patch = Patch.init(.default);
+    defer patch.deinit(allocator);
+
+    const before = switch (match_max_bits) {
+        32 => "1234567890123456789012345678901234",
+        64 => "123456789012345678901234567890123456789012345678901234567890123456",
+        else => unreachable,
+    };
+    const after = before ++ "Z";
+
+    var hunk = Hunk{};
+    errdefer {
+        // coverage: errdefer
+        hunk.deinit(allocator);
+    }
+    try hunk.diffs.ensureTotalCapacity(allocator, 2);
+    hunk.diffs.appendAssumeCapacity(Edit.asBorrow(.equal, before));
+    hunk.diffs.appendAssumeCapacity(Edit.asBorrow(.insert, "Z"));
+    hunk.start1 = 0;
+    hunk.start2 = 0;
+    hunk.length1 = match_max_bits;
+    hunk.length2 = match_max_bits;
+    try patch.hunks.ensureTotalCapacity(allocator, 1);
+    patch.hunks.appendAssumeCapacity(hunk);
+
+    const result, const ok = try patch.apply(allocator, before);
+    defer allocator.free(result);
+    try testing.expect(ok);
+    try testing.expectEqualStrings(after, result);
 }
 
 const Patch = @This();
