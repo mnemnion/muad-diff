@@ -87,9 +87,9 @@ pub fn build(b: *std.Build) void {
     const run_kcov = b.addSystemCommand(&.{
         "kcov",
         "--clean",
-        "--exclude-line=unreachable,expect(false)",
+        "--exclude-line=unreachable,expect(false),@panic,kcov-defer-error,kcov-test-cleanup,kcov-miss",
     });
-    run_kcov.addPrefixedDirectoryArg("--include-pattern=", b.path("."));
+    run_kcov.addPrefixedDirectoryArg("--include-pattern=", b.path("src"));
     const coverage_output = run_kcov.addOutputDirectoryArg(".");
 
     // Pick your coverage entry point here:

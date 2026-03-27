@@ -207,7 +207,32 @@ fn containsFourByteCodepoint(text: []const u8) bool {
 }
 
 fn expectValidUtf8(text: []const u8) !void {
-    try testing.expect(std.unicode.utf8ValidateSlice(text));
+    var i: usize = 0;
+    while (i < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch {
+            const start = i -| 16;
+            const end = @min(text.len, i + 16);
+            std.debug.print("invalid utf8 lead byte at offset {d}: 0x{x:0>2}\n", .{ i, text[i] });
+            std.debug.print("context bytes:", .{});
+            for (text[start..end]) |b| {
+                std.debug.print(" {x:0>2}", .{b});
+            }
+            std.debug.print("\n", .{});
+            return error.TestUnexpectedResult;
+        };
+        _ = std.unicode.utf8Decode(text[i..][0..len]) catch {
+            const start = i -| 16;
+            const end = @min(text.len, i + len + 16);
+            std.debug.print("invalid utf8 sequence at offset {d}\n", .{i});
+            std.debug.print("context bytes:", .{});
+            for (text[start..end]) |b| {
+                std.debug.print(" {x:0>2}", .{b});
+            }
+            std.debug.print("\n", .{});
+            return error.TestUnexpectedResult;
+        };
+        i += len;
+    }
 }
 
 fn expectDiffListUtf8(diffs: dmp.Diff.DiffList) !void {
@@ -222,6 +247,15 @@ fn expectPatchUtf8(patches: dmp.Patch.PatchList) !void {
     }
 }
 
+fn expectEqualDiff(expected: []const dmp.Diff.Edit, actual: []const dmp.Diff.Edit) !void {
+    try testing.expectEqual(expected.len, actual.len);
+
+    for (expected, actual) |expected_edit, actual_edit| {
+        try testing.expectEqual(expected_edit.operation, actual_edit.operation);
+        try testing.expectEqualStrings(expected_edit.text, actual_edit.text);
+    }
+}
+
 fn expectPatchesEqual(expected: dmp.Patch.PatchList, actual: dmp.Patch.PatchList) !void {
     try testing.expectEqual(expected.items.len, actual.items.len);
 
@@ -230,7 +264,7 @@ fn expectPatchesEqual(expected: dmp.Patch.PatchList, actual: dmp.Patch.PatchList
         try testing.expectEqual(expected_patch.length1, actual_patch.length1);
         try testing.expectEqual(expected_patch.start2, actual_patch.start2);
         try testing.expectEqual(expected_patch.length2, actual_patch.length2);
-        try testing.expectEqualDeep(expected_patch.diffs.items, actual_patch.diffs.items);
+        try expectEqualDiff(expected_patch.diffs.items, actual_patch.diffs.items);
     }
 }
 
@@ -255,7 +289,7 @@ fn assertRevisionPairInvariant(
 
     var patches = dmp.Patch.init(patch_config);
     defer patches.deinit(testing.allocator);
-    _ = try patches.make(testing.allocator, before.body, diff.edits);
+    _ = try patches.make(testing.allocator, before.body, &diff);
     try expectPatchUtf8(patches.hunks);
 
     const patch_text = try patches.toTextPatch(testing.allocator);
@@ -344,6 +378,37 @@ test "corpus revision pairs satisfy diff and patch invariants" {
     const diff_config: dmp.Diff.DiffConfig = blk: {
         var config: dmp.Diff.DiffConfig = .default;
         config.check_line_threshold = 1024 * 1024;
+        config.check_lines = false;
+        config.timeout = 0;
+        break :blk config;
+    };
+    const patch_config: dmp.Patch.PatchConfig = .default;
+
+    var fixtures = try loadCorpusFixtures(arena);
+    defer fixtures.deinit();
+
+    var pair_count: usize = 0;
+    var i: usize = 1;
+    while (i < fixtures.items.len) : (i += 1) {
+        const before = fixtures.items[i - 1];
+        const after = fixtures.items[i];
+        if (!std.mem.eql(u8, before.group, after.group)) continue;
+
+        try assertRevisionPairInvariant(diff_config, patch_config, before, after);
+        pair_count += 1;
+    }
+
+    try testing.expect(pair_count >= 20);
+}
+
+test "corpus revision invariants (line mode)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const diff_config: dmp.Diff.DiffConfig = blk: {
+        var config: dmp.Diff.DiffConfig = .default;
+        config.check_line_threshold = 10;
+        config.check_lines = true;
         config.timeout = 0;
         break :blk config;
     };
