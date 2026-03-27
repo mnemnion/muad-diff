@@ -1030,6 +1030,13 @@ fn diffLineMode(
                 // Upon reaching an equality, check for prior redundancies.
                 if (count_delete >= 1 and count_insert >= 1) {
                     // Delete the offending records and add the merged ones.
+                    const run_start = pointer - count_delete - count_insert;
+                    var before_cursor: usize = 0;
+                    var after_cursor: usize = 0;
+                    for (diffs.items[0..run_start]) |edit| {
+                        if (edit.operation != .insert) before_cursor += edit.text.len;
+                        if (edit.operation != .delete) after_cursor += edit.text.len;
+                    }
                     var sub_diff = try diffInternal(
                         text_mode_config,
                         allocator,
@@ -1041,19 +1048,27 @@ fn diffLineMode(
                         errdefer deinitDiffList(allocator, &sub_diff);
                         try diffs.ensureUnusedCapacity(allocator, sub_diff.items.len);
                     }
+                    try diffRebindToSourceTexts(
+                        allocator,
+                        &sub_diff,
+                        text1_in,
+                        text2_in,
+                        before_cursor,
+                        after_cursor,
+                    );
                     freeRangeDiffList(
                         allocator,
                         &diffs,
-                        pointer - count_delete - count_insert,
+                        run_start,
                         count_delete + count_insert,
                     );
                     try diffs.replaceRange(
                         allocator,
-                        pointer - count_delete - count_insert,
+                        run_start,
                         count_delete + count_insert,
                         &.{},
                     );
-                    pointer = pointer - count_delete - count_insert;
+                    pointer = run_start;
                     defer sub_diff.deinit(allocator);
                     const new_diff = diffs.addManyAtAssumeCapacity(pointer, sub_diff.items.len);
                     @memcpy(new_diff, sub_diff.items);
@@ -1071,6 +1086,47 @@ fn diffLineMode(
     // TODO: calling this, here, breaks things.  This is itself a problem.
     // try diffCleanupSemantic(allocator, &diffs);
     return diffs;
+}
+
+fn diffRebindToSourceTexts(
+    allocator: Allocator,
+    diffs: *DiffList,
+    before_text: []const u8,
+    after_text: []const u8,
+    before_cursor_start: usize,
+    after_cursor_start: usize,
+) OOM!void {
+    var before_cursor = before_cursor_start;
+    var after_cursor = after_cursor_start;
+    for (diffs.items) |*edit| {
+        const replacement = switch (edit.operation) {
+            .equal => replacement: {
+                const span = before_text[before_cursor..][0..edit.text.len];
+                dbgassert(std.mem.startsWith(u8, before_text[before_cursor..], edit.text));
+                dbgassert(std.mem.startsWith(u8, after_text[after_cursor..], edit.text));
+                dbgassert(std.mem.eql(u8, span, edit.text));
+                before_cursor += edit.text.len;
+                after_cursor += edit.text.len;
+                break :replacement Edit.asBorrow(.equal, span);
+            },
+            .delete => replacement: {
+                const span = before_text[before_cursor..][0..edit.text.len];
+                dbgassert(std.mem.startsWith(u8, before_text[before_cursor..], edit.text));
+                dbgassert(std.mem.eql(u8, span, edit.text));
+                before_cursor += edit.text.len;
+                break :replacement Edit.asBorrow(.delete, span);
+            },
+            .insert => replacement: {
+                const span = after_text[after_cursor..][0..edit.text.len];
+                dbgassert(std.mem.startsWith(u8, after_text[after_cursor..], edit.text));
+                dbgassert(std.mem.eql(u8, span, edit.text));
+                after_cursor += edit.text.len;
+                break :replacement Edit.asBorrow(.insert, span);
+            },
+        };
+        edit.deinit(allocator);
+        edit.* = replacement;
+    }
 }
 
 // These numbers have a 32 point buffer, to avoid annoyance with
@@ -3794,7 +3850,7 @@ fn testDiffLineMode(
     var diff_unchecked = try diffListFromConfig(allocator, unchecked_config, before, after);
     defer deinitDiffList(allocator, &diff_unchecked);
 
-    try testing.expectEqualDeep(diff_checked.items, diff_unchecked.items);
+    try expectEqualDiff(diff_checked.items, diff_unchecked.items);
 }
 
 test "diffLineMode" {
@@ -3805,6 +3861,27 @@ test "diffLineMode" {
             @as(u32, 20),
             "1234567890\n1234567890\n1234567890",
             "abcdefghij\nabcdefghij\nabcdefghij",
+        },
+    );
+}
+
+test "check-line-mode" {
+    try testing.checkAllAllocationFailures(
+        testing.allocator,
+        testDiffLineMode,
+        .{
+            @as(u32, 20),
+            "alpha-1\nalpha-2\nshared-a\nbeta-1\nbeta-2\nshared-b\ngamma-1\ngamma-2\nshared-c\n",
+            "omega-1\nomega-2\nshared-a\ntheta-1\ntheta-2\nshared-b\nsigma-1\nsigma-2\nshared-c\n",
+        },
+    );
+    try testing.checkAllAllocationFailures(
+        testing.allocator,
+        testDiffLineMode,
+        .{
+            @as(u32, 20),
+            "red-1\nred-2\npivot-a\nblue-1\nblue-2\npivot-b\ngreen-1\ngreen-2\npivot-c\n",
+            "cyan-1\ncyan-2\npivot-a\nyellow-1\nyellow-2\npivot-b\nmagenta-1\nmagenta-2\npivot-c\n",
         },
     );
 }
