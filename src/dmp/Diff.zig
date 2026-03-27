@@ -540,6 +540,10 @@ fn diffCompute(
             .delete
         else
             .insert;
+        const equal_text = if (before.len > after.len)
+            before[match_index..][0..short_text.len]
+        else
+            short_text;
         try diffs.ensureUnusedCapacity(allocator, 3);
         diffs.appendAssumeCapacity(Edit.asBorrow(
             op,
@@ -547,7 +551,7 @@ fn diffCompute(
         ));
         diffs.appendAssumeCapacity(Edit.asBorrow(
             .equal,
-            short_text,
+            equal_text,
         ));
         diffs.appendAssumeCapacity(Edit.asBorrow(
             op,
@@ -659,7 +663,14 @@ fn diffHalfMatch(
 
     // A half-match was found, sort out the return data.
     if (before.len > after.len) {
-        return half_match.?;
+        const hm = half_match.?;
+        return .{
+            .prefix_before = hm.prefix_before,
+            .suffix_before = hm.suffix_before,
+            .prefix_after = hm.prefix_after,
+            .suffix_after = hm.suffix_after,
+            .common_middle = before[hm.prefix_before.len .. before.len - hm.suffix_before.len],
+        };
     } else {
         // Transfers ownership of all memory to new, permuted, half_match.
         const half_match_yes = half_match.?;
@@ -668,7 +679,7 @@ fn diffHalfMatch(
             .suffix_before = half_match_yes.suffix_after,
             .prefix_after = half_match_yes.prefix_before,
             .suffix_after = half_match_yes.suffix_before,
-            .common_middle = half_match_yes.common_middle,
+            .common_middle = before[half_match_yes.prefix_after.len .. before.len - half_match_yes.suffix_after.len],
         };
     }
 }
@@ -1406,7 +1417,7 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void {
                                 const old_equal = diffs.items[ii];
                                 if (!must_own and
                                     !old_equal.owned and
-                                    old_equal.text.ptr + old_equal.text.len == text_insert.ptr)
+                                    old_equal.text.ptr + old_equal.text.len == text_delete.ptr)
                                 {
                                     diffs.items[ii] = Edit.asBorrow(
                                         .equal,
@@ -1417,7 +1428,7 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void {
                                         allocator,
                                         .equal,
                                         old_equal.text,
-                                        text_insert[0..common_length],
+                                        text_delete[0..common_length],
                                     );
                                     var equal_to_deinit = old_equal;
                                     equal_to_deinit.deinit(allocator);
@@ -1426,7 +1437,7 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void {
                                 try diffs.ensureUnusedCapacity(allocator, 1);
                                 diffs.insertAssumeCapacity(
                                     0,
-                                    try Edit.asBool(allocator, .equal, must_own, text_insert[0..common_length]),
+                                    try Edit.asBool(allocator, .equal, must_own, text_delete[0..common_length]),
                                 );
                                 pointer += 1;
                             }
@@ -1440,17 +1451,17 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void {
                             const old_edit = diffs.items[pointer];
                             if (!must_own and
                                 !old_edit.owned and
-                                text_insert.ptr + text_insert.len - common_length == old_edit.text.ptr)
+                                text_delete.ptr + text_delete.len - common_length == old_edit.text.ptr)
                             {
                                 diffs.items[pointer] = Edit.asBorrow(
                                     .equal,
-                                    text_insert.ptr[text_insert.len - common_length ..][0 .. common_length + old_edit.text.len],
+                                    text_delete.ptr[text_delete.len - common_length ..][0 .. common_length + old_edit.text.len],
                                 );
                             } else {
                                 diffs.items[pointer] = try diffMakeOwnedConcat2(
                                     allocator,
                                     old_edit.operation,
-                                    text_insert[text_insert.len - common_length ..],
+                                    text_delete[text_delete.len - common_length ..],
                                     old_edit.text,
                                 );
                                 var edit_to_deinit = old_edit;
@@ -1696,7 +1707,12 @@ fn diffCleanupSemantic(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void 
                     try diffs.ensureUnusedCapacity(allocator, 1);
                     diffs.insertAssumeCapacity(
                         pointer,
-                        try Edit.asBool(allocator, .equal, insert_edit.owned, insertion[0..overlap_length1]),
+                        try Edit.asBool(
+                            allocator,
+                            .equal,
+                            delete_edit.owned,
+                            deletion[deletion.len - overlap_length1 ..],
+                        ),
                     );
                     var new_minus = try Edit.asBool(
                         allocator,
@@ -1771,17 +1787,76 @@ fn diffCleanupSemanticLossless(
         if (diffs.items[pointer - 1].operation == .equal and
             diffs.items[pointer + 1].operation == .equal)
         {
-            if (!diffs.items[pointer - 1].owned and
-                !diffs.items[pointer].owned and
-                !diffs.items[pointer + 1].owned)
-            {
-                diffCleanupSemanticLosslessBorrowed(diffs, &pointer);
+            if (diffCleanupSemanticLosslessWindow(diffs, pointer)) |window| {
+                diffCleanupSemanticLosslessBorrowed(diffs, &pointer, window);
             } else {
                 try diffCleanupSemanticLosslessOwned(allocator, diffs, &pointer);
             }
         }
         pointer += 1;
     }
+}
+
+const BorrowedLosslessWindow = struct {
+    equality_1: []const u8,
+    edit: []const u8,
+    equality_2: []const u8,
+};
+
+fn canBorrowLosslessWindow(
+    equality_1: []const u8,
+    edit: []const u8,
+    equality_2: []const u8,
+) bool {
+    return equality_1.ptr + equality_1.len == edit.ptr and
+        edit.ptr + edit.len == equality_2.ptr;
+}
+
+fn deriveBorrowedLosslessWindow(
+    equality_1: []const u8,
+    edit: []const u8,
+    equality_2: []const u8,
+) ?BorrowedLosslessWindow {
+    if (canBorrowLosslessWindow(equality_1, edit, equality_2)) {
+        return .{
+            .equality_1 = equality_1,
+            .edit = edit,
+            .equality_2 = equality_2,
+        };
+    }
+
+    const derived_equality_1 = (edit.ptr - equality_1.len)[0..equality_1.len];
+    const derived_equality_2 = (edit.ptr + edit.len)[0..equality_2.len];
+    if (!std.mem.eql(u8, derived_equality_1, equality_1) or
+        !std.mem.eql(u8, derived_equality_2, equality_2))
+    {
+        return null;
+    }
+
+    return .{
+        .equality_1 = derived_equality_1,
+        .edit = edit,
+        .equality_2 = derived_equality_2,
+    };
+}
+
+fn diffCleanupSemanticLosslessWindow(
+    diffs: *const DiffList,
+    pointer: usize,
+) ?BorrowedLosslessWindow {
+    const equality_1 = diffs.items[pointer - 1];
+    const edit = diffs.items[pointer];
+    const equality_2 = diffs.items[pointer + 1];
+    if (equality_1.owned or edit.owned or equality_2.owned) return null;
+
+    return switch (edit.operation) {
+        .insert, .delete => deriveBorrowedLosslessWindow(
+            equality_1.text,
+            edit.text,
+            equality_2.text,
+        ),
+        .equal => null,
+    };
 }
 
 fn diffCleanupSemanticLosslessOwned(
@@ -1897,10 +1972,16 @@ fn diffCleanupSemanticLosslessOwned(
     }
 }
 
-fn diffCleanupSemanticLosslessBorrowed(diffs: *DiffList, pointer: *usize) void {
-    var equality_1 = diffs.items[pointer.* - 1].text;
-    var edit = diffs.items[pointer.*].text;
-    var equality_2 = diffs.items[pointer.* + 1].text;
+fn diffCleanupSemanticLosslessBorrowed(
+    diffs: *DiffList,
+    pointer: *usize,
+    window: BorrowedLosslessWindow,
+) void {
+    var equality_1 = window.equality_1;
+    var edit = window.edit;
+    var equality_2 = window.equality_2;
+
+    std.debug.assert(canBorrowLosslessWindow(equality_1, edit, equality_2));
 
     // First, shift the edit as far left as possible.
     const common_offset = diffCommonSuffix(equality_1, edit);
@@ -3064,6 +3145,26 @@ fn testDiffCleanupSemanticLosslessBorrowed(params: TestIO) !void {
     }
 }
 
+fn testDiffCleanupSemanticLosslessBorrowedRoundTrip(
+    input: []const Edit,
+    expected_before: []const u8,
+    expected_after: []const u8,
+) !void {
+    var diffs = try DiffList.initCapacity(testing.allocator, input.len);
+    defer deinitDiffList(testing.allocator, &diffs);
+    for (input) |item| {
+        diffs.appendAssumeCapacity(Edit.asBorrow(item.operation, item.text));
+    }
+    try diffCleanupSemanticLossless(testing.allocator, &diffs);
+    const before = try diffBeforeText(testing.allocator, diffs);
+    defer testing.allocator.free(before);
+    const after = try diffAfterText(testing.allocator, diffs);
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings(expected_before, before);
+    try testing.expectEqualStrings(expected_after, after);
+    for (diffs.items) |item| {
+        try testing.expect(!item.owned);
+    }
 }
 
 fn testDiffCleanupSemanticRoundTrip(
@@ -3214,6 +3315,60 @@ test diffCleanupSemanticLossless {
             .{ .operation = .delete, .owned = false, .text = "a" },
         },
     }});
+
+    {
+        const after = "The cow and the cat.";
+        try testDiffCleanupSemanticLosslessBorrowedRoundTrip(
+            &.{
+                .{ .operation = .equal, .owned = false, .text = after[0..5] },
+                .{ .operation = .insert, .owned = false, .text = after[5..17] },
+                .{ .operation = .equal, .owned = false, .text = after[17..] },
+            },
+            "The cat.",
+            after,
+        );
+    }
+
+    {
+        const after = "The-cow-and-the-cat.";
+        try testDiffCleanupSemanticLosslessBorrowedRoundTrip(
+            &.{
+                .{ .operation = .equal, .owned = false, .text = after[0..4] },
+                .{ .operation = .insert, .owned = false, .text = after[4..16] },
+                .{ .operation = .equal, .owned = false, .text = after[16..] },
+            },
+            "The-cat.",
+            after,
+        );
+    }
+
+    {
+        const before = "That cartoon.";
+        const after = "That cat artoon.";
+        try testDiffCleanupSemanticLosslessBorrowedRoundTrip(
+            &.{
+                .{ .operation = .equal, .owned = false, .text = before[0..6] },
+                .{ .operation = .insert, .owned = false, .text = after[6..9] },
+                .{ .operation = .equal, .owned = false, .text = before[6..] },
+            },
+            before,
+            after,
+        );
+    }
+
+    {
+        const before = "That cat artoon.";
+        const after = "That cartoon.";
+        try testDiffCleanupSemanticLosslessBorrowedRoundTrip(
+            &.{
+                .{ .operation = .equal, .owned = false, .text = after[0..6] },
+                .{ .operation = .delete, .owned = false, .text = before[6..9] },
+                .{ .operation = .equal, .owned = false, .text = after[6..] },
+            },
+            before,
+            after,
+        );
+    }
 
     try testing.checkAllAllocationFailures(testing.allocator, testDiffCleanupSemanticLossless, .{TestIO{
         .input = &.{
