@@ -152,7 +152,10 @@ const HalfMatchResult = struct {
     common_middle: []const u8,
 };
 
-pub const CHAR_OFFSET = 32;
+/// Used to not choose control codes in line-mode diffing.  This is of
+/// some minor use during debugging, but really not a big deal one way
+/// or the other.
+const CHAR_OFFSET = 32;
 
 /// A struct holding bookends for `diffPrittyFormat(diffs)`.
 ///
@@ -355,8 +358,8 @@ fn cloneDiffList(allocator: Allocator, diffs: *const DiffList) !DiffList {
     var new_diffs: DiffList = .empty;
     try new_diffs.ensureTotalCapacity(allocator, diffs.items.len);
     errdefer deinitDiffList(allocator, &new_diffs);
-    for (diffs.items) |*d| {
-        new_diffs.appendAssumeCapacity(try d.clone(allocator));
+    for (diffs.items) |*edit| {
+        new_diffs.appendAssumeCapacity(try edit.clone(allocator));
     }
     return new_diffs;
 }
@@ -367,8 +370,8 @@ fn copyDiffList(allocator: Allocator, diffs: *const DiffList) !DiffList {
     var new_diffs: DiffList = .empty;
     try new_diffs.ensureTotalCapacity(allocator, diffs.items.len);
     errdefer deinitDiffList(allocator, &new_diffs);
-    for (diffs.items) |*d| {
-        new_diffs.appendAssumeCapacity(try d.copy(allocator));
+    for (diffs.items) |*edit| {
+        new_diffs.appendAssumeCapacity(try edit.copy(allocator));
     }
     return new_diffs;
 }
@@ -600,8 +603,8 @@ fn diffCompute(
         // we have to deinit regardless, so deinitDiffList would be
         // a double free:
         errdefer {
-            for (diffs_b.items) |*d| {
-                d.deinit(allocator);
+            for (diffs_b.items) |*edit| {
+                edit.deinit(allocator);
             }
         }
 
@@ -945,8 +948,8 @@ fn diffBisectSplit(
     // Free the list, but not the contents:
     defer diffs_b.deinit(allocator);
     errdefer {
-        for (diffs_b.items) |*d| {
-            d.deinit(allocator);
+        for (diffs_b.items) |*edit| {
+            edit.deinit(allocator);
         }
     }
     try diffs.appendSlice(allocator, diffs_b.items);
@@ -1280,19 +1283,19 @@ fn diffCharsToLines(
     try diffs.ensureUnusedCapacity(allocator, char_diffs.items.len);
     var before_cursor: usize = 0;
     var after_cursor: usize = 0;
-    for (char_diffs.items) |*d| {
+    for (char_diffs.items) |*edit| {
         var cursor: usize = 0;
-        while (cursor < d.text.len) {
-            const cp_len = std.unicode.utf8ByteSequenceLength(d.text[cursor]) catch {
+        while (cursor < edit.text.len) {
+            const cp_len = std.unicode.utf8ByteSequenceLength(edit.text[cursor]) catch {
                 @panic("Internal decode error in diffsCharsToLines");
             };
-            const cp = std.unicode.wtf8Decode(d.text[cursor..][0..cp_len]) catch {
+            const cp = std.unicode.wtf8Decode(edit.text[cursor..][0..cp_len]) catch {
                 @panic("Internal decode error in diffCharsToLines");
             };
             try text.appendSlice(allocator, line_array[cp - CHAR_OFFSET]);
             cursor += cp_len;
         }
-        switch (d.operation) {
+        switch (edit.operation) {
             .equal => {
                 const span = before_text[before_cursor..][0..text.items.len];
                 dbgassert(std.mem.startsWith(u8, before_text[before_cursor..], text.items));
@@ -2250,18 +2253,18 @@ fn diffIndex(diffs: DiffList, u_loc: usize) usize {
     const loc: isize = @intCast(u_loc);
     //  Dummy diff
     var last_diff: Edit = .{ .operation = .equal, .owned = false, .text = "" };
-    for (diffs.items) |a_diff| {
-        if (a_diff.operation != .insert) {
+    for (diffs.items) |edit| {
+        if (edit.operation != .insert) {
             // Equality or deletion.
-            chars1 += @intCast(a_diff.text.len);
+            chars1 += @intCast(edit.text.len);
         }
-        if (a_diff.operation != .delete) {
+        if (edit.operation != .delete) {
             // Equality or insertion.
-            chars2 += @intCast(a_diff.text.len);
+            chars2 += @intCast(edit.text.len);
         }
         if (chars1 > loc) {
             // Overshot the location.
-            last_diff = a_diff;
+            last_diff = edit;
             break;
         }
     }
@@ -2305,16 +2308,16 @@ fn writeDiffPrettyFormat(
     deco: DiffDecorations,
 ) !usize {
     var written: usize = 0;
-    for (diffs.items) |d| {
+    for (diffs.items) |edit| {
         const text = if (deco.pre_process) |lambda|
-            try lambda(allocator, d)
+            try lambda(allocator, edit)
         else
-            d.text;
+            edit.text;
         defer {
             if (deco.pre_process) |_|
                 allocator.free(text);
         }
-        switch (d.operation) {
+        switch (edit.operation) {
             .delete => {
                 //
                 written += try writer.write(deco.delete_start);
@@ -2344,9 +2347,9 @@ fn writeDiffPrettyFormat(
 fn diffBeforeText(allocator: Allocator, diffs: DiffList) OOM![]const u8 {
     var chars = ArrayListUnmanaged(u8){};
     defer chars.deinit(allocator);
-    for (diffs.items) |d| {
-        if (d.operation != .insert) {
-            try chars.appendSlice(allocator, d.text);
+    for (diffs.items) |edit| {
+        if (edit.operation != .insert) {
+            try chars.appendSlice(allocator, edit.text);
         }
     }
     return chars.toOwnedSlice(allocator);
@@ -2360,9 +2363,9 @@ fn diffBeforeText(allocator: Allocator, diffs: DiffList) OOM![]const u8 {
 fn diffAfterText(allocator: Allocator, diffs: DiffList) OOM![]const u8 {
     var chars = ArrayListUnmanaged(u8){};
     defer chars.deinit(allocator);
-    for (diffs.items) |d| {
-        if (d.operation != .delete) {
-            try chars.appendSlice(allocator, d.text);
+    for (diffs.items) |edit| {
+        if (edit.operation != .delete) {
+            try chars.appendSlice(allocator, edit.text);
         }
     }
     return chars.toOwnedSlice(allocator);
@@ -3354,11 +3357,11 @@ fn sliceToDiffList(allocator: Allocator, diff_slice: []const Edit) !DiffList {
         deinitDiffList(allocator, &diff_list);
     }
     try diff_list.ensureTotalCapacity(allocator, diff_slice.len);
-    for (diff_slice) |d| {
+    for (diff_slice) |edit| {
         diff_list.appendAssumeCapacity(try Edit.asOwn(
             allocator,
-            d.operation,
-            d.text,
+            edit.operation,
+            edit.text,
         ));
     }
     return diff_list;
@@ -3587,9 +3590,9 @@ fn rebuildtexts(allocator: std.mem.Allocator, diffs: DiffList) ![2][]const u8 {
         text[1].deinit();
     }
 
-    for (diffs.items) |a_diff| {
-        if (a_diff.operation != .insert) try text[0].appendSlice(a_diff.text);
-        if (a_diff.operation != .delete) try text[1].appendSlice(a_diff.text);
+    for (diffs.items) |edit| {
+        if (edit.operation != .insert) try text[0].appendSlice(edit.text);
+        if (edit.operation != .delete) try text[1].appendSlice(edit.text);
     }
     const before = try text[0].toOwnedSlice();
     errdefer allocator.free(before);

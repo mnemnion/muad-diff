@@ -54,8 +54,8 @@ pub const Hunk = struct {
         errdefer {
             deinitDiffList(allocator, &new_diffs);
         }
-        for (patch.diffs.items) |a_diff| {
-            new_diffs.appendAssumeCapacity(try a_diff.clone(allocator));
+        for (patch.diffs.items) |edit| {
+            new_diffs.appendAssumeCapacity(try edit.clone(allocator));
         }
         return Hunk{
             .diffs = new_diffs,
@@ -109,13 +109,13 @@ pub const Hunk = struct {
         }
         _ = try writer.write(PATCH_TAIL);
         // Escape the body of the patch with %xx notation.
-        for (patch.diffs.items) |a_diff| {
-            switch (a_diff.operation) {
+        for (patch.diffs.items) |edit| {
+            switch (edit.operation) {
                 .insert => try writer.writeByte('+'),
                 .delete => try writer.writeByte('-'),
                 .equal => try writer.writeByte(' '),
             }
-            _ = try writeUriEncoded(writer, a_diff.text);
+            _ = try writeUriEncoded(writer, edit.text);
             try writer.writeByte('\n');
         }
         return;
@@ -168,8 +168,8 @@ pub fn init(config: PatchConfig) Patch {
 /// Own all diffs in the Patch.  After this operation it is safe
 /// to dispose of the original strings.
 pub fn own(self: *Patch, allocator: Allocator) error{OutOfMemory}!void {
-    for (self.hunks.items) |*patch| {
-        for (patch.diffs.items) |*edit| {
+    for (self.hunks.items) |*hunk| {
+        for (hunk.diffs.items) |*edit| {
             try edit.own(allocator);
         }
     }
@@ -298,8 +298,8 @@ pub fn writeTextPatch(self: Patch, writer: anytype) !void {
 
 fn deinitPatchList(allocator: Allocator, patches: *PatchList) void {
     defer patches.deinit(allocator);
-    for (patches.items) |*a_patch| {
-        deinitDiffList(allocator, &a_patch.diffs);
+    for (patches.items) |*hunk| {
+        deinitDiffList(allocator, &hunk.diffs);
     }
 }
 
@@ -307,8 +307,8 @@ fn clonePatchList(allocator: Allocator, patches: PatchList) !PatchList {
     var new_patches: PatchList = .empty;
     errdefer deinitPatchList(allocator, &new_patches);
     try new_patches.ensureTotalCapacity(allocator, patches.items.len);
-    for (patches.items) |patch| {
-        new_patches.appendAssumeCapacity(try patch.clone(allocator));
+    for (patches.items) |hunk| {
+        new_patches.appendAssumeCapacity(try hunk.clone(allocator));
     }
     return new_patches;
 }
@@ -317,19 +317,19 @@ fn copyPatchList(allocator: Allocator, patches: PatchList) !PatchList {
     var new_patches: PatchList = .empty;
     errdefer deinitPatchList(allocator, &new_patches);
     try new_patches.ensureTotalCapacity(allocator, patches.items.len);
-    for (patches.items) |patch| {
+    for (patches.items) |hunk| {
         var new_diffs: DiffList = .empty;
         errdefer deinitDiffList(allocator, &new_diffs);
-        try new_diffs.ensureTotalCapacity(allocator, patch.diffs.items.len);
-        for (patch.diffs.items) |*edit| {
+        try new_diffs.ensureTotalCapacity(allocator, hunk.diffs.items.len);
+        for (hunk.diffs.items) |*edit| {
             new_diffs.appendAssumeCapacity(try edit.copy(allocator));
         }
         new_patches.appendAssumeCapacity(.{
             .diffs = new_diffs,
-            .start1 = patch.start1,
-            .length1 = patch.length1,
-            .start2 = patch.start2,
-            .length2 = patch.length2,
+            .start1 = hunk.start1,
+            .length1 = hunk.length1,
+            .start2 = hunk.start2,
+            .length2 = hunk.length2,
         });
     }
     return new_patches;
@@ -704,13 +704,13 @@ fn makePatchInternal(
     // Calculate amount of extra bytes needed.
     // This should let the allocator reuse freed space.
     var extra: isize = 0;
-    for (diffs.items) |a_diff| {
-        switch (a_diff.operation) {
+    for (diffs.items) |edit| {
+        switch (edit.operation) {
             .insert => {
-                extra += @intCast(a_diff.text.len);
+                extra += @intCast(edit.text.len);
             },
             .delete => {
-                extra -= @intCast(a_diff.text.len);
+                extra -= @intCast(edit.text.len);
             },
             .equal => continue,
         }
@@ -722,57 +722,57 @@ fn makePatchInternal(
     postpatch.appendSliceAssumeCapacity(text);
     var patch = Hunk{};
     errdefer patch.deinit(allocator);
-    for (diffs.items, 0..) |a_diff, i| {
-        if (patch.diffs.items.len == 0 and a_diff.operation != .equal) {
+    for (diffs.items, 0..) |edit, i| {
+        if (patch.diffs.items.len == 0 and edit.operation != .equal) {
             patch.start1 = char_count1;
             patch.start2 = char_count2;
         }
-        switch (a_diff.operation) {
+        switch (edit.operation) {
             .insert => {
                 try patch.diffs.ensureUnusedCapacity(allocator, 1);
                 const d = the_diff: {
-                    assert(a_diff.eql(diffs.items[i]));
+                    assert(edit.eql(diffs.items[i]));
                     diffs.items[i] = dummy_diff;
-                    break :the_diff a_diff;
+                    break :the_diff edit;
                 };
                 patch.diffs.appendAssumeCapacity(d);
-                patch.length2 += a_diff.text.len;
-                try postpatch.insertSlice(char_count2, a_diff.text);
+                patch.length2 += edit.text.len;
+                try postpatch.insertSlice(char_count2, edit.text);
             },
             .delete => {
                 try patch.diffs.ensureUnusedCapacity(allocator, 1);
                 const d = the_diff: {
-                    assert(a_diff.eql(diffs.items[i]));
+                    assert(edit.eql(diffs.items[i]));
                     diffs.items[i] = dummy_diff;
-                    break :the_diff a_diff;
+                    break :the_diff edit;
                 };
                 patch.diffs.appendAssumeCapacity(d);
-                patch.length1 += a_diff.text.len;
-                try postpatch.replaceRange(char_count2, a_diff.text.len, "");
+                patch.length1 += edit.text.len;
+                try postpatch.replaceRange(char_count2, edit.text.len, "");
             },
             .equal => {
                 var current_transferred = false;
-                if (a_diff.text.len <= 2 * config.margin and patch.diffs.items.len != 0 and !a_diff.eql(diffs.getLast())) {
+                if (edit.text.len <= 2 * config.margin and patch.diffs.items.len != 0 and !edit.eql(diffs.getLast())) {
                     // Small equality inside a patch.
                     try patch.diffs.ensureUnusedCapacity(allocator, 1);
                     const d = the_diff: {
-                        assert(a_diff.eql(diffs.items[i]));
+                        assert(edit.eql(diffs.items[i]));
                         diffs.items[i] = dummy_diff;
-                        break :the_diff a_diff;
+                        break :the_diff edit;
                     };
                     patch.diffs.appendAssumeCapacity(d);
-                    patch.length1 += a_diff.text.len;
-                    patch.length2 += a_diff.text.len;
+                    patch.length1 += edit.text.len;
+                    patch.length2 += edit.text.len;
                     current_transferred = true;
                 }
-                if (a_diff.text.len >= 2 * config.margin) {
+                if (edit.text.len >= 2 * config.margin) {
                     // Time for a new patch.
                     if (patch.diffs.items.len != 0) {
                         // Free the Diff if we own it.
                         if (!current_transferred) {
-                            assert(a_diff.eql(diffs.items[i]));
+                            assert(edit.eql(diffs.items[i]));
                             diffs.items[i] = dummy_diff;
-                            var diff_to_deinit = a_diff;
+                            var diff_to_deinit = edit;
                             diff_to_deinit.deinit(allocator);
                         }
                         try patchAddContext(config, allocator, &patch, prepatch_text);
@@ -797,11 +797,11 @@ fn makePatchInternal(
             },
         }
         // Update the current character count.
-        if (a_diff.operation != .insert) {
-            char_count1 += a_diff.text.len;
+        if (edit.operation != .insert) {
+            char_count1 += edit.text.len;
         }
-        if (a_diff.operation != .delete) {
-            char_count2 += a_diff.text.len;
+        if (edit.operation != .delete) {
+            char_count2 += edit.text.len;
         }
     } // end for loop
     // Pick up the leftover patch if not empty.
@@ -891,10 +891,10 @@ fn applyDestructiveImpl(
     // positions 10 and 20, but the first patch was found at 12, delta is 2
     // and the second patch has an effective expected position of 22.
     var delta: isize = 0;
-    for (patch.hunks.items) |a_patch| {
-        const expected_loc = cast(usize, cast(isize, a_patch.start2) + delta);
+    for (patch.hunks.items) |hunk| {
+        const expected_loc = cast(usize, cast(isize, hunk.start2) + delta);
         // TODO: make this a borrow when possible.
-        const text1 = try (Diff{ .edits = a_patch.diffs }).beforeText(allocator);
+        const text1 = try (Diff{ .edits = hunk.diffs }).beforeText(allocator);
         defer allocator.free(text1);
         var maybe_start: ?usize = null;
         var maybe_end: ?usize = null;
@@ -934,7 +934,7 @@ fn applyDestructiveImpl(
             };
             if (std.mem.eql(u8, text1, text2)) {
                 // Perfect match, just shove the replacement text in.
-                const diff_text = try (Diff{ .edits = a_patch.diffs }).afterText(allocator);
+                const diff_text = try (Diff{ .edits = hunk.diffs }).afterText(allocator);
                 defer allocator.free(diff_text);
                 tm.replaceRange(start, text1.len, diff_text);
             } else {
@@ -967,20 +967,20 @@ fn applyDestructiveImpl(
                         _ = try diff_obj.cleanupSemanticLossless(allocator);
                     }
                     var index1: usize = 0;
-                    for (a_patch.diffs.items) |a_diff| {
-                        if (a_diff.operation != .equal) {
+                    for (hunk.diffs.items) |edit| {
+                        if (edit.operation != .equal) {
                             const index2 = diff_obj.index(index1);
-                            if (a_diff.operation == .insert) {
+                            if (edit.operation == .insert) {
                                 // Insertion
-                                tm.insert(start + index2, a_diff.text);
-                            } else if (a_diff.operation == .delete) {
+                                tm.insert(start + index2, edit.text);
+                            } else if (edit.operation == .delete) {
                                 // Deletion
-                                const delete_at = diff_obj.index(index1 + a_diff.text.len) - index2;
+                                const delete_at = diff_obj.index(index1 + edit.text.len) - index2;
                                 tm.delete(start + index2, delete_at);
                             }
                         }
-                        if (a_diff.operation != .delete) {
-                            index1 += a_diff.text.len;
+                        if (edit.operation != .delete) {
+                            index1 += edit.text.len;
                         }
                     }
                 }
@@ -989,7 +989,7 @@ fn applyDestructiveImpl(
             // No match found.  :(
             all_applied = false;
             // Subtract the delta for this failed patch from subsequent patches.
-            delta -= cast(isize, a_patch.length2) - cast(isize, a_patch.length1);
+            delta -= cast(isize, hunk.length2) - cast(isize, hunk.length1);
         }
     }
     return .{ try tm.finish(allocator), all_applied };
@@ -1128,30 +1128,30 @@ fn textMaxBounds(patch: *const Patch, og_text_len: usize) struct { usize, usize 
     var after_now: isize = margin;
     var before_max: isize = margin;
     var after_max: isize = margin;
-    for (patch.hunks.items) |a_patch| {
-        var before_cursor = a_patch.start1;
-        var after_cursor = a_patch.start2;
-        for (a_patch.diffs.items) |a_diff| {
-            switch (a_diff.operation) {
+    for (patch.hunks.items) |hunk| {
+        var before_cursor = hunk.start1;
+        var after_cursor = hunk.start2;
+        for (hunk.diffs.items) |edit| {
+            switch (edit.operation) {
                 .equal => {
-                    before_cursor += a_diff.text.len;
-                    after_cursor += a_diff.text.len;
+                    before_cursor += edit.text.len;
+                    after_cursor += edit.text.len;
                 },
                 .insert => {
                     if (after_cursor < midpoint) {
-                        before_now += @intCast(a_diff.text.len);
+                        before_now += @intCast(edit.text.len);
                     } else {
-                        after_now += @intCast(a_diff.text.len);
+                        after_now += @intCast(edit.text.len);
                     }
-                    after_cursor += a_diff.text.len;
+                    after_cursor += edit.text.len;
                 },
                 .delete => {
                     if (before_cursor < midpoint) {
-                        after_now -= @intCast(a_diff.text.len);
+                        after_now -= @intCast(edit.text.len);
                     } else {
-                        before_now -= @intCast(a_diff.text.len);
+                        before_now -= @intCast(edit.text.len);
                     }
-                    before_cursor += a_diff.text.len;
+                    before_cursor += edit.text.len;
                 },
             }
             before_max = @max(before_max, before_now);
@@ -1362,9 +1362,9 @@ fn patchAddPadding(
         }
     }
     // Bump all the patches forward.
-    for (patches.items) |*a_patch| {
-        a_patch.*.start1 += pad_len;
-        a_patch.*.start2 += pad_len;
+    for (patches.items) |*hunk| {
+        hunk.*.start1 += pad_len;
+        hunk.*.start2 += pad_len;
     }
     // Add some padding on start of first diff.
     var patch_start = &patches.items[0];
@@ -1459,8 +1459,8 @@ fn patchListToText(allocator: Allocator, patches: PatchList) error{OutOfMemory}!
 
 /// Stream a `PatchList` to the provided Writer.
 fn writePatch(writer: anytype, patches: PatchList) !void {
-    for (patches.items) |a_patch| {
-        try a_patch.writeText(writer);
+    for (patches.items) |hunk| {
+        try hunk.writeText(writer);
     }
 }
 
@@ -1744,15 +1744,15 @@ fn diffLevenshtein(diffs: DiffList) f64 {
     var inserts: usize = 0;
     var deletes: usize = 0;
     var distance: usize = 0;
-    for (diffs.items) |a_diff| {
-        switch (a_diff.operation) {
+    for (diffs.items) |edit| {
+        switch (edit.operation) {
             .insert => {
-                for (a_diff.text) |b| {
+                for (edit.text) |b| {
                     inserts += cp_weight[b >> 6];
                 }
             },
             .delete => {
-                for (a_diff.text) |b| {
+                for (edit.text) |b| {
                     deletes += cp_weight[b >> 6];
                 }
             },
@@ -1864,11 +1864,11 @@ fn sliceToDiffList(allocator: Allocator, diff_slice: []const Edit) !DiffList {
     var diff_list: DiffList = .empty;
     errdefer deinitDiffList(allocator, &diff_list);
     try diff_list.ensureTotalCapacity(allocator, diff_slice.len);
-    for (diff_slice) |d| {
+    for (diff_slice) |edit| {
         diff_list.appendAssumeCapacity(try Edit.asOwn(
             allocator,
-            d.operation,
-            d.text,
+            edit.operation,
+            edit.text,
         ));
     }
     return diff_list;
@@ -2528,8 +2528,8 @@ fn testMakePatch(allocator: Allocator) !void {
         defer deinitDiffList(allocator, &diffs);
         const difference = Diff{ .edits = diffs };
         _ = try patch.fromDiff(allocator, &difference);
-        for (patch.hunks.items[0].diffs.items, 0..) |a_diff, idx| {
-            try testing.expect(a_diff.eql(diffs.items[idx]));
+        for (patch.hunks.items[0].diffs.items, 0..) |edit, idx| {
+            try testing.expect(edit.eql(diffs.items[idx]));
         }
     }
     {
