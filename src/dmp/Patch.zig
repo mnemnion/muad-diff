@@ -118,6 +118,7 @@ pub const Hunk = struct {
             _ = try writeUriEncoded(writer, edit.text);
             try writer.writeByte('\n');
         }
+        try flushWriter(writer);
         return;
     }
 
@@ -161,6 +162,7 @@ pub const Hunk = struct {
             _ = try writeEscaped(writer, edit.text);
             try writer.writeByte('\n');
         }
+        try flushWriter(writer);
         return;
     }
 };
@@ -1513,6 +1515,7 @@ fn writePatch(writer: anytype, patches: PatchList) !void {
     for (patches.items) |hunk| {
         try hunk.writeText(writer);
     }
+    try flushWriter(writer);
 }
 
 /// Take a list of patches and return a textual representation.
@@ -1530,6 +1533,14 @@ fn patchListToTextLegacy(allocator: Allocator, patches: PatchList) error{OutOfMe
 fn writePatchLegacy(writer: anytype, patches: PatchList) !void {
     for (patches.items) |hunk| {
         try hunk.writeTextLegacy(writer);
+    }
+    try flushWriter(writer);
+}
+
+fn flushWriter(writer: anytype) !void {
+    if (@hasDecl(@TypeOf(writer), "flush")) {
+        var w = writer;
+        try w.flush();
     }
 }
 

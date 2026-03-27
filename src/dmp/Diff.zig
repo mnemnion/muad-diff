@@ -55,6 +55,21 @@ pub const DiffConfig = struct {
     };
 };
 
+pub const ZDeltaVersion = enum {
+    a,
+    b,
+};
+
+pub const ZDeltaError = OOM || error{
+    BadZDeltaHeader,
+    UnknownZDeltaVersion,
+    BadZDeltaEscape,
+    BadZDeltaOperation,
+    BadZDeltaNumber,
+    ZDeltaLengthMismatch,
+    InvalidZDeltaText,
+};
+
 /// A single edit of a diff: insertion, deletion, or neither.
 pub const Edit = struct {
     pub const Operation = enum {
@@ -307,6 +322,59 @@ pub fn toPatchConfig(
     return the_patch.fromDiff(allocator, difference);
 }
 
+/// Write a Diff in a zdelta format.  Currently supported are
+/// formats `.a` and `.b`, see documentation for more details.
+pub fn toZDelta(
+    difference: *const Diff,
+    allocator: Allocator,
+    version: ZDeltaVersion,
+) ZDeltaError![]const u8 {
+    var out = ArrayList(u8).init(allocator);
+    defer out.deinit();
+    const writer = out.writer();
+    try writeZDeltaHeader(writer, version);
+    switch (version) {
+        .a => try writer.writeByte(zdelta_sep_a),
+        .b => try writer.writeByte(zdelta_sep_b),
+    }
+    for (difference.edits.items) |edit| {
+        switch (edit.operation) {
+            .insert => {
+                try writeZDeltaInsert(writer, edit.text, version);
+            },
+            .delete => {
+                try writeZDeltaCount(writer, edit.text.len, version, .delete);
+            },
+            .equal => {
+                try writeZDeltaCount(writer, edit.text.len, version, .equal);
+            },
+        }
+    }
+    try flushWriter(writer);
+    return out.toOwnedSlice();
+}
+
+/// Populate a Diff from a zdelta string and the before text.
+pub fn fromZDelta(
+    difference: *Diff,
+    allocator: Allocator,
+    before: []const u8,
+    zdelta: []const u8,
+) ZDeltaError!*Diff {
+    const parsed = try parseZDeltaHeader(zdelta);
+    var edits: DiffList = .empty;
+    errdefer deinitDiffList(allocator, &edits);
+    switch (parsed.version) {
+        .a => edits = try diffListFromZDeltaA(allocator, before, zdelta[parsed.body_start..]),
+        .b => edits = try diffListFromZDeltaB(allocator, before, zdelta[parsed.body_start..]),
+    }
+    if (difference.edits.items.len != 0) {
+        deinitDiffList(allocator, &difference.edits);
+    }
+    difference.edits = edits;
+    return difference;
+}
+
 ///
 /// Compute and return the source text (all equalities and deletions).
 /// @return Source text.
@@ -352,6 +420,274 @@ pub fn changeInBytes(difference: *const Diff) isize {
 
 /// Free all memory of the ArrayList of Edits in a Diff.
 const deinitDiffList = common.deinitDiffList;
+
+const zdelta_magic = "zΔ⚡";
+
+// Paranoia earned from mighty blows:
+comptime {
+    if (!std.mem.eql(u8, zdelta_magic, "\x7a\xce\x94\xe2\x9a\xa1")) {
+        @compileError("Something has tampered with the zdelta header string...");
+    }
+}
+
+// These are pollutants which we do our best to avoid:
+const UTF8_BOM = "\xef\xbb\xbf"; // UTF-8 encoded byte-order mark
+const U_FEOE = "\xef\xb8\x8e"; // Variation selector: text
+const U_FEOF = "\xef\xb8\x8f"; // Variation selector: emoji
+
+const zdelta_sep_b: u8 = '|';
+const zdelta_sep_a: u8 = 0xff;
+const zdelta_delete_a: u8 = 0xfc;
+const zdelta_insert_a: u8 = 0xfd;
+const zdelta_equal_a: u8 = 0xfe;
+
+const ParsedZDeltaHeader = struct {
+    version: ZDeltaVersion,
+    body_start: usize,
+};
+
+fn writeZDeltaHeader(writer: anytype, version: ZDeltaVersion) !void {
+    try writer.writeAll(zdelta_magic);
+    try writer.writeByte(@tagName(version)[0]);
+}
+
+fn writeZDeltaInsert(writer: anytype, text: []const u8, version: ZDeltaVersion) ZDeltaError!void {
+    switch (version) {
+        .a => {
+            if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidZDeltaText;
+            try writer.writeByte(zdelta_insert_a);
+            try writer.writeAll(text);
+            try writer.writeByte(zdelta_sep_a);
+        },
+        .b => {
+            if (!std.unicode.wtf8ValidateSlice(text)) return error.InvalidZDeltaText;
+            try writer.writeByte('+');
+            _ = try writeZDeltaBText(writer, text);
+            try writer.writeByte(zdelta_sep_b);
+        },
+    }
+}
+
+fn writeZDeltaCount(
+    writer: anytype,
+    len: usize,
+    version: ZDeltaVersion,
+    operation: Edit.Operation,
+) !void {
+    switch (version) {
+        .a => try writer.writeByte(switch (operation) {
+            .delete => zdelta_delete_a,
+            .equal => zdelta_equal_a,
+            else => unreachable,
+        }),
+        .b => try writer.writeByte(switch (operation) {
+            .delete => '-',
+            .equal => '=',
+            else => unreachable,
+        }),
+    }
+    try writer.print("{x}", .{len});
+    switch (version) {
+        .a => try writer.writeByte(zdelta_sep_a),
+        .b => try writer.writeByte(zdelta_sep_b),
+    }
+}
+
+fn writeZDeltaBText(writer: anytype, text: []const u8) !usize {
+    var written: usize = 0;
+    for (text) |byte| {
+        const must_escape = switch (byte) {
+            0x00...0x1f, '+', '-', '=', '|', '%' => true,
+            else => false,
+        };
+        if (!must_escape) {
+            try writer.writeByte(byte);
+            written += 1;
+            continue;
+        }
+        try writer.writeByte('%');
+        const hex = std.fmt.bytesToHex(&[_]u8{byte}, .upper);
+        try writer.writeAll(&hex);
+        written += 3;
+    }
+    return written;
+}
+
+fn parseZDeltaHeader(zdelta: []const u8) ZDeltaError!ParsedZDeltaHeader {
+    var cursor: usize = 0;
+    if (std.mem.startsWith(u8, zdelta, UTF8_BOM)) {
+        cursor += UTF8_BOM.len;
+    }
+    if (!std.mem.startsWith(u8, zdelta[cursor..], zdelta_magic)) return error.BadZDeltaHeader;
+    cursor += zdelta_magic.len;
+    if (std.mem.startsWith(u8, zdelta[cursor..], U_FEOE)) {
+        cursor += U_FEOE.len;
+    } else if (std.mem.startsWith(u8, zdelta[cursor..], U_FEOF)) {
+        cursor += U_FEOF.len;
+    }
+    if (cursor >= zdelta.len) return error.BadZDeltaHeader;
+    const version = switch (zdelta[cursor]) {
+        'a' => ZDeltaVersion.a,
+        'b' => ZDeltaVersion.b,
+        else => return error.UnknownZDeltaVersion,
+    };
+    cursor += 1;
+    if (cursor >= zdelta.len) return error.BadZDeltaHeader;
+    const sep = switch (version) {
+        .a => zdelta_sep_a,
+        .b => zdelta_sep_b,
+    };
+    if (zdelta[cursor] != sep) return error.BadZDeltaHeader;
+    return .{ .version = version, .body_start = cursor + 1 };
+}
+
+fn diffListFromZDeltaA(allocator: Allocator, before: []const u8, body: []const u8) ZDeltaError!DiffList {
+    var edits: DiffList = .empty;
+    errdefer deinitDiffList(allocator, &edits);
+    if (body.len == 0) {
+        if (before.len != 0) return error.ZDeltaLengthMismatch;
+        return edits;
+    }
+    if (body[body.len - 1] != zdelta_sep_a) return error.BadZDeltaOperation;
+
+    var pointer: usize = 0;
+    var field_start: usize = 0;
+    while (field_start < body.len) {
+        const field_end = std.mem.indexOfScalarPos(u8, body, field_start, zdelta_sep_a) orelse unreachable;
+        const field = body[field_start..field_end];
+        if (field.len == 0) return error.BadZDeltaOperation;
+        try appendZDeltaField(allocator, &edits, before, &pointer, field, .a);
+        field_start = field_end + 1;
+    }
+    if (pointer != before.len) return error.ZDeltaLengthMismatch;
+    return edits;
+}
+
+fn diffListFromZDeltaB(allocator: Allocator, before: []const u8, body: []const u8) ZDeltaError!DiffList {
+    var compact_storage: ?[]u8 = null;
+    defer if (compact_storage) |compact| allocator.free(compact);
+    const compact = compact: {
+        const first_whitespace = std.mem.indexOfAny(u8, body, "\r\n") orelse break :compact body;
+        var compact = ArrayList(u8).init(allocator);
+        defer compact.deinit();
+        try compact.ensureUnusedCapacity(body.len);
+        try compact.appendSlice(body[0..first_whitespace]);
+        var cursor = first_whitespace + 1;
+        while (std.mem.indexOfAnyPos(u8, body, cursor, "\r\n")) |next_whitespace| {
+            try compact.appendSlice(body[cursor..next_whitespace]);
+            cursor = next_whitespace + 1;
+        }
+        try compact.appendSlice(body[cursor..]);
+        compact_storage = try compact.toOwnedSlice();
+        break :compact compact_storage.?;
+    };
+
+    var edits: DiffList = .empty;
+    errdefer deinitDiffList(allocator, &edits);
+    if (compact.len == 0) {
+        if (before.len != 0) return error.ZDeltaLengthMismatch;
+        return edits;
+    }
+    if (compact[compact.len - 1] != zdelta_sep_b) return error.BadZDeltaOperation;
+
+    var pointer: usize = 0;
+    var field_start: usize = 0;
+    while (field_start < compact.len) {
+        const field_end = std.mem.indexOfScalarPos(u8, compact, field_start, zdelta_sep_b) orelse unreachable;
+        const field = compact[field_start..field_end];
+        if (field.len == 0) return error.BadZDeltaOperation;
+        try appendZDeltaField(allocator, &edits, before, &pointer, field, .b);
+        field_start = field_end + 1;
+    }
+    if (pointer != before.len) return error.ZDeltaLengthMismatch;
+    return edits;
+}
+
+fn appendZDeltaField(
+    allocator: Allocator,
+    edits: *DiffList,
+    before: []const u8,
+    pointer: *usize,
+    field: []const u8,
+    version: ZDeltaVersion,
+) ZDeltaError!void {
+    const action = field[0];
+    const payload = field[1..];
+    switch (version) {
+        .a => switch (action) {
+            zdelta_insert_a => {
+                if (!std.unicode.utf8ValidateSlice(payload)) return error.InvalidZDeltaText;
+                try edits.append(allocator, .{
+                    .operation = .insert,
+                    .owned = true,
+                    .text = try allocator.dupe(u8, payload),
+                });
+            },
+            zdelta_delete_a => try appendZDeltaCountEdit(allocator, edits, before, pointer, payload, .delete),
+            zdelta_equal_a => try appendZDeltaCountEdit(allocator, edits, before, pointer, payload, .equal),
+            else => return error.BadZDeltaOperation,
+        },
+        .b => switch (action) {
+            '+' => {
+                const decoded = try decodeZDeltaPercent(allocator, payload);
+                errdefer allocator.free(decoded);
+                if (!std.unicode.wtf8ValidateSlice(decoded)) return error.InvalidZDeltaText;
+                try edits.append(allocator, .{
+                    .operation = .insert,
+                    .owned = true,
+                    .text = decoded,
+                });
+            },
+            '-' => try appendZDeltaCountEdit(allocator, edits, before, pointer, payload, .delete),
+            '=' => try appendZDeltaCountEdit(allocator, edits, before, pointer, payload, .equal),
+            else => return error.BadZDeltaOperation,
+        },
+    }
+}
+
+fn appendZDeltaCountEdit(
+    allocator: Allocator,
+    edits: *DiffList,
+    before: []const u8,
+    pointer: *usize,
+    payload: []const u8,
+    operation: Edit.Operation,
+) ZDeltaError!void {
+    const len = try parseZDeltaCount(payload);
+    if (pointer.* + len < pointer.* or pointer.* + len > before.len) return error.ZDeltaLengthMismatch;
+    try edits.append(allocator, .{
+        .operation = operation,
+        .owned = false,
+        .text = before[pointer.* .. pointer.* + len],
+    });
+    pointer.* += len;
+}
+
+fn parseZDeltaCount(payload: []const u8) ZDeltaError!usize {
+    if (payload.len == 0) return error.BadZDeltaNumber;
+    return std.fmt.parseInt(usize, payload, 16) catch error.BadZDeltaNumber;
+}
+
+fn decodeZDeltaPercent(allocator: Allocator, text: []const u8) ZDeltaError![]u8 {
+    if (std.mem.indexOfScalar(u8, text, '%') == null) {
+        return allocator.dupe(u8, text);
+    }
+    var out = ArrayList(u8).init(allocator);
+    defer out.deinit();
+    var cursor: usize = 0;
+    while (cursor < text.len) {
+        if (text[cursor] != '%') {
+            try out.append(text[cursor]);
+            cursor += 1;
+            continue;
+        }
+        if (cursor + 2 >= text.len) return error.BadZDeltaEscape;
+        const byte = std.fmt.parseInt(u8, text[cursor + 1 .. cursor + 3], 16) catch return error.BadZDeltaEscape;
+        try out.append(byte);
+        cursor += 3;
+    }
+    return out.toOwnedSlice();
+}
 
 /// Clone a `DiffList`, including each edit's owned text.
 fn cloneDiffList(allocator: Allocator, diffs: *const DiffList) !DiffList {
@@ -2336,7 +2672,15 @@ fn writeDiffPrettyFormat(
             },
         }
     }
+    try flushWriter(writer);
     return written;
+}
+
+fn flushWriter(writer: anytype) !void {
+    if (@hasDecl(@TypeOf(writer), "flush")) {
+        var w = writer;
+        try w.flush();
+    }
 }
 
 ///
@@ -4168,6 +4512,218 @@ test "diff before and after text" {
     defer allocator.free(after1);
     try testing.expectEqualStrings(before, before1);
     try testing.expectEqualStrings(after, after1);
+}
+
+fn testToZDeltaCase(
+    allocator: Allocator,
+    diff_slice: []const Edit,
+    version: ZDeltaVersion,
+    expected: []const u8,
+) !void {
+    var difference = Diff.init(.default);
+    defer difference.deinit(allocator);
+    difference.edits = try sliceToDiffList(allocator, diff_slice);
+    const actual = try difference.toZDelta(allocator, version);
+    defer allocator.free(actual);
+    try testing.expectEqualStrings(expected, actual);
+}
+
+fn testZDeltaRoundTripCase(
+    allocator: Allocator,
+    before: []const u8,
+    diff_slice: []const Edit,
+    version: ZDeltaVersion,
+) !void {
+    var difference = Diff.init(.default);
+    defer difference.deinit(allocator);
+    difference.edits = try sliceToDiffList(allocator, diff_slice);
+
+    const delta = try difference.toZDelta(allocator, version);
+    defer allocator.free(delta);
+
+    var decoded = Diff.init(.default);
+    defer decoded.deinit(allocator);
+    _ = try decoded.fromZDelta(allocator, before, delta);
+    try expectEqualDiff(diff_slice, decoded.edits.items);
+}
+
+fn testBadZDeltaCase(
+    allocator: Allocator,
+    before: []const u8,
+    delta: []const u8,
+    expected: ZDeltaError,
+) anyerror!void {
+    var difference = Diff.init(.default);
+    defer difference.deinit(allocator);
+    try testing.expectError(expected, difference.fromZDelta(allocator, before, delta));
+}
+
+fn testZDeltaHydrationEquivalence(
+    allocator: Allocator,
+    before: []const u8,
+    delta_a: []const u8,
+    delta_b: []const u8,
+    expected: []const Edit,
+) !void {
+    var diff_a = Diff.init(.default);
+    defer diff_a.deinit(allocator);
+    _ = try diff_a.fromZDelta(allocator, before, delta_a);
+    try expectEqualDiff(expected, diff_a.edits.items);
+
+    var diff_b = Diff.init(.default);
+    defer diff_b.deinit(allocator);
+    _ = try diff_b.fromZDelta(allocator, before, delta_b);
+    try expectEqualDiff(expected, diff_b.edits.items);
+
+    try expectEqualDiff(diff_a.edits.items, diff_b.edits.items);
+}
+
+test "ZDelta encode" {
+    const allocator = testing.allocator;
+    try testing.checkAllAllocationFailures(
+        allocator,
+        testToZDeltaCase,
+        .{
+            &.{
+                Edit.asBorrow(.equal, "abc"),
+                Edit.asBorrow(.delete, "de"),
+                Edit.asBorrow(.insert, "ing"),
+            },
+            ZDeltaVersion.b,
+            "zΔ⚡b|=3|-2|+ing|",
+        },
+    );
+    try testing.checkAllAllocationFailures(
+        allocator,
+        testToZDeltaCase,
+        .{
+            &.{
+                Edit.asBorrow(.equal, "abc"),
+                Edit.asBorrow(.delete, "de"),
+                Edit.asBorrow(.insert, "ing"),
+            },
+            ZDeltaVersion.a,
+            "zΔ⚡a" ++ "\xff\xfe3\xff\xfc2\xff\xfding\xff",
+        },
+    );
+    try testing.checkAllAllocationFailures(
+        allocator,
+        testToZDeltaCase,
+        .{
+            &.{
+                Edit.asBorrow(.insert, "+-=%|\x01α"),
+            },
+            ZDeltaVersion.b,
+            "zΔ⚡b|+%2B%2D%3D%25%7C%01α|",
+        },
+    );
+    try testing.checkAllAllocationFailures(
+        allocator,
+        testToZDeltaCase,
+        .{
+            &.{
+                Edit.asBorrow(.insert, "Καλημέρα"),
+            },
+            ZDeltaVersion.b,
+            "zΔ⚡b|+Καλημέρα|",
+        },
+    );
+}
+
+test "ZDelta encode rejects invalid text" {
+    const allocator = testing.allocator;
+    var diff_a = Diff.init(.default);
+    defer diff_a.deinit(allocator);
+    diff_a.edits = try sliceToDiffList(allocator, &.{
+        Edit.asBorrow(.insert, "\xed\xa0\x80"),
+    });
+    try testing.expectError(error.InvalidZDeltaText, diff_a.toZDelta(allocator, .a));
+
+    var diff_b = Diff.init(.default);
+    defer diff_b.deinit(allocator);
+    diff_b.edits = try sliceToDiffList(allocator, &.{
+        Edit.asBorrow(.insert, "\xc0"),
+    });
+    try testing.expectError(error.InvalidZDeltaText, diff_b.toZDelta(allocator, .b));
+}
+
+test "ZDelta round trip" {
+    const allocator = testing.allocator;
+    const before = "αβZ";
+    const expected = &.{
+        Edit.asBorrow(.equal, "α"),
+        Edit.asBorrow(.delete, "β"),
+        Edit.asBorrow(.insert, "+λ\n"),
+        Edit.asBorrow(.equal, "Z"),
+    };
+    try testing.checkAllAllocationFailures(
+        allocator,
+        testZDeltaRoundTripCase,
+        .{ before, expected, ZDeltaVersion.a },
+    );
+    try testing.checkAllAllocationFailures(
+        allocator,
+        testZDeltaRoundTripCase,
+        .{ before, expected, ZDeltaVersion.b },
+    );
+}
+
+test "ZDelta decode strict failures" {
+    const allocator = testing.allocator;
+    try testBadZDeltaCase(allocator, "", "+abc|", error.BadZDeltaHeader);
+    try testBadZDeltaCase(allocator, "", "zΔ⚡q|", error.UnknownZDeltaVersion);
+    try testBadZDeltaCase(allocator, "", "zΔ⚡b|+%G0|", error.BadZDeltaEscape);
+    try testBadZDeltaCase(allocator, "", "zΔ⚡b|?1|", error.BadZDeltaOperation);
+    try testBadZDeltaCase(allocator, "abc", "zΔ⚡b|=gg|", error.BadZDeltaNumber);
+    try testBadZDeltaCase(allocator, "abc", "zΔ⚡b|=4|", error.ZDeltaLengthMismatch);
+    try testBadZDeltaCase(allocator, "abc", "zΔ⚡b|", error.ZDeltaLengthMismatch);
+}
+
+test "ZDelta decode header tolerance and whitespace" {
+    const allocator = testing.allocator;
+    var bom_vs = Diff.init(.default);
+    defer bom_vs.deinit(allocator);
+    _ = try bom_vs.fromZDelta(
+        allocator,
+        "",
+        "\xef\xbb\xbf" ++ "zΔ⚡" ++ "\xef\xb8\x8f" ++ "b|+abc|",
+    );
+    try expectEqualDiff(&.{Edit.asBorrow(.insert, "abc")}, bom_vs.edits.items);
+
+    var spaced = Diff.init(.default);
+    defer spaced.deinit(allocator);
+    _ = try spaced.fromZDelta(
+        allocator,
+        "a",
+        "zΔ⚡b|\n=1|\r\n+α|\n",
+    );
+    try expectEqualDiff(
+        &.{
+            Edit.asBorrow(.equal, "a"),
+            Edit.asBorrow(.insert, "α"),
+        },
+        spaced.edits.items,
+    );
+}
+
+test "ZDelta a and b hydrate identically" {
+    const allocator = testing.allocator;
+    const before = "αβZ";
+    try testing.checkAllAllocationFailures(
+        allocator,
+        testZDeltaHydrationEquivalence,
+        .{
+            before,
+            "zΔ⚡a" ++ "\xff\xfe2\xff\xfc2\xff\xfd+\xce\xbb\x0a\xff\xfe1\xff",
+            "zΔ⚡b|=2|-2|+%2Bλ%0A|=1|",
+            &.{
+                Edit.asBorrow(.equal, "α"),
+                Edit.asBorrow(.delete, "β"),
+                Edit.asBorrow(.insert, "+λ\n"),
+                Edit.asBorrow(.equal, "Z"),
+            },
+        },
+    );
 }
 
 test "diffLineMode coverage runs" {
