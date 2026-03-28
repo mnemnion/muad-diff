@@ -254,7 +254,7 @@ pub fn diff(
         deinitDiffList(allocator, &difference.edits);
         difference.edits = .empty;
     }
-    difference.edits = try diffWithConfig(difference.config, allocator, before, after);
+    difference.edits = try diffImpl(difference.config, allocator, before, after);
     return difference;
 }
 
@@ -728,7 +728,7 @@ fn diffListFromConfig(
 }
 
 /// Compute a `DiffList` using the provided `DiffConfig`.
-fn diffWithConfig(
+fn diffImpl(
     config: DiffConfig,
     allocator: std.mem.Allocator,
     before: []const u8,
@@ -957,7 +957,7 @@ fn diffCompute(
     if (config.check_lines and before.len > config.check_line_threshold and after.len > config.check_line_threshold) {
         return diffLineMode(config, allocator, before, after, deadline);
     }
-    return diffBisectConfig(config, allocator, before, after, deadline);
+    return diffBisect(config, allocator, before, after, deadline);
 }
 
 fn diffHalfMatch(
@@ -1075,7 +1075,7 @@ fn diffHalfMatchInternal(
     }
 }
 
-fn diffBisectConfig(
+fn diffBisect(
     config: DiffConfig,
     allocator: std.mem.Allocator,
     before: []const u8,
@@ -4007,7 +4007,7 @@ fn testDiffBisect(
     allocator: std.mem.Allocator,
     params: TBisect,
 ) !void {
-    var diffs = try diffBisectConfig(params.config, allocator, params.before, params.after, params.deadline);
+    var diffs = try diffBisect(params.config, allocator, params.before, params.after, params.deadline);
     defer deinitDiffList(allocator, &diffs);
     try expectEqualDiff(params.expected, diffs.items);
 }
@@ -4210,23 +4210,17 @@ test "diffLineMode" {
 }
 
 test "check-line-mode" {
-    try testing.checkAllAllocationFailures(
+    try testDiffLineMode(
         testing.allocator,
-        testDiffLineMode,
-        .{
-            @as(u32, 20),
-            "alpha-1\nalpha-2\nshared-a\nbeta-1\nbeta-2\nshared-b\ngamma-1\ngamma-2\nshared-c\n",
-            "omega-1\nomega-2\nshared-a\ntheta-1\ntheta-2\nshared-b\nsigma-1\nsigma-2\nshared-c\n",
-        },
+        20,
+        "alpha-1\nalpha-2\nshared-a\nbeta-1\nbeta-2\nshared-b\ngamma-1\ngamma-2\nshared-c\n",
+        "omega-1\nomega-2\nshared-a\ntheta-1\ntheta-2\nshared-b\nsigma-1\nsigma-2\nshared-c\n",
     );
-    try testing.checkAllAllocationFailures(
+    try testDiffLineMode(
         testing.allocator,
-        testDiffLineMode,
-        .{
-            @as(u32, 20),
-            "red-1\nred-2\npivot-a\nblue-1\nblue-2\npivot-b\ngreen-1\ngreen-2\npivot-c\n",
-            "cyan-1\ncyan-2\npivot-a\nyellow-1\nyellow-2\npivot-b\nmagenta-1\nmagenta-2\npivot-c\n",
-        },
+        20,
+        "red-1\nred-2\npivot-a\nblue-1\nblue-2\npivot-b\ngreen-1\ngreen-2\npivot-c\n",
+        "cyan-1\ncyan-2\npivot-a\nyellow-1\nyellow-2\npivot-b\nmagenta-1\nmagenta-2\npivot-c\n",
     );
 }
 
@@ -4668,15 +4662,30 @@ test "ZDelta round trip" {
     );
 }
 
+test "fromZDelta replaces existing edits" {
+    const allocator = testing.allocator;
+    var difference = Diff.init(.default);
+    defer difference.deinit(allocator);
+
+    difference.edits = try sliceToDiffList(allocator, &.{
+        Edit.asBorrow(.delete, "stale"),
+    });
+
+    _ = try difference.fromZDelta(allocator, "abc", "zΔ⚡b|=3|");
+    try expectEqualDiff(&.{Edit.asBorrow(.equal, "abc")}, difference.edits.items);
+}
+
 test "ZDelta decode strict failures" {
     const allocator = testing.allocator;
     try testBadZDeltaCase(allocator, "", "+abc|", error.BadZDeltaHeader);
     try testBadZDeltaCase(allocator, "", "zΔ⚡q|", error.UnknownZDeltaVersion);
     try testBadZDeltaCase(allocator, "", "zΔ⚡b|+%G0|", error.BadZDeltaEscape);
     try testBadZDeltaCase(allocator, "", "zΔ⚡b|?1|", error.BadZDeltaOperation);
+    try testBadZDeltaCase(allocator, "abc", "zΔ⚡a\xff", error.ZDeltaLengthMismatch);
     try testBadZDeltaCase(allocator, "abc", "zΔ⚡b|=gg|", error.BadZDeltaNumber);
     try testBadZDeltaCase(allocator, "abc", "zΔ⚡b|=4|", error.ZDeltaLengthMismatch);
     try testBadZDeltaCase(allocator, "abc", "zΔ⚡b|", error.ZDeltaLengthMismatch);
+    try testBadZDeltaCase(allocator, "", "zΔ⚡\xef\xb8\x8eb|+%C0|", error.InvalidZDeltaText);
 }
 
 test "ZDelta decode header tolerance and whitespace" {

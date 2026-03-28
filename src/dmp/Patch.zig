@@ -403,7 +403,7 @@ const PATCH_TAIL = " @@\n";
 /// @param pattern The pattern to search for.
 /// @param loc The location to search around.
 /// @return Best match index or -1.
-fn matchMain(
+pub fn matchMain(
     config: PatchConfig,
     allocator: Allocator,
     text: []const u8,
@@ -1977,56 +1977,21 @@ fn testWriteEscapedCase(allocator: Allocator, text: []const u8, expected: []cons
 
 test "writeEscaped" {
     const allocator = testing.allocator;
-    try std.testing.checkAllAllocationFailures(
-        allocator,
-        testWriteEscapedCase,
+    const cases = [_]struct { []const u8, []const u8 }{
         .{ "plain text", "plain text" },
-    );
-    try std.testing.checkAllAllocationFailures(
-        allocator,
-        testWriteEscapedCase,
         .{ "+", "%2B" },
-    );
-    try std.testing.checkAllAllocationFailures(
-        allocator,
-        testWriteEscapedCase,
         .{ "-", "%2D" },
-    );
-    try std.testing.checkAllAllocationFailures(
-        allocator,
-        testWriteEscapedCase,
         .{ "=", "%3D" },
-    );
-    try std.testing.checkAllAllocationFailures(
-        allocator,
-        testWriteEscapedCase,
         .{ "%", "%25" },
-    );
-    try std.testing.checkAllAllocationFailures(
-        allocator,
-        testWriteEscapedCase,
         .{ "\x00", "%00" },
-    );
-    try std.testing.checkAllAllocationFailures(
-        allocator,
-        testWriteEscapedCase,
         .{ "\x1F", "%1F" },
-    );
-    try std.testing.checkAllAllocationFailures(
-        allocator,
-        testWriteEscapedCase,
         .{ "\n", "%0A" },
-    );
-    try std.testing.checkAllAllocationFailures(
-        allocator,
-        testWriteEscapedCase,
         .{ "+-=%\nabc", "%2B%2D%3D%25%0Aabc" },
-    );
-    try std.testing.checkAllAllocationFailures(
-        allocator,
-        testWriteEscapedCase,
         .{ "a\tb\x01c", "a%09b%01c" },
-    );
+    };
+    for (cases) |case| {
+        try testWriteEscapedCase(allocator, case[0], case[1]);
+    }
 }
 
 fn testPatchWriteTextEscapesSpecialBodyChars(allocator: Allocator) !void {
@@ -2051,11 +2016,7 @@ fn testPatchWriteTextEscapesSpecialBodyChars(allocator: Allocator) !void {
 }
 
 test "patch writeText escapes special body chars" {
-    try std.testing.checkAllAllocationFailures(
-        testing.allocator,
-        testPatchWriteTextEscapesSpecialBodyChars,
-        .{},
-    );
+    try testPatchWriteTextEscapesSpecialBodyChars(testing.allocator);
 }
 
 fn testPatchFromTextDecodesEscapedBodyChars(allocator: Allocator) !void {
@@ -2111,7 +2072,6 @@ fn testPatchIssue157GeneratedPatchRoundTrip(allocator: Allocator) !void {
     _ = try patch.make(allocator, original_json, &diff);
 
     const patch_text = try patch.toTextPatch(allocator);
-    std.debug.print("{s}\n", .{patch_text});
     defer allocator.free(patch_text);
     try testing.expect(std.mem.indexOf(u8, patch_text, "%0A") != null);
 
@@ -2544,11 +2504,7 @@ fn testPatchToTextModern(allocator: Allocator) !void {
 }
 
 test "patch to text modern" {
-    try std.testing.checkAllAllocationFailures(
-        testing.allocator,
-        testPatchToTextModern,
-        .{},
-    );
+    try testPatchToTextModern(testing.allocator);
 }
 
 fn testPatchRoundTrip(allocator: Allocator, patch_in: []const u8) !void {
@@ -2609,69 +2565,36 @@ test "patch from text" {
     defer p0.deinit(allocator);
     _ = try p0.fromTextPatch(allocator, "");
     try testing.expectEqual(0, p0.hunks.items.len);
-    try std.testing.checkAllAllocationFailures(
-        testing.allocator,
-        testPatchRoundTripLegacy,
-        .{"@@ -21,18 +22,17 @@\n jump\n-s\n+ed\n  over \n-the\n+a\n %0Alaz\n"},
-    );
-    try std.testing.checkAllAllocationFailures(
-        allocator,
-        testPatchRoundTripLegacy,
-        .{"@@ -1 +1 @@\n-a\n+b\n"},
-    );
-    try std.testing.checkAllAllocationFailures(
-        testing.allocator,
-        testPatchRoundTripLegacy,
-        .{"@@ -1,3 +0,0 @@\n-abc\n"},
-    );
-    try std.testing.checkAllAllocationFailures(
-        testing.allocator,
-        testPatchRoundTripLegacy,
-        .{"@@ -0,0 +1,3 @@\n+abc\n"},
-    );
-    try std.testing.checkAllAllocationFailures(
-        testing.allocator,
-        testPatchRoundTripLegacy,
-        .{"@@ -0,0 +1,3 @@\n+abc\n@@ -0,0 +1,3 @@\n+abc\n"},
-    );
+    const round_trip_cases = [_][]const u8{
+        "@@ -21,18 +22,17 @@\n jump\n-s\n+ed\n  over \n-the\n+a\n %0Alaz\n",
+        "@@ -1 +1 @@\n-a\n+b\n",
+        "@@ -1,3 +0,0 @@\n-abc\n",
+        "@@ -0,0 +1,3 @@\n+abc\n",
+        "@@ -0,0 +1,3 @@\n+abc\n@@ -0,0 +1,3 @@\n+abc\n",
+    };
+    for (round_trip_cases) |patch_text| {
+        try testPatchRoundTripLegacy(allocator, patch_text);
+    }
 }
 
 test "modern patch text round trips" {
-    try std.testing.checkAllAllocationFailures(
-        testing.allocator,
-        testPatchRoundTrip,
-        .{"@@ -21,18 +22,17 @@\n jump\n-s\n+ed\n  over \n-the\n+a\n %0Alaz\n"},
-    );
-    try std.testing.checkAllAllocationFailures(
-        testing.allocator,
-        testPatchRoundTrip,
-        .{"@@ -1 +1 @@\n-a\n+b\n"},
-    );
-    try std.testing.checkAllAllocationFailures(
-        testing.allocator,
-        testPatchRoundTrip,
-        .{"@@ -1,3 +0,0 @@\n-abc\n"},
-    );
-    try std.testing.checkAllAllocationFailures(
-        testing.allocator,
-        testPatchRoundTrip,
-        .{"@@ -0,0 +1,3 @@\n+abc\n"},
-    );
-    try std.testing.checkAllAllocationFailures(
-        testing.allocator,
-        testPatchRoundTrip,
-        .{"@@ -0,0 +1,3 @@\n+abc\n@@ -0,0 +1,3 @@\n+abc\n"},
-    );
+    const round_trip_cases = [_][]const u8{
+        "@@ -21,18 +22,17 @@\n jump\n-s\n+ed\n  over \n-the\n+a\n %0Alaz\n",
+        "@@ -1 +1 @@\n-a\n+b\n",
+        "@@ -1,3 +0,0 @@\n-abc\n",
+        "@@ -0,0 +1,3 @@\n+abc\n",
+        "@@ -0,0 +1,3 @@\n+abc\n@@ -0,0 +1,3 @@\n+abc\n",
+    };
+    for (round_trip_cases) |patch_text| {
+        try testPatchRoundTrip(testing.allocator, patch_text);
+    }
 }
 
 test "legacy and modern text hydrate to same patch" {
-    try std.testing.checkAllAllocationFailures(
+    try testPatchModernAndLegacyHydrateSame(
         testing.allocator,
-        testPatchModernAndLegacyHydrateSame,
-        .{
-            "@@ -1,21 +1,21 @@\n-%601234567890-=%5B%5D%5C;',./\n+~!@#$%25%5E&*()_+%7B%7D%7C:%22%3C%3E?\n",
-            "@@ -1,21 +1,21 @@\n-`1234567890%2D%3D[]\\;',./\n+~!@#$%25^&*()_%2B{}|:\"<>?\n",
-        },
+        "@@ -1,21 +1,21 @@\n-%601234567890-=%5B%5D%5C;',./\n+~!@#$%25%5E&*()_+%7B%7D%7C:%22%3C%3E?\n",
+        "@@ -1,21 +1,21 @@\n-`1234567890%2D%3D[]\\;',./\n+~!@#$%25^&*()_%2B{}|:\"<>?\n",
     );
 }
 
@@ -3317,11 +3240,7 @@ fn testTextManagerReplaceRangeEqualLengthErrdefer(allocator: Allocator) error{ S
 }
 
 test "TextManager replaceRange equal length" {
-    try testing.checkAllAllocationFailures(
-        testing.allocator,
-        testTextManagerReplaceRangeEqualLength,
-        .{},
-    );
+    try testTextManagerReplaceRangeEqualLength(testing.allocator);
     try testing.expectError(
         error.Sentinel,
         testTextManagerReplaceRangeEqualLengthErrdefer(testing.allocator),
