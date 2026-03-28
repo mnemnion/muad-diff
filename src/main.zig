@@ -1,12 +1,8 @@
-//! Main Executable of driff
+//! Main executable of muad-diff.
 const std = @import("std");
-const dmp = @import("dmp.zig");
+const cli = @import("cli.zig");
 
-test "exe mentioned" {
-    std.debug.print("hello from driff main\n", .{});
-}
-
-pub fn main() void {
-    std.debug.print("driff for great justice!\n", .{});
-    std.process.exit(0);
+pub fn main() !void {
+    const code = try cli.main();
+    std.process.exit(code);
 }
