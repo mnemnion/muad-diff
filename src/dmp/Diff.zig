@@ -25,13 +25,10 @@
 //! to own that memory.
 //!
 
-/// The diff configuration, see `DiffConfig`
-config: DiffConfig = .default,
-/// An ArrayList of the individual `Edit`s in this diff.
-edits: DiffList = .empty,
+const Module = @This();
 
 /// The configurable parameters for a Diff object.
-pub const DiffConfig = struct {
+const DiffConfig = struct {
     /// Number of milliseconds to map a diff before giving up (0 for infinity).
     timeout: u64,
     /// Cost of an empty edit operation in terms of edit characters.  Higher
@@ -55,12 +52,12 @@ pub const DiffConfig = struct {
     };
 };
 
-pub const ZDeltaVersion = enum {
+const ZDeltaVersion = enum {
     a,
     b,
 };
 
-pub const ZDeltaError = OOM || error{
+const ZDeltaError = OOM || error{
     BadZDeltaHeader,
     UnknownZDeltaVersion,
     BadZDeltaEscape,
@@ -71,7 +68,7 @@ pub const ZDeltaError = OOM || error{
 };
 
 /// A single edit of a diff: insertion, deletion, or neither.
-pub const Edit = struct {
+const Edit = struct {
     pub const Operation = enum {
         insert,
         delete,
@@ -157,7 +154,7 @@ pub const Edit = struct {
     }
 };
 
-pub const DiffList = ArrayListUnmanaged(Edit);
+const DiffList = ArrayListUnmanaged(Edit);
 
 const HalfMatchResult = struct {
     prefix_before: []const u8,
@@ -179,7 +176,7 @@ const CHAR_OFFSET = 32;
 /// This allows for tasks like proper HTML escaping.  Note that if
 /// the function is provided, all text returned will be freed, so
 /// it should always return a copy whether or not edits are needed.
-pub const DiffDecorations = struct {
+const DiffDecorations = struct {
     delete_start: []const u8 = "",
     delete_end: []const u8 = "",
     insert_start: []const u8 = "",
@@ -198,237 +195,251 @@ pub const DiffDecorations = struct {
     };
 };
 
-pub const default: Diff = .{
-    .config = .default,
-    .edits = .empty,
+pub const Diff = struct {
+    pub const DiffConfig = Module.DiffConfig;
+    pub const ZDeltaVersion = Module.ZDeltaVersion;
+    pub const ZDeltaError = Module.ZDeltaError;
+    pub const Edit = Module.Edit;
+    pub const DiffList = Module.DiffList;
+    pub const DiffDecorations = Module.DiffDecorations;
+
+    /// The diff configuration, see `DiffConfig`
+    config: Module.DiffConfig = .default,
+    /// An ArrayList of the individual `Edit`s in this diff.
+    edits: Module.DiffList = .empty,
+
+    pub const default: Diff = .{
+        .config = .default,
+        .edits = .empty,
+    };
+
+    /// Initialize an empty `Diff` with the provided `DiffConfig`.
+    pub fn init(config: Module.DiffConfig) Diff {
+        return .{ .config = config };
+    }
+
+    /// Own all edits in the Diff.  After this operation it is safe
+    /// to dispose of the original strings.
+    pub fn own(difference: *Diff, allocator: Allocator) OOM!Diff {
+        for (difference.edits.items) |*e| {
+            try e.own(allocator);
+        }
+    }
+
+    /// Clone this `Diff`, including its owned edits.  The clone is
+    /// fully-owned, the ownership in the original does not change.
+    pub fn clone(difference: *const Diff, allocator: Allocator) OOM!Diff {
+        return .{
+            .config = difference.config,
+            .edits = try cloneDiffList(allocator, &difference.edits),
+        };
+    }
+
+    /// Make a copy of the Diff.  Each Edit in the new copy will have the
+    /// same ownership status as that of the original.
+    pub fn copy(difference: *const Diff, allocator: Allocator) OOM!Diff {
+        return .{
+            .config = difference.config,
+            .edits = try copyDiffList(allocator, &difference.edits),
+        };
+    }
+
+    /// Release the storage owned by this `Diff`.
+    pub fn deinit(difference: *Diff, allocator: Allocator) void {
+        deinitDiffList(allocator, &difference.edits);
+        difference.edits = .empty;
+    }
+
+    /// Find the differences between two texts.
+    /// @param before Old string to be diffed.
+    /// @param after New string to be diffed.
+    /// @return self.
+    pub fn diff(
+        difference: *Diff,
+        allocator: Allocator,
+        before: []const u8,
+        after: []const u8,
+    ) OOM!*Diff {
+        if (difference.edits.items.len != 0) {
+            deinitDiffList(allocator, &difference.edits);
+            difference.edits = .empty;
+        }
+        difference.edits = try diffImpl(difference.config, allocator, before, after);
+        return difference;
+    }
+
+    pub fn diffLines(
+        difference: *Diff,
+        allocator: Allocator,
+        before: []const u8,
+        after: []const u8,
+    ) OOM!*Diff {
+        if (difference.edits.items.len != 0) {
+            deinitDiffList(allocator, &difference.edits);
+            difference.edits = .empty;
+        }
+        difference.edits = try diffLine(difference.config, allocator, before, after, std.math.maxInit(u64));
+        return difference;
+    }
+
+    /// Reduce the number of edits by eliminating semantically trivial
+    /// equalities.
+    /// @return self.
+    pub fn cleanupSemantic(difference: *Diff, allocator: Allocator) OOM!*Diff {
+        try diffCleanupSemantic(allocator, &difference.edits);
+        return difference;
+    }
+
+    /// Look for single edits surrounded on both sides by equalities
+    /// which can be shifted sideways to align the edit to a word boundary.
+    /// e.g: The c<ins>at c</ins>ame. -> The <ins>cat </ins>came.
+    /// @return self.
+    pub fn cleanupSemanticLossless(difference: *Diff, allocator: Allocator) OOM!*Diff {
+        try diffCleanupSemanticLossless(allocator, &difference.edits);
+        return difference;
+    }
+
+    /// Reduce the number of edits by eliminating operationally trivial
+    /// equalities.
+    /// @return self.
+    pub fn cleanupEfficiency(difference: *Diff, allocator: Allocator) OOM!*Diff {
+        try diffCleanupEfficiencyConfig(difference.config, allocator, &difference.edits);
+        return difference;
+    }
+
+    /// Return text representing a pretty-formatted `Diff`.
+    /// See `DiffDecorations` for how to customize this output.
+    pub fn prettyFormat(difference: *const Diff, allocator: Allocator, deco: Module.DiffDecorations) ![]const u8 {
+        return try diffPrettyFormat(allocator, difference.edits, deco);
+    }
+
+    /// Return text representing a pretty-formatted `DiffList`, in Xterm format.
+    pub fn prettyFormatXTerm(difference: *const Diff, allocator: Allocator) ![]const u8 {
+        return diffPrettyFormatXTerm(allocator, difference);
+    }
+
+    /// Write a pretty-formatted `Diff` to `writer`.  The `Allocator`
+    /// is only used if a custom text formatter is defined for
+    /// `DiffDecorations`.  Returns number of bytes written.
+    pub fn writePrettyFormat(
+        difference: *const Diff,
+        allocator: Allocator,
+        writer: anytype,
+        deco: Module.DiffDecorations,
+    ) !usize {
+        return try writeDiffPrettyFormat(allocator, writer, difference.edits, deco);
+    }
+
+    /// Create a Patch from the Diff with the default PatchOptions.
+    pub fn toPatch(difference: *const Diff, allocator: Allocator) OOM!Patch {
+        var the_patch: Patch = .default;
+        return the_patch.fromDiff(allocator, difference);
+    }
+
+    /// Create a Patch from the Diff with the provided PatchOptions.
+    pub fn toPatchConfig(
+        difference: *const Diff,
+        allocator: Allocator,
+        cfg: PatchConfig,
+    ) OOM!Patch {
+        var the_patch: Patch = .init(cfg);
+        return the_patch.fromDiff(allocator, difference);
+    }
+
+    /// Write a Diff in a zdelta format.  Currently supported are
+    /// formats `.a` and `.b`, see documentation for more details.
+    pub fn toZDelta(
+        difference: *const Diff,
+        allocator: Allocator,
+        version: Module.ZDeltaVersion,
+    ) Module.ZDeltaError![]const u8 {
+        var out = ArrayList(u8).init(allocator);
+        defer out.deinit();
+        const writer = out.writer();
+        try writeZDeltaHeader(writer, version);
+        switch (version) {
+            .a => try writer.writeByte(zdelta_sep_a),
+            .b => try writer.writeByte(zdelta_sep_b),
+        }
+        for (difference.edits.items) |edit| {
+            switch (edit.operation) {
+                .insert => {
+                    try writeZDeltaInsert(writer, edit.text, version);
+                },
+                .delete => {
+                    try writeZDeltaCount(writer, edit.text.len, version, .delete);
+                },
+                .equal => {
+                    try writeZDeltaCount(writer, edit.text.len, version, .equal);
+                },
+            }
+        }
+        try flushWriter(writer);
+        return out.toOwnedSlice();
+    }
+
+    /// Populate a Diff from a zdelta string and the before text.
+    pub fn fromZDelta(
+        difference: *Diff,
+        allocator: Allocator,
+        before: []const u8,
+        zdelta: []const u8,
+    ) Module.ZDeltaError!*Diff {
+        const parsed = try parseZDeltaHeader(zdelta);
+        var edits: Module.DiffList = .empty;
+        errdefer deinitDiffList(allocator, &edits);
+        switch (parsed.version) {
+            .a => edits = try diffListFromZDeltaA(allocator, before, zdelta[parsed.body_start..]),
+            .b => edits = try diffListFromZDeltaB(allocator, before, zdelta[parsed.body_start..]),
+        }
+        if (difference.edits.items.len != 0) {
+            deinitDiffList(allocator, &difference.edits);
+        }
+        difference.edits = edits;
+        return difference;
+    }
+
+    ///
+    /// Compute and return the source text (all equalities and deletions).
+    /// @return Source text.
+    ///
+    pub fn beforeText(difference: Diff, allocator: Allocator) OOM![]const u8 {
+        return try diffBeforeText(allocator, difference.edits);
+    }
+
+    ///
+    /// Compute and return the destination text (all equalities and insertions).
+    /// @return Destination text.
+    ///
+    pub fn afterText(difference: Diff, allocator: Allocator) OOM![]const u8 {
+        return try diffAfterText(allocator, difference.edits);
+    }
+
+    /// loc is a location in text1, compute and return the equivalent location in
+    /// text2.
+    /// e.g. "The cat" vs "The big cat", 1->1, 5->8
+    /// @param loc Location within text1.
+    /// @return Location within text2.
+    ///
+    pub fn index(difference: Diff, loc: usize) usize {
+        return diffIndex(difference.edits, loc);
+    }
+
+    /// Answers the number of bytes total be added or removed by
+    /// applying this diff, in other words, the difference in length
+    /// between the before and after texts.
+    pub fn changeInBytes(difference: *const Diff) isize {
+        var count: isize = 0;
+        for (difference.edits.items) |edit| {
+            switch (edit.operation) {
+                .insert => count += u2i(edit.text.len),
+                .delete => count -= u2i(edit.text.len),
+                .equal => {},
+            }
+        }
+        return count;
+    }
 };
-
-/// Initialize an empty `Diff` with the provided `DiffConfig`.
-pub fn init(config: DiffConfig) Diff {
-    return .{ .config = config };
-}
-
-/// Own all edits in the Diff.  After this operation it is safe
-/// to dispose of the original strings.
-pub fn own(difference: *Diff, allocator: Allocator) OOM!Diff {
-    for (difference.edits.items) |*e| {
-        try e.own(allocator);
-    }
-}
-
-/// Clone this `Diff`, including its owned edits.  The clone is
-/// fully-owned, the ownership in the original does not change.
-pub fn clone(difference: *const Diff, allocator: Allocator) OOM!Diff {
-    return .{
-        .config = difference.config,
-        .edits = try cloneDiffList(allocator, &difference.edits),
-    };
-}
-
-/// Make a copy of the Diff.  Each Edit in the new copy will have the
-/// same ownership status as that of the original.
-pub fn copy(difference: *const Diff, allocator: Allocator) OOM!Diff {
-    return .{
-        .config = difference.config,
-        .edits = try copyDiffList(allocator, &difference.edits),
-    };
-}
-
-/// Release the storage owned by this `Diff`.
-pub fn deinit(difference: *Diff, allocator: Allocator) void {
-    deinitDiffList(allocator, &difference.edits);
-    difference.edits = .empty;
-}
-
-/// Find the differences between two texts.
-/// @param before Old string to be diffed.
-/// @param after New string to be diffed.
-/// @return self.
-pub fn diff(
-    difference: *Diff,
-    allocator: Allocator,
-    before: []const u8,
-    after: []const u8,
-) OOM!*Diff {
-    if (difference.edits.items.len != 0) {
-        deinitDiffList(allocator, &difference.edits);
-        difference.edits = .empty;
-    }
-    difference.edits = try diffImpl(difference.config, allocator, before, after);
-    return difference;
-}
-
-pub fn diffLines(
-    difference: *Diff,
-    allocator: Allocator,
-    before: []const u8,
-    after: []const u8,
-) OOM!*Diff {
-    if (difference.edits.items.len != 0) {
-        deinitDiffList(allocator, &difference.edits);
-        difference.edits = .empty;
-    }
-    difference.edits = try diffLine(difference.config, allocator, before, after, std.math.maxInit(u64));
-    return difference;
-}
-
-/// Reduce the number of edits by eliminating semantically trivial
-/// equalities.
-/// @return self.
-pub fn cleanupSemantic(difference: *Diff, allocator: Allocator) OOM!*Diff {
-    try diffCleanupSemantic(allocator, &difference.edits);
-    return difference;
-}
-
-/// Look for single edits surrounded on both sides by equalities
-/// which can be shifted sideways to align the edit to a word boundary.
-/// e.g: The c<ins>at c</ins>ame. -> The <ins>cat </ins>came.
-/// @return self.
-pub fn cleanupSemanticLossless(difference: *Diff, allocator: Allocator) OOM!*Diff {
-    try diffCleanupSemanticLossless(allocator, &difference.edits);
-    return difference;
-}
-
-/// Reduce the number of edits by eliminating operationally trivial
-/// equalities.
-/// @return self.
-pub fn cleanupEfficiency(difference: *Diff, allocator: Allocator) OOM!*Diff {
-    try diffCleanupEfficiencyConfig(difference.config, allocator, &difference.edits);
-    return difference;
-}
-
-/// Return text representing a pretty-formatted `Diff`.
-/// See `DiffDecorations` for how to customize this output.
-pub fn prettyFormat(difference: *const Diff, allocator: Allocator, deco: DiffDecorations) ![]const u8 {
-    return try diffPrettyFormat(allocator, difference.edits, deco);
-}
-
-/// Return text representing a pretty-formatted `DiffList`, in Xterm format.
-pub fn prettyFormatXTerm(difference: *const Diff, allocator: Allocator) ![]const u8 {
-    return diffPrettyFormatXTerm(allocator, difference);
-}
-
-/// Write a pretty-formatted `Diff` to `writer`.  The `Allocator`
-/// is only used if a custom text formatter is defined for
-/// `DiffDecorations`.  Returns number of bytes written.
-pub fn writePrettyFormat(
-    difference: *const Diff,
-    allocator: Allocator,
-    writer: anytype,
-    deco: DiffDecorations,
-) !usize {
-    return try writeDiffPrettyFormat(allocator, writer, difference.edits, deco);
-}
-
-/// Create a Patch from the Diff with the default PatchOptions.
-pub fn toPatch(difference: *const Diff, allocator: Allocator) OOM!Patch {
-    var the_patch: Patch = .default;
-    return the_patch.fromDiff(allocator, difference);
-}
-
-/// Create a Patch from the Diff with the provided PatchOptions.
-pub fn toPatchConfig(
-    difference: *const Diff,
-    allocator: Allocator,
-    cfg: PatchConfig,
-) OOM!Patch {
-    var the_patch: Patch = .init(cfg);
-    return the_patch.fromDiff(allocator, difference);
-}
-
-/// Write a Diff in a zdelta format.  Currently supported are
-/// formats `.a` and `.b`, see documentation for more details.
-pub fn toZDelta(
-    difference: *const Diff,
-    allocator: Allocator,
-    version: ZDeltaVersion,
-) ZDeltaError![]const u8 {
-    var out = ArrayList(u8).init(allocator);
-    defer out.deinit();
-    const writer = out.writer();
-    try writeZDeltaHeader(writer, version);
-    switch (version) {
-        .a => try writer.writeByte(zdelta_sep_a),
-        .b => try writer.writeByte(zdelta_sep_b),
-    }
-    for (difference.edits.items) |edit| {
-        switch (edit.operation) {
-            .insert => {
-                try writeZDeltaInsert(writer, edit.text, version);
-            },
-            .delete => {
-                try writeZDeltaCount(writer, edit.text.len, version, .delete);
-            },
-            .equal => {
-                try writeZDeltaCount(writer, edit.text.len, version, .equal);
-            },
-        }
-    }
-    try flushWriter(writer);
-    return out.toOwnedSlice();
-}
-
-/// Populate a Diff from a zdelta string and the before text.
-pub fn fromZDelta(
-    difference: *Diff,
-    allocator: Allocator,
-    before: []const u8,
-    zdelta: []const u8,
-) ZDeltaError!*Diff {
-    const parsed = try parseZDeltaHeader(zdelta);
-    var edits: DiffList = .empty;
-    errdefer deinitDiffList(allocator, &edits);
-    switch (parsed.version) {
-        .a => edits = try diffListFromZDeltaA(allocator, before, zdelta[parsed.body_start..]),
-        .b => edits = try diffListFromZDeltaB(allocator, before, zdelta[parsed.body_start..]),
-    }
-    if (difference.edits.items.len != 0) {
-        deinitDiffList(allocator, &difference.edits);
-    }
-    difference.edits = edits;
-    return difference;
-}
-
-///
-/// Compute and return the source text (all equalities and deletions).
-/// @return Source text.
-///
-pub fn beforeText(difference: Diff, allocator: Allocator) OOM![]const u8 {
-    return try diffBeforeText(allocator, difference.edits);
-}
-
-///
-/// Compute and return the destination text (all equalities and insertions).
-/// @return Destination text.
-///
-pub fn afterText(difference: Diff, allocator: Allocator) OOM![]const u8 {
-    return try diffAfterText(allocator, difference.edits);
-}
-
-/// loc is a location in text1, compute and return the equivalent location in
-/// text2.
-/// e.g. "The cat" vs "The big cat", 1->1, 5->8
-/// @param loc Location within text1.
-/// @return Location within text2.
-///
-pub fn index(difference: Diff, loc: usize) usize {
-    return diffIndex(difference.edits, loc);
-}
-
-/// Answers the number of bytes total be added or removed by
-/// applying this diff, in other words, the difference in length
-/// between the before and after texts.
-pub fn changeInBytes(difference: *const Diff) isize {
-    var count: isize = 0;
-    for (difference.edits.items) |edit| {
-        switch (edit.operation) {
-            .insert => count += u2i(edit.text.len),
-            .delete => count -= u2i(edit.text.len),
-            .equal => {},
-        }
-    }
-    return count;
-}
 
 //| Private
 
@@ -2834,8 +2845,6 @@ fn diffCommonOverlap(text1_in: []const u8, text2_in: []const u8) usize {
     }
     return best_idx;
 }
-
-const Diff = @This();
 
 inline fn boolInt(b: bool) u8 {
     return @intFromBool(b);

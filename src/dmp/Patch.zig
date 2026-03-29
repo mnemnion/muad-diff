@@ -3319,7 +3319,7 @@ const is_debug = builtin.mode == .Debug;
 
 const dmp = @import("../dmp.zig");
 const common = @import("common.zig");
-const Diff = @import("Diff.zig");
+const Diff = @import("Diff.zig").Diff;
 const Edit = Diff.Edit;
 const DiffConfig = Diff.DiffConfig;
 const DiffList = Diff.DiffList;
