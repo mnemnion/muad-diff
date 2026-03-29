@@ -11,7 +11,7 @@ const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const ArrayList = std.array_list.Managed;
 
-pub const Diff = @import("dmp/Diff.zig").Diff;
+pub const Diff = @import("dmp/diff.zig").Diff;
 pub const DiffContext = @import("diff_context.zig");
 pub const Patch = @import("dmp/Patch.zig");
 
