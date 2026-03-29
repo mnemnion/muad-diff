@@ -258,6 +258,20 @@ pub fn diff(
     return difference;
 }
 
+pub fn diffLines(
+    difference: *Diff,
+    allocator: Allocator,
+    before: []const u8,
+    after: []const u8,
+) OOM!*Diff {
+    if (difference.edits.items.len != 0) {
+        deinitDiffList(allocator, &difference.edits);
+        difference.edits = .empty;
+    }
+    difference.edits = try diffLine(difference.config, allocator, before, after, std.math.maxInit(u64));
+    return difference;
+}
+
 /// Reduce the number of edits by eliminating semantically trivial
 /// equalities.
 /// @return self.
@@ -1306,6 +1320,19 @@ fn diffLineMode(
     text2_in: []const u8,
     deadline: u64,
 ) OOM!DiffList {
+    var diffs = try diffLine(config, allocator, text1_in, text2_in, deadline);
+    errdefer deinitDiffList(allocator, &diffs);
+    return diffLineCleanup(&diffs, config, allocator, text1_in, text2_in, deadline);
+}
+
+/// Perform only the line-based diff speedup, returning what we get.
+fn diffLine(
+    config: DiffConfig,
+    allocator: std.mem.Allocator,
+    text1_in: []const u8,
+    text2_in: []const u8,
+    deadline: u64,
+) OOM!DiffList {
     const text_mode_config = text_mode: {
         var c = config;
         c.check_lines = false;
@@ -1329,7 +1356,22 @@ fn diffLineMode(
     // assertions, but that seems very brittle.  More investigation
     // is needed.
     try diffCleanupSemantic(allocator, &diffs);
+    return diffs;
+}
 
+fn diffLineCleanup(
+    diffs: *DiffList,
+    config: DiffConfig,
+    allocator: std.mem.Allocator,
+    text1_in: []const u8,
+    text2_in: []const u8,
+    deadline: u64,
+) OOM!DiffList {
+    const text_mode_config = text_mode: {
+        var c = config;
+        c.check_lines = false;
+        break :text_mode c;
+    };
     // Rediff any replacement blocks, this time character-by-character.
     // Add a dummy entry at the end, to trigger a final sub-diff if needed.
     try diffs.append(allocator, Edit.asBorrow(.equal, ""));
@@ -1397,7 +1439,7 @@ fn diffLineMode(
                     );
                     freeRangeDiffList(
                         allocator,
-                        &diffs,
+                        diffs,
                         run_start,
                         count_delete + count_insert,
                     );
@@ -1424,7 +1466,7 @@ fn diffLineMode(
 
     // TODO: calling this, here, breaks things.  This is itself a problem.
     // try diffCleanupSemantic(allocator, &diffs);
-    return diffs;
+    return diffs.*;
 }
 
 fn diffRebindToSourceTexts(
@@ -4197,7 +4239,7 @@ fn testDiffLineMode(
     try expectEqualDiff(diff_checked.items, diff_unchecked.items);
 }
 
-test "diffLineMode" {
+test diffLineMode {
     try testing.checkAllAllocationFailures(
         testing.allocator,
         testDiffLineMode,
