@@ -160,37 +160,35 @@ pub fn render(
             continue;
         }
 
-        const has_edit_before = hasAdjacentEditBefore(ctx, index);
-        const has_edit_after = hasAdjacentEditAfter(ctx, index);
+        const is_first = index == 0;
+        const is_last = index + 1 == ctx.items.items.len;
+        const keep_head = if (is_last) show_lines else if (is_first) 0 else show_lines;
+        const keep_tail = if (is_first) show_lines else if (is_last) 0 else show_lines;
 
-        if (has_edit_before and has_edit_after) {
-            const keep_head = show_lines;
-            const keep_tail = show_lines;
-            if (line_count <= keep_head + keep_tail) {
-                written += try writeEditLines(writer, deco, item.edit, null, null, &line_start);
-                continue;
-            }
+        if (line_count <= keep_head + keep_tail) {
+            written += try writeEditLines(writer, deco, item.edit, null, null, &line_start);
+            continue;
+        }
 
-            const tail_line_offset = line_count - keep_tail;
+        if (keep_head != 0) {
             const head_end = byteOffsetAfterLines(item.edit.text, keep_head);
-            const tail_start = byteOffsetAfterLines(item.edit.text, tail_line_offset);
             written += try writeEditLines(writer, deco, item.edit, 0, head_end, &line_start);
-            written += try writeElisionLine(writer, deco, item, tail_line_offset, &line_start);
-            written += try writeEditLines(writer, deco, item.edit, tail_start, null, &line_start);
-            continue;
         }
 
-        if (has_edit_after) {
-            const tail_line_offset = if (show_lines == 0) 0 else line_count - show_lines;
-            const tail_start = byteOffsetAfterLines(item.edit.text, tail_line_offset);
-            written += try writeElisionLine(writer, deco, item, tail_line_offset, &line_start);
-            written += try writeEditLines(writer, deco, item.edit, tail_start, null, &line_start);
-            continue;
+        const elision_line_offset = if (keep_head != 0 and keep_tail == 0)
+            keep_head
+        else
+            line_count - keep_tail;
+        if (is_last and keep_tail == 0) {
+            written += try writeEofLine(writer, &line_start);
+        } else {
+            written += try writeElisionLine(writer, deco, item, elision_line_offset, &line_start);
         }
 
-        const head_end = byteOffsetAfterLines(item.edit.text, show_lines);
-        written += try writeEditLines(writer, deco, item.edit, 0, head_end, &line_start);
-        written += try writeElisionLine(writer, deco, item, show_lines, &line_start);
+        if (keep_tail != 0) {
+            const tail_start = byteOffsetAfterLines(item.edit.text, line_count - keep_tail);
+            written += try writeEditLines(writer, deco, item.edit, tail_start, null, &line_start);
+        }
     }
 
     try flushWriter(writer);
@@ -240,23 +238,6 @@ fn appendSample(allocator: Allocator, ctx: *DiffContext, owned: bool) OOM!void {
     var item = try sampleContext(allocator, owned);
     errdefer item.deinit(allocator);
     try ctx.items.append(allocator, item);
-}
-
-fn hasAdjacentEditBefore(ctx: DiffContext, index: usize) bool {
-    var i = index;
-    while (i > 0) {
-        i -= 1;
-        if (ctx.items.items[i].edit.operation != .equal) return true;
-    }
-    return false;
-}
-
-fn hasAdjacentEditAfter(ctx: DiffContext, index: usize) bool {
-    var i = index + 1;
-    while (i < ctx.items.items.len) : (i += 1) {
-        if (ctx.items.items[i].edit.operation != .equal) return true;
-    }
-    return false;
 }
 
 fn countDisplayLines(text: []const u8) usize {
@@ -330,11 +311,16 @@ fn writeEditLines(
             written += try writeBlankGutter(writer);
             line_start.* = false;
         }
-        written += try writeDecoratedText(writer, deco, .{
-            .operation = edit.operation,
-            .owned = false,
-            .text = part.line,
-        });
+        const fragment_start = text_start + cursor;
+        const fragment_end = text_start + part.next;
+        written += try writeDecoratedSlice(
+            writer,
+            deco,
+            edit.operation,
+            edit.text,
+            fragment_start,
+            fragment_end,
+        );
         if (part.line.len != 0 and part.line[part.line.len - 1] == '\n') {
             line_start.* = true;
         }
@@ -344,26 +330,96 @@ fn writeEditLines(
 }
 
 fn writeDecoratedText(writer: anytype, deco: DiffDecorations, edit: Edit) !usize {
-    const allocator = std.heap.page_allocator;
-    const text = if (deco.pre_process) |lambda|
-        try lambda(allocator, edit)
-    else
-        edit.text;
-    defer {
-        if (deco.pre_process) |_|
-            allocator.free(text);
-    }
+    return dmp.writeDecoratedEdit(std.heap.page_allocator, writer, deco, edit);
+}
+
+fn writeDecoratedSlice(
+    writer: anytype,
+    deco: DiffDecorations,
+    operation: Edit.Operation,
+    full_text: []const u8,
+    fragment_start: usize,
+    fragment_end: usize,
+) !usize {
+    const fragment = full_text[fragment_start..fragment_end];
+    const markers: struct {
+        start: []const u8,
+        end: []const u8,
+        ws_start: []const u8,
+        ws_end: []const u8,
+    } = switch (operation) {
+        .delete => .{
+            .start = deco.delete_start,
+            .end = deco.delete_end,
+            .ws_start = deco.d_ws_start,
+            .ws_end = deco.d_ws_end,
+        },
+        .insert => .{
+            .start = deco.insert_start,
+            .end = deco.insert_end,
+            .ws_start = deco.i_ws_start,
+            .ws_end = deco.i_ws_end,
+        },
+        .equal => .{
+            .start = deco.equals_start,
+            .end = deco.equals_end,
+            .ws_start = "",
+            .ws_end = "",
+        },
+    };
 
     var written: usize = 0;
-    const markers: struct { start: []const u8, end: []const u8 } = switch (edit.operation) {
-        .delete => .{ .start = deco.delete_start, .end = deco.delete_end },
-        .insert => .{ .start = deco.insert_start, .end = deco.insert_end },
-        .equal => .{ .start = deco.equals_start, .end = deco.equals_end },
-    };
     written += try writeAllCounting(writer, markers.start);
-    written += try writeAllCounting(writer, text);
+
+    if (operation == .equal or markers.ws_start.len == 0) {
+        written += try writeProcessedSegment(writer, operation, deco, fragment);
+        written += try writeAllCounting(writer, markers.end);
+        return written;
+    }
+
+    const left_trimmed = std.mem.trimLeft(u8, full_text, &std.ascii.whitespace);
+    const leading_end = full_text.len - left_trimmed.len;
+    const middle = std.mem.trimRight(u8, left_trimmed, &std.ascii.whitespace);
+    const trailing_start = leading_end + middle.len;
+
+    if (fragment_start < leading_end) {
+        const ws_end = @min(fragment_end, leading_end);
+        written += try writeAllCounting(writer, markers.ws_start);
+        written += try writeProcessedSegment(writer, operation, deco, full_text[fragment_start..ws_end]);
+        written += try writeAllCounting(writer, markers.ws_end);
+    }
+
+    const middle_start = @max(fragment_start, leading_end);
+    const middle_end = @min(fragment_end, trailing_start);
+    if (middle_start < middle_end) {
+        written += try writeProcessedSegment(writer, operation, deco, full_text[middle_start..middle_end]);
+    }
+
+    if (trailing_start < fragment_end) {
+        const ws_start = @max(fragment_start, trailing_start);
+        written += try writeAllCounting(writer, markers.ws_start);
+        written += try writeProcessedSegment(writer, operation, deco, full_text[ws_start..fragment_end]);
+        written += try writeAllCounting(writer, markers.ws_end);
+    }
+
     written += try writeAllCounting(writer, markers.end);
     return written;
+}
+
+fn writeProcessedSegment(
+    writer: anytype,
+    operation: Edit.Operation,
+    deco: DiffDecorations,
+    text: []const u8,
+) !usize {
+    if (deco.pre_process) |lambda| {
+        const allocator = std.heap.page_allocator;
+        const processed = try lambda(allocator, Edit.asBorrow(operation, text));
+        defer allocator.free(processed);
+        return writeAllCounting(writer, processed);
+    }
+
+    return writeAllCounting(writer, text);
 }
 
 fn writeElisionLine(
@@ -390,6 +446,17 @@ fn writeElisionLine(
     written += try writeAllCounting(writer, ";");
     written += try writeDecoratedText(writer, deco, Edit.asBorrow(.insert, after_text));
     written += try writeAllCounting(writer, "\n");
+    line_start.* = true;
+    return written;
+}
+
+fn writeEofLine(writer: anytype, line_start: *bool) !usize {
+    var written: usize = 0;
+    if (!line_start.*) {
+        written += try writeAllCounting(writer, "\n");
+    }
+    written += try writeBlankGutter(writer);
+    written += try writeAllCounting(writer, "---[eof]---\n\n");
     line_start.* = true;
     return written;
 }
@@ -648,7 +715,7 @@ test "render truncates oversized trailing equal context away from last edit" {
     defer testing.allocator.free(rendered);
 
     try testing.expectEqualStrings(
-        "diff -- sample\n before\n one\n two\n ... 4;3\n",
+        "diff -- sample\n before\n one\n two\n ---[eof]---\n\n",
         rendered,
     );
 }
@@ -662,7 +729,7 @@ test "render truncates oversized equal-only diff from the leading side" {
     defer testing.allocator.free(rendered);
 
     try testing.expectEqualStrings(
-        "diff -- sample\n one\n two\n ... 3;3\n",
+        "diff -- sample\n one\n two\n three\n four\n",
         rendered,
     );
 }
@@ -694,7 +761,7 @@ test "render handles mid-line fragments without line normalization" {
     defer testing.allocator.free(rendered);
 
     try testing.expectEqualStrings(
-        "diff -- sample\n preMIDpost\n ... 2;2\n",
+        "diff -- sample\n preMIDpost\n ---[eof]---\n\n",
         rendered,
     );
 }
@@ -736,7 +803,7 @@ test "render elision decorates before and after line numbers independently" {
     defer testing.allocator.free(rendered);
 
     try testing.expectEqualStrings(
-        "diff -- sample\n one\n two\n ... <d>3</d>;<i>3</i>\n",
+        "diff -- sample\n one\n two\n three\n four\n",
         rendered,
     );
 }
@@ -761,6 +828,49 @@ test "render honors pre_process per emitted line" {
 
     try testing.expectEqualStrings(
         "diff -- sample\n ALPHA\n BETA",
+        rendered,
+    );
+}
+
+test "render decorates edit edge whitespace when configured" {
+    var ctx: DiffContext = .default;
+    defer ctx.deinit(testing.allocator);
+    try appendBorrowedContext(&ctx, .delete, "  gone\t");
+    try appendBorrowedContext(&ctx, .insert, "\tnew  ");
+
+    const rendered = try renderForTest(ctx, .{
+        .delete_start = "<d>",
+        .delete_end = "</d>",
+        .d_ws_start = "<dw>",
+        .d_ws_end = "</dw>",
+        .insert_start = "<i>",
+        .insert_end = "</i>",
+        .i_ws_start = "<iw>",
+        .i_ws_end = "</iw>",
+    }, 3);
+    defer testing.allocator.free(rendered);
+
+    try testing.expectEqualStrings(
+        "diff -- sample\n <d><dw>  </dw>gone<dw>\t</dw></d><i><iw>\t</iw>new<iw>  </iw></i>",
+        rendered,
+    );
+}
+
+test "render only backgrounds true edit-edge whitespace across multiple lines" {
+    var ctx: DiffContext = .default;
+    defer ctx.deinit(testing.allocator);
+    try appendBorrowedContext(&ctx, .insert, " head\n  body\n ");
+
+    const rendered = try renderForTest(ctx, .{
+        .insert_start = "<i>",
+        .insert_end = "</i>",
+        .i_ws_start = "<iw>",
+        .i_ws_end = "</iw>",
+    }, 3);
+    defer testing.allocator.free(rendered);
+
+    try testing.expectEqualStrings(
+        "diff -- sample\n <i><iw> </iw>head\n</i> <i>  body<iw>\n</iw></i> <i><iw> </iw></i>",
         rendered,
     );
 }

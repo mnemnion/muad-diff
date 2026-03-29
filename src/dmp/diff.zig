@@ -179,7 +179,11 @@ const CHAR_OFFSET = 32;
 pub const DiffDecorations = struct {
     delete_start: []const u8 = "",
     delete_end: []const u8 = "",
+    d_ws_start: []const u8 = "",
+    d_ws_end: []const u8 = "",
     insert_start: []const u8 = "",
+    i_ws_start: []const u8 = "",
+    i_ws_end: []const u8 = "",
     insert_end: []const u8 = "",
     equals_start: []const u8 = "",
     equals_end: []const u8 = "",
@@ -190,7 +194,11 @@ pub const DiffDecorations = struct {
     pub const xterm_classic: DiffDecorations = .{
         .delete_start = "\x1b[91m",
         .delete_end = "\x1b[m",
+        .d_ws_start = "\x1b[48;2;64;28;28m",
+        .d_ws_end = "\x1b[49m",
         .insert_start = "\x1b[92m",
+        .i_ws_start = "\x1b[48;2;28;64;28m",
+        .i_ws_end = "\x1b[49m",
         .insert_end = "\x1b[m",
     };
 };
@@ -2691,34 +2699,81 @@ fn writeDiffPrettyFormat(
 ) !usize {
     var written: usize = 0;
     for (diffs.items) |edit| {
-        const text = if (deco.pre_process) |lambda|
-            try lambda(allocator, edit)
-        else
-            edit.text;
-        defer {
-            if (deco.pre_process) |_|
-                allocator.free(text);
-        }
-        switch (edit.operation) {
-            .delete => {
-                //
-                written += try writer.write(deco.delete_start);
-                written += try writer.write(text);
-                written += try writer.write(deco.delete_end);
-            },
-            .insert => {
-                written += try writer.write(deco.insert_start);
-                written += try writer.write(text);
-                written += try writer.write(deco.insert_end);
-            },
-            .equal => {
-                written += try writer.write(deco.equals_start);
-                written += try writer.write(text);
-                written += try writer.write(deco.equals_end);
-            },
-        }
+        written += try writeDecoratedEdit(allocator, writer, deco, edit);
     }
     try flushWriter(writer);
+    return written;
+}
+
+pub fn writeDecoratedEdit(
+    allocator: Allocator,
+    writer: anytype,
+    deco: DiffDecorations,
+    edit: Edit,
+) !usize {
+    const text = if (deco.pre_process) |lambda|
+        try lambda(allocator, edit)
+    else
+        edit.text;
+    defer {
+        if (deco.pre_process) |_|
+            allocator.free(text);
+    }
+
+    const markers: struct {
+        start: []const u8,
+        end: []const u8,
+        ws_start: []const u8,
+        ws_end: []const u8,
+    } = switch (edit.operation) {
+        .delete => .{
+            .start = deco.delete_start,
+            .end = deco.delete_end,
+            .ws_start = deco.d_ws_start,
+            .ws_end = deco.d_ws_end,
+        },
+        .insert => .{
+            .start = deco.insert_start,
+            .end = deco.insert_end,
+            .ws_start = deco.i_ws_start,
+            .ws_end = deco.i_ws_end,
+        },
+        .equal => .{
+            .start = deco.equals_start,
+            .end = deco.equals_end,
+            .ws_start = "",
+            .ws_end = "",
+        },
+    };
+
+    var written: usize = 0;
+    written += try writer.write(markers.start);
+
+    if (markers.ws_start.len == 0 or edit.operation == .equal) {
+        written += try writer.write(text);
+        written += try writer.write(markers.end);
+        return written;
+    }
+
+    const left_trimmed = std.mem.trimLeft(u8, text, &std.ascii.whitespace);
+    const leading_len = text.len - left_trimmed.len;
+    if (leading_len != 0) {
+        written += try writer.write(markers.ws_start);
+        written += try writer.write(text[0..leading_len]);
+        written += try writer.write(markers.ws_end);
+    }
+
+    const fully_trimmed = std.mem.trimRight(u8, left_trimmed, &std.ascii.whitespace);
+    written += try writer.write(fully_trimmed);
+
+    const trailing_len = left_trimmed.len - fully_trimmed.len;
+    if (trailing_len != 0) {
+        written += try writer.write(markers.ws_start);
+        written += try writer.write(left_trimmed[fully_trimmed.len .. fully_trimmed.len + trailing_len]);
+        written += try writer.write(markers.ws_end);
+    }
+
+    written += try writer.write(markers.end);
     return written;
 }
 
@@ -4836,6 +4891,32 @@ test diffPrettyFormat {
     defer allocator.free(out_text);
     try testing.expectEqualStrings(
         "<+>A thing of</+><->Singular</-><=> beauty is </=><+>a </+><->en</-><=>joy</=><->ed</-><=> forever</=>",
+        out_text,
+    );
+}
+
+test "diffPrettyFormat decorates leading and trailing whitespace in edits" {
+    const allocator = testing.allocator;
+    var diffs: DiffList = .empty;
+    defer deinitDiffList(allocator, &diffs);
+
+    try diffs.append(allocator, Edit.asBorrow(.delete, "  gone\t"));
+    try diffs.append(allocator, Edit.asBorrow(.insert, "\tnew  "));
+
+    const out_text = try diffPrettyFormat(allocator, diffs, .{
+        .delete_start = "<d>",
+        .delete_end = "</d>",
+        .d_ws_start = "<dw>",
+        .d_ws_end = "</dw>",
+        .insert_start = "<i>",
+        .insert_end = "</i>",
+        .i_ws_start = "<iw>",
+        .i_ws_end = "</iw>",
+    });
+    defer allocator.free(out_text);
+
+    try testing.expectEqualStrings(
+        "<d><dw>  </dw>gone<dw>\t</dw></d><i><iw>\t</iw>new<iw>  </iw></i>",
         out_text,
     );
 }

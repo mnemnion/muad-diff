@@ -20,6 +20,7 @@ pub const DiffConfig = diff_mod.DiffConfig;
 pub const DiffDecorations = diff_mod.DiffDecorations;
 pub const ZDeltaVersion = diff_mod.ZDeltaVersion;
 pub const ZDeltaError = diff_mod.ZDeltaError;
+pub const writeDecoratedEdit = diff_mod.writeDecoratedEdit;
 pub const DiffContext = diff_context_mod;
 pub const Patch = @import("dmp/Patch.zig");
 
