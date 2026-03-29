@@ -3318,9 +3318,10 @@ const builtin = @import("builtin");
 const is_debug = builtin.mode == .Debug;
 
 const dmp = @import("../dmp.zig");
+const diff_mod = @import("diff.zig");
 const common = @import("common.zig");
 const Diff = dmp.Diff;
-const Edit = Diff.Edit;
-const DiffConfig = Diff.DiffConfig;
-const DiffList = Diff.DiffList;
+const Edit = dmp.Edit;
+const DiffConfig = dmp.DiffConfig;
+const DiffList = diff_mod.DiffList;
 const deinitDiffList = common.deinitDiffList;

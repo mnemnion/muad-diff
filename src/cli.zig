@@ -677,7 +677,7 @@ test "diff command prints a readable diff" {
 
     try std.testing.expectEqual(@as(u8, 0), result.exit_code);
     try std.testing.expect(std.mem.startsWith(u8, result.stdout, "diff -- before.txt\n"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "\n cart"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "\n ca{+r+}t"));
 }
 
 test "diff command reads files as positionals" {
@@ -703,7 +703,7 @@ test "diff command reads files as positionals" {
 
     try std.testing.expectEqual(@as(u8, 0), result.exit_code);
     try std.testing.expect(std.mem.startsWith(u8, result.stdout, "diff -- before.txt\n"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, " alphaβ"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, " alpha{+β+}"));
 }
 
 test "diff requires both file positionals" {
