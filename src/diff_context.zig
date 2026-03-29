@@ -252,5 +252,5 @@ const Allocator = std.mem.Allocator;
 const OOM = Allocator.Error;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 
-const Diff = @import("dmp/Diff.zig").Diff;
-const Edit = Diff.Edit;
+const dmp = @import("dmp.zig");
+const Edit = dmp.Edit;

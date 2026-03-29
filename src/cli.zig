@@ -35,7 +35,7 @@ const ZDeltaVersionArg = enum {
     b,
 };
 
-const plain_diff_decorations: dmp.Diff.DiffDecorations = .{
+const plain_diff_decorations: dmp.DiffDecorations = .{
     .delete_start = "[-",
     .delete_end = "-]",
     .insert_start = "{+",
@@ -517,8 +517,8 @@ fn runZDeltaEncode(
     _ = try diff.diff(allocator, before, after);
 
     const version = switch (res.args.version orelse .b) {
-        .a => dmp.Diff.ZDeltaVersion.a,
-        .b => dmp.Diff.ZDeltaVersion.b,
+        .a => dmp.ZDeltaVersion.a,
+        .b => dmp.ZDeltaVersion.b,
     };
     const encoded = try diff.toZDelta(allocator, version);
     defer allocator.free(encoded);

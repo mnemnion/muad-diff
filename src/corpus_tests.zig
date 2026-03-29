@@ -235,19 +235,19 @@ fn expectValidUtf8(text: []const u8) !void {
     }
 }
 
-fn expectDiffListUtf8(diffs: dmp.Diff.DiffList) !void {
+fn expectDiffListUtf8(diffs: DiffList) !void {
     for (diffs.items) |diff| {
         try expectValidUtf8(diff.text);
     }
 }
 
-fn expectPatchUtf8(patches: dmp.Patch.PatchList) !void {
+fn expectPatchUtf8(patches: PatchList) !void {
     for (patches.items) |patch| {
         try expectDiffListUtf8(patch.diffs);
     }
 }
 
-fn expectEqualDiff(expected: []const dmp.Diff.Edit, actual: []const dmp.Diff.Edit) !void {
+fn expectEqualDiff(expected: []const Edit, actual: []const Edit) !void {
     try testing.expectEqual(expected.len, actual.len);
 
     for (expected, actual) |expected_edit, actual_edit| {
@@ -256,7 +256,7 @@ fn expectEqualDiff(expected: []const dmp.Diff.Edit, actual: []const dmp.Diff.Edi
     }
 }
 
-fn expectPatchesEqual(expected: dmp.Patch.PatchList, actual: dmp.Patch.PatchList) !void {
+fn expectPatchesEqual(expected: PatchList, actual: PatchList) !void {
     try testing.expectEqual(expected.items.len, actual.items.len);
 
     for (expected.items, actual.items) |expected_patch, actual_patch| {
@@ -269,12 +269,12 @@ fn expectPatchesEqual(expected: dmp.Patch.PatchList, actual: dmp.Patch.PatchList
 }
 
 fn assertRevisionPairInvariant(
-    diff_config: dmp.Diff.DiffConfig,
-    patch_config: dmp.Patch.PatchConfig,
+    diff_config: DiffConfig,
+    patch_config: PatchConfig,
     before: RevisionFixture,
     after: RevisionFixture,
 ) !void {
-    var diff = dmp.Diff.init(diff_config);
+    var diff = Diff.init(diff_config);
     defer diff.deinit(testing.allocator);
     _ = try diff.diff(testing.allocator, before.body, after.body);
     try expectDiffListUtf8(diff.edits);
@@ -287,7 +287,7 @@ fn assertRevisionPairInvariant(
     defer testing.allocator.free(rebuilt_after);
     try testing.expectEqualStrings(after.body, rebuilt_after);
 
-    var patches = dmp.Patch.init(patch_config);
+    var patches = Patch.init(patch_config);
     defer patches.deinit(testing.allocator);
     _ = try patches.make(testing.allocator, before.body, &diff);
     try expectPatchUtf8(patches.hunks);
@@ -296,7 +296,7 @@ fn assertRevisionPairInvariant(
     defer testing.allocator.free(patch_text);
     try expectValidUtf8(patch_text);
 
-    var reparsed_patches: dmp.Patch = .default;
+    var reparsed_patches: Patch = .default;
     defer reparsed_patches.deinit(testing.allocator);
     _ = try reparsed_patches.fromTextPatch(testing.allocator, patch_text);
     try expectPatchUtf8(reparsed_patches.hunks);
@@ -375,14 +375,14 @@ test "corpus revision pairs satisfy diff and patch invariants" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const diff_config: dmp.Diff.DiffConfig = blk: {
-        var config: dmp.Diff.DiffConfig = .default;
+    const diff_config: DiffConfig = blk: {
+        var config: DiffConfig = .default;
         config.check_line_threshold = 1024 * 1024;
         config.check_lines = false;
         config.timeout = 0;
         break :blk config;
     };
-    const patch_config: dmp.Patch.PatchConfig = .default;
+    const patch_config: PatchConfig = .default;
 
     var fixtures = try loadCorpusFixtures(arena);
     defer fixtures.deinit();
@@ -405,14 +405,14 @@ test "corpus revision invariants (line mode)" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const diff_config: dmp.Diff.DiffConfig = blk: {
-        var config: dmp.Diff.DiffConfig = .default;
+    const diff_config: DiffConfig = blk: {
+        var config: DiffConfig = .default;
         config.check_line_threshold = 10;
         config.check_lines = true;
         config.timeout = 0;
         break :blk config;
     };
-    const patch_config: dmp.Patch.PatchConfig = .default;
+    const patch_config: PatchConfig = .default;
 
     var fixtures = try loadCorpusFixtures(arena);
     defer fixtures.deinit();
@@ -436,3 +436,11 @@ const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
 
 const dmp = @import("dmp.zig");
+const diff_mod = @import("dmp/diff.zig");
+const Diff = dmp.Diff;
+const Edit = dmp.Edit;
+const DiffConfig = dmp.DiffConfig;
+const DiffList = diff_mod.DiffList;
+const Patch = dmp.Patch;
+const PatchConfig = Patch.PatchConfig;
+const PatchList = Patch.PatchList;

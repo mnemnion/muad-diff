@@ -28,7 +28,7 @@
 const Module = @This();
 
 /// The configurable parameters for a Diff object.
-const DiffConfig = struct {
+pub const DiffConfig = struct {
     /// Number of milliseconds to map a diff before giving up (0 for infinity).
     timeout: u64,
     /// Cost of an empty edit operation in terms of edit characters.  Higher
@@ -52,12 +52,12 @@ const DiffConfig = struct {
     };
 };
 
-const ZDeltaVersion = enum {
+pub const ZDeltaVersion = enum {
     a,
     b,
 };
 
-const ZDeltaError = OOM || error{
+pub const ZDeltaError = OOM || error{
     BadZDeltaHeader,
     UnknownZDeltaVersion,
     BadZDeltaEscape,
@@ -68,7 +68,7 @@ const ZDeltaError = OOM || error{
 };
 
 /// A single edit of a diff: insertion, deletion, or neither.
-const Edit = struct {
+pub const Edit = struct {
     pub const Operation = enum {
         insert,
         delete,
@@ -154,7 +154,7 @@ const Edit = struct {
     }
 };
 
-const DiffList = ArrayListUnmanaged(Edit);
+pub const DiffList = ArrayListUnmanaged(Edit);
 
 const HalfMatchResult = struct {
     prefix_before: []const u8,
@@ -176,7 +176,7 @@ const CHAR_OFFSET = 32;
 /// This allows for tasks like proper HTML escaping.  Note that if
 /// the function is provided, all text returned will be freed, so
 /// it should always return a copy whether or not edits are needed.
-const DiffDecorations = struct {
+pub const DiffDecorations = struct {
     delete_start: []const u8 = "",
     delete_end: []const u8 = "",
     insert_start: []const u8 = "",
