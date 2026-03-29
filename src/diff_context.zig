@@ -79,9 +79,122 @@ pub fn copy(ctx: DiffContext, allocator: Allocator) OOM!DiffContext {
     };
 }
 
+pub fn fromDiff(allocator: Allocator, diff: dmp.Diff) OOM!DiffContext {
+    var ctx: DiffContext = .default;
+    errdefer ctx.deinit(allocator);
+
+    try ctx.items.ensureTotalCapacity(allocator, diff.edits.items.len);
+
+    var pre_line: u32 = 1;
+    var post_line: u32 = 1;
+    for (diff.edits.items) |edit| {
+        const newline_count = countNewlines(edit.text);
+        const line_delta: u32 = @intCast(newline_count);
+        const other_pre = anchorForeignLine(pre_line, edit.text);
+        const other_post = anchorForeignLine(post_line, edit.text);
+
+        switch (edit.operation) {
+            .equal => ctx.items.appendAssumeCapacity(.{
+                .edit = try edit.copy(allocator),
+                .pre_start = pre_line,
+                .pre_end = pre_line + line_delta,
+                .post_start = post_line,
+                .post_end = post_line + line_delta,
+            }),
+            .delete => ctx.items.appendAssumeCapacity(.{
+                .edit = try edit.copy(allocator),
+                .pre_start = pre_line,
+                .pre_end = pre_line + line_delta,
+                .post_start = other_post,
+                .post_end = other_post,
+            }),
+            .insert => ctx.items.appendAssumeCapacity(.{
+                .edit = try edit.copy(allocator),
+                .pre_start = other_pre,
+                .pre_end = other_pre,
+                .post_start = post_line,
+                .post_end = post_line + line_delta,
+            }),
+        }
+
+        switch (edit.operation) {
+            .equal => {
+                pre_line += line_delta;
+                post_line += line_delta;
+            },
+            .delete => pre_line += line_delta,
+            .insert => post_line += line_delta,
+        }
+    }
+
+    return ctx;
+}
+
 pub fn deinit(ctx: *DiffContext, allocator: Allocator) void {
     deinitEditContextList(allocator, &ctx.items);
     ctx.items = .empty;
+}
+
+pub fn render(
+    ctx: DiffContext,
+    writer: anytype,
+    deco: DiffDecorations,
+    name: []const u8,
+    show_lines: usize,
+) !usize {
+    var written: usize = 0;
+    var line_start = true;
+    written += try writeAllCounting(writer, "diff -- ");
+    written += try writeAllCounting(writer, name);
+    written += try writeAllCounting(writer, "\n");
+
+    for (ctx.items.items, 0..) |item, index| {
+        if (item.edit.operation != .equal) {
+            written += try writeEditLines(writer, deco, item.edit, null, null, &line_start);
+            continue;
+        }
+
+        const line_count = countDisplayLines(item.edit.text);
+        if (line_count == 0 or line_count <= show_lines) {
+            written += try writeEditLines(writer, deco, item.edit, null, null, &line_start);
+            continue;
+        }
+
+        const has_edit_before = hasAdjacentEditBefore(ctx, index);
+        const has_edit_after = hasAdjacentEditAfter(ctx, index);
+
+        if (has_edit_before and has_edit_after) {
+            const keep_head = show_lines;
+            const keep_tail = show_lines;
+            if (line_count <= keep_head + keep_tail) {
+                written += try writeEditLines(writer, deco, item.edit, null, null, &line_start);
+                continue;
+            }
+
+            const tail_line_offset = line_count - keep_tail;
+            const head_end = byteOffsetAfterLines(item.edit.text, keep_head);
+            const tail_start = byteOffsetAfterLines(item.edit.text, tail_line_offset);
+            written += try writeEditLines(writer, deco, item.edit, 0, head_end, &line_start);
+            written += try writeElisionLine(writer, deco, item, tail_line_offset, &line_start);
+            written += try writeEditLines(writer, deco, item.edit, tail_start, null, &line_start);
+            continue;
+        }
+
+        if (has_edit_after) {
+            const tail_line_offset = if (show_lines == 0) 0 else line_count - show_lines;
+            const tail_start = byteOffsetAfterLines(item.edit.text, tail_line_offset);
+            written += try writeElisionLine(writer, deco, item, tail_line_offset, &line_start);
+            written += try writeEditLines(writer, deco, item.edit, tail_start, null, &line_start);
+            continue;
+        }
+
+        const head_end = byteOffsetAfterLines(item.edit.text, show_lines);
+        written += try writeEditLines(writer, deco, item.edit, 0, head_end, &line_start);
+        written += try writeElisionLine(writer, deco, item, show_lines, &line_start);
+    }
+
+    try flushWriter(writer);
+    return written;
 }
 
 //| Private
@@ -127,6 +240,187 @@ fn appendSample(allocator: Allocator, ctx: *DiffContext, owned: bool) OOM!void {
     var item = try sampleContext(allocator, owned);
     errdefer item.deinit(allocator);
     try ctx.items.append(allocator, item);
+}
+
+fn hasAdjacentEditBefore(ctx: DiffContext, index: usize) bool {
+    var i = index;
+    while (i > 0) {
+        i -= 1;
+        if (ctx.items.items[i].edit.operation != .equal) return true;
+    }
+    return false;
+}
+
+fn hasAdjacentEditAfter(ctx: DiffContext, index: usize) bool {
+    var i = index + 1;
+    while (i < ctx.items.items.len) : (i += 1) {
+        if (ctx.items.items[i].edit.operation != .equal) return true;
+    }
+    return false;
+}
+
+fn countDisplayLines(text: []const u8) usize {
+    if (text.len == 0) return 0;
+
+    var count: usize = 0;
+    for (text) |c| {
+        if (c == '\n') count += 1;
+    }
+    if (text[text.len - 1] != '\n') count += 1;
+    return count;
+}
+
+fn countNewlines(text: []const u8) usize {
+    var count: usize = 0;
+    for (text) |c| {
+        if (c == '\n') count += 1;
+    }
+    return count;
+}
+
+fn anchorForeignLine(current_line: u32, text: []const u8) u32 {
+    if (text.len != 0 and text[0] == '\n' and current_line > 0) {
+        return current_line - 1;
+    }
+    return current_line;
+}
+
+fn nextDisplayLine(text: []const u8, cursor: usize) ?struct { line: []const u8, next: usize } {
+    if (cursor >= text.len) return null;
+
+    const suffix = text[cursor..];
+    if (std.mem.indexOfScalar(u8, suffix, '\n')) |nl| {
+        const end = cursor + nl + 1;
+        return .{ .line = text[cursor..end], .next = end };
+    }
+
+    return .{ .line = text[cursor..], .next = text.len };
+}
+
+fn byteOffsetAfterLines(text: []const u8, lines: usize) usize {
+    if (lines == 0) return 0;
+    if (text.len == 0) return 0;
+
+    var cursor: usize = 0;
+    var remaining = lines;
+    while (remaining > 0) {
+        const part = nextDisplayLine(text, cursor) orelse return text.len;
+        cursor = part.next;
+        remaining -= 1;
+    }
+    return cursor;
+}
+
+fn writeEditLines(
+    writer: anytype,
+    deco: DiffDecorations,
+    edit: Edit,
+    start_offset_opt: ?usize,
+    end_offset_opt: ?usize,
+    line_start: *bool,
+) !usize {
+    const text_start = start_offset_opt orelse 0;
+    const text_end = end_offset_opt orelse edit.text.len;
+    const text = edit.text[text_start..text_end];
+
+    var written: usize = 0;
+    var cursor: usize = 0;
+    while (nextDisplayLine(text, cursor)) |part| {
+        if (line_start.*) {
+            written += try writeBlankGutter(writer);
+            line_start.* = false;
+        }
+        written += try writeDecoratedText(writer, deco, .{
+            .operation = edit.operation,
+            .owned = false,
+            .text = part.line,
+        });
+        if (part.line.len != 0 and part.line[part.line.len - 1] == '\n') {
+            line_start.* = true;
+        }
+        cursor = part.next;
+    }
+    return written;
+}
+
+fn writeDecoratedText(writer: anytype, deco: DiffDecorations, edit: Edit) !usize {
+    const allocator = std.heap.page_allocator;
+    const text = if (deco.pre_process) |lambda|
+        try lambda(allocator, edit)
+    else
+        edit.text;
+    defer {
+        if (deco.pre_process) |_|
+            allocator.free(text);
+    }
+
+    var written: usize = 0;
+    const markers: struct { start: []const u8, end: []const u8 } = switch (edit.operation) {
+        .delete => .{ .start = deco.delete_start, .end = deco.delete_end },
+        .insert => .{ .start = deco.insert_start, .end = deco.insert_end },
+        .equal => .{ .start = deco.equals_start, .end = deco.equals_end },
+    };
+    written += try writeAllCounting(writer, markers.start);
+    written += try writeAllCounting(writer, text);
+    written += try writeAllCounting(writer, markers.end);
+    return written;
+}
+
+fn writeElisionLine(
+    writer: anytype,
+    deco: DiffDecorations,
+    item: EditContext,
+    line_offset: usize,
+    line_start: *bool,
+) !usize {
+    const line_no = lineNumbersAtOffset(item, line_offset);
+    var before_buf: [std.fmt.count("{d}", .{std.math.maxInt(u32)})]u8 = undefined;
+    const before_text = try std.fmt.bufPrint(&before_buf, "{d}", .{line_no.pre});
+    var after_buf: [std.fmt.count("{d}", .{std.math.maxInt(u32)})]u8 = undefined;
+    const after_text = try std.fmt.bufPrint(&after_buf, "{d}", .{line_no.post});
+
+    var written: usize = 0;
+    if (!line_start.*) {
+        written += try writeAllCounting(writer, "\n");
+    }
+    written += try writeBlankGutter(writer);
+    written += try writeAllCounting(writer, "...");
+    written += try writeAllCounting(writer, " ");
+    written += try writeDecoratedText(writer, deco, Edit.asBorrow(.delete, before_text));
+    written += try writeAllCounting(writer, ";");
+    written += try writeDecoratedText(writer, deco, Edit.asBorrow(.insert, after_text));
+    written += try writeAllCounting(writer, "\n");
+    line_start.* = true;
+    return written;
+}
+
+fn lineNumbersAtOffset(item: EditContext, line_offset: usize) struct { pre: u32, post: u32 } {
+    const offset: u32 = @intCast(line_offset);
+    return .{
+        .pre = item.pre_start + offset,
+        .post = item.post_start + offset,
+    };
+}
+
+fn writeBlankGutter(writer: anytype) !usize {
+    return writeByteCounting(writer, ' ');
+}
+
+fn flushWriter(writer: anytype) !void {
+    if (@hasDecl(@TypeOf(writer), "flush")) {
+        var w = writer;
+        try w.flush();
+    }
+}
+
+fn writeAllCounting(writer: anytype, text: []const u8) !usize {
+    try writer.writeAll(text);
+    return text.len;
+}
+
+fn writeByteCounting(writer: anytype, byte: u8) !usize {
+    try writer.writeByte(byte);
+    return 1;
 }
 
 test "default starts empty" {
@@ -244,6 +538,233 @@ test "line metadata stores documented span semantics" {
     try testing.expectEqual(start_of_file_insert.pre_start, start_of_file_insert.pre_end);
 }
 
+fn appendBorrowedContext(
+    ctx: *DiffContext,
+    operation: Edit.Operation,
+    text: []const u8,
+) !void {
+    var pre_line: u32 = 1;
+    var post_line: u32 = 1;
+    for (ctx.items.items) |item| {
+        const line_delta: u32 = @intCast(countNewlines(item.edit.text));
+        switch (item.edit.operation) {
+            .equal => {
+                pre_line += line_delta;
+                post_line += line_delta;
+            },
+            .delete => pre_line += line_delta,
+            .insert => post_line += line_delta,
+        }
+    }
+
+    const line_delta: u32 = @intCast(countNewlines(text));
+    const other_pre = anchorForeignLine(pre_line, text);
+    const other_post = anchorForeignLine(post_line, text);
+    try ctx.items.append(testing.allocator, .{
+        .edit = Edit.asBorrow(operation, text),
+        .pre_start = switch (operation) {
+            .insert => other_pre,
+            .delete, .equal => pre_line,
+        },
+        .pre_end = switch (operation) {
+            .insert => other_pre,
+            .delete, .equal => pre_line + line_delta,
+        },
+        .post_start = switch (operation) {
+            .delete => other_post,
+            .insert, .equal => post_line,
+        },
+        .post_end = switch (operation) {
+            .delete => other_post,
+            .insert, .equal => post_line + line_delta,
+        },
+    });
+}
+
+fn renderForTest(
+    ctx: DiffContext,
+    deco: DiffDecorations,
+    show_lines: usize,
+) ![]u8 {
+    var out = std.array_list.Managed(u8).init(testing.allocator);
+    errdefer out.deinit();
+    const bytes_written = try ctx.render(out.writer(), deco, "sample", show_lines);
+    try testing.expectEqual(bytes_written, out.items.len);
+    return out.toOwnedSlice();
+}
+
+test "render outputs short equal lines in full" {
+    var ctx: DiffContext = .default;
+    defer ctx.deinit(testing.allocator);
+    try appendBorrowedContext(&ctx, .equal, "alpha\nbeta\n");
+
+    const rendered = try renderForTest(ctx, .{}, 2);
+    defer testing.allocator.free(rendered);
+
+    try testing.expectEqualStrings(
+        "diff -- sample\n alpha\n beta\n",
+        rendered,
+    );
+}
+
+test "render truncates oversized middle equal context" {
+    var ctx: DiffContext = .default;
+    defer ctx.deinit(testing.allocator);
+    try appendBorrowedContext(&ctx, .delete, "before\n");
+    try appendBorrowedContext(&ctx, .equal, "one\ntwo\nthree\nfour\nfive\n");
+    try appendBorrowedContext(&ctx, .insert, "after\n");
+
+    const rendered = try renderForTest(ctx, .{}, 2);
+    defer testing.allocator.free(rendered);
+
+    try testing.expectEqualStrings(
+        "diff -- sample\n before\n one\n two\n ... 5;4\n four\n five\n after\n",
+        rendered,
+    );
+}
+
+test "render truncates oversized leading equal context toward first edit" {
+    var ctx: DiffContext = .default;
+    defer ctx.deinit(testing.allocator);
+    try appendBorrowedContext(&ctx, .equal, "one\ntwo\nthree\nfour\n");
+    try appendBorrowedContext(&ctx, .insert, "after\n");
+
+    const rendered = try renderForTest(ctx, .{}, 2);
+    defer testing.allocator.free(rendered);
+
+    try testing.expectEqualStrings(
+        "diff -- sample\n ... 3;3\n three\n four\n after\n",
+        rendered,
+    );
+}
+
+test "render truncates oversized trailing equal context away from last edit" {
+    var ctx: DiffContext = .default;
+    defer ctx.deinit(testing.allocator);
+    try appendBorrowedContext(&ctx, .delete, "before\n");
+    try appendBorrowedContext(&ctx, .equal, "one\ntwo\nthree\nfour\n");
+
+    const rendered = try renderForTest(ctx, .{}, 2);
+    defer testing.allocator.free(rendered);
+
+    try testing.expectEqualStrings(
+        "diff -- sample\n before\n one\n two\n ... 4;3\n",
+        rendered,
+    );
+}
+
+test "render truncates oversized equal-only diff from the leading side" {
+    var ctx: DiffContext = .default;
+    defer ctx.deinit(testing.allocator);
+    try appendBorrowedContext(&ctx, .equal, "one\ntwo\nthree\nfour\n");
+
+    const rendered = try renderForTest(ctx, .{}, 2);
+    defer testing.allocator.free(rendered);
+
+    try testing.expectEqualStrings(
+        "diff -- sample\n one\n two\n ... 3;3\n",
+        rendered,
+    );
+}
+
+test "render with zero context emits only separators for truncated equals" {
+    var ctx: DiffContext = .default;
+    defer ctx.deinit(testing.allocator);
+    try appendBorrowedContext(&ctx, .delete, "before\n");
+    try appendBorrowedContext(&ctx, .equal, "one\ntwo\n");
+    try appendBorrowedContext(&ctx, .insert, "after\n");
+
+    const rendered = try renderForTest(ctx, .{}, 0);
+    defer testing.allocator.free(rendered);
+
+    try testing.expectEqualStrings(
+        "diff -- sample\n before\n ... 4;3\n after\n",
+        rendered,
+    );
+}
+
+test "render handles mid-line fragments without line normalization" {
+    var ctx: DiffContext = .default;
+    defer ctx.deinit(testing.allocator);
+    try appendBorrowedContext(&ctx, .equal, "pre");
+    try appendBorrowedContext(&ctx, .insert, "MID");
+    try appendBorrowedContext(&ctx, .equal, "post\nnext");
+
+    const rendered = try renderForTest(ctx, .{}, 1);
+    defer testing.allocator.free(rendered);
+
+    try testing.expectEqualStrings(
+        "diff -- sample\n preMIDpost\n ... 2;2\n",
+        rendered,
+    );
+}
+
+test "render decorations wrap only the line body" {
+    var ctx: DiffContext = .default;
+    defer ctx.deinit(testing.allocator);
+    try appendBorrowedContext(&ctx, .equal, "same\n");
+    try appendBorrowedContext(&ctx, .delete, "gone\n");
+    try appendBorrowedContext(&ctx, .insert, "new\n");
+
+    const rendered = try renderForTest(ctx, .{
+        .equals_start = "<e>",
+        .equals_end = "</e>",
+        .delete_start = "<d>",
+        .delete_end = "</d>",
+        .insert_start = "<i>",
+        .insert_end = "</i>",
+    }, 2);
+    defer testing.allocator.free(rendered);
+
+    try testing.expectEqualStrings(
+        "diff -- sample\n <e>same\n</e> <d>gone\n</d> <i>new\n</i>",
+        rendered,
+    );
+}
+
+test "render elision decorates before and after line numbers independently" {
+    var ctx: DiffContext = .default;
+    defer ctx.deinit(testing.allocator);
+    try appendBorrowedContext(&ctx, .equal, "one\ntwo\nthree\nfour\n");
+
+    const rendered = try renderForTest(ctx, .{
+        .delete_start = "<d>",
+        .delete_end = "</d>",
+        .insert_start = "<i>",
+        .insert_end = "</i>",
+    }, 2);
+    defer testing.allocator.free(rendered);
+
+    try testing.expectEqualStrings(
+        "diff -- sample\n one\n two\n ... <d>3</d>;<i>3</i>\n",
+        rendered,
+    );
+}
+
+fn preProcessUpper(allocator: Allocator, edit: Edit) OOM![]const u8 {
+    const out = try allocator.dupe(u8, edit.text);
+    for (out) |*c| {
+        c.* = std.ascii.toUpper(c.*);
+    }
+    return out;
+}
+
+test "render honors pre_process per emitted line" {
+    var ctx: DiffContext = .default;
+    defer ctx.deinit(testing.allocator);
+    try appendBorrowedContext(&ctx, .equal, "alpha\nbeta");
+
+    const rendered = try renderForTest(ctx, .{
+        .pre_process = preProcessUpper,
+    }, 3);
+    defer testing.allocator.free(rendered);
+
+    try testing.expectEqualStrings(
+        "diff -- sample\n ALPHA\n BETA",
+        rendered,
+    );
+}
+
 const DiffContext = @This();
 
 const std = @import("std");
@@ -254,3 +775,4 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 
 const dmp = @import("dmp.zig");
 const Edit = dmp.Edit;
+const DiffDecorations = dmp.DiffDecorations;

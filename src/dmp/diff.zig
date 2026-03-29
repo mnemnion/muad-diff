@@ -196,6 +196,7 @@ pub const DiffDecorations = struct {
 };
 
 pub const Diff = struct {
+    // TODO: None of these belong here. Remove.
     pub const DiffConfig = Module.DiffConfig;
     pub const ZDeltaVersion = Module.ZDeltaVersion;
     pub const ZDeltaError = Module.ZDeltaError;
