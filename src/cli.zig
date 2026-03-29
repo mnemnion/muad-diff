@@ -72,10 +72,9 @@ const patch_parsers = .{
 };
 
 const patch_params = clap.parseParamsComptime(
-    \\-h, --help         Display this help and exit.
-    \\    --legacy       Emit legacy unidiff-compatible patch text.
-    \\<FILE>             Before file.
-    \\<FILE>             After file.
+    \\-h, --help  Display this help and exit.
+    \\<FILE>      Before file.
+    \\<FILE>      After file.
     \\
 );
 
@@ -432,11 +431,7 @@ fn runPatch(
     defer patch.deinit(allocator);
     _ = try patch.fromTexts(allocator, before, after);
 
-    if (res.args.legacy != 0) {
-        try patch.writeTextPatchLegacy(stdout_writer);
-    } else {
-        try patch.writeTextPatch(stdout_writer);
-    }
+    try patch.writeTextPatch(stdout_writer);
     return 0;
 }
 
@@ -742,7 +737,7 @@ test "invalid cleanup value is reported" {
     try std.testing.expect(std.mem.containsAtLeast(u8, result.stderr, 1, "--cleanup"));
 }
 
-test "patch supports default and legacy text" {
+test "patch emits patch text" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -755,26 +750,16 @@ test "patch supports default and legacy text" {
     const after_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/after.txt", .{tmp.sub_path});
     defer allocator.free(after_path);
 
-    var modern = try runForTesting(
+    var result = try runForTesting(
         allocator,
         &.{ "muad-diff", "patch", before_path, after_path },
         "",
         false,
     );
-    defer modern.deinit(allocator);
+    defer result.deinit(allocator);
 
-    var legacy = try runForTesting(
-        allocator,
-        &.{ "muad-diff", "patch", before_path, after_path, "--legacy" },
-        "",
-        false,
-    );
-    defer legacy.deinit(allocator);
-
-    try std.testing.expectEqual(@as(u8, 0), modern.exit_code);
-    try std.testing.expectEqual(@as(u8, 0), legacy.exit_code);
-    try std.testing.expect(std.mem.containsAtLeast(u8, modern.stdout, 1, "λη"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, legacy.stdout, 1, "%"));
+    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "λη"));
 }
 
 test "apply returns partial-apply exit code" {

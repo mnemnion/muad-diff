@@ -70,57 +70,7 @@ pub const Hunk = struct {
         deinitDiffList(allocator, &patch.diffs);
     }
 
-    /// Emit patch hunk in Unidiff format, as specified here:
-    /// https://github.com/google/diff-match-patch/wiki/Unidiff
-    /// This is similar to GNU Unidiff format, but not identical.
-    /// Header: @@ -382,8 +481,9 @@
-    /// Indices are printed as 1-based, not 0-based.
-    /// @return The GNU diff string.
-    pub fn asTextLegacy(patch: Hunk, allocator: Allocator) ![]const u8 {
-        var text_array = ArrayList(u8).init(allocator);
-        defer text_array.deinit();
-        const writer = text_array.writer();
-        try patch.writeTextLegacy(writer);
-        return text_array.toOwnedSlice();
-    }
-
     const format = std.fmt.format;
-
-    /// Stream textual patch representation to Writer.  See `asTextLegacy`
-    /// for more information.
-    pub fn writeTextLegacy(patch: Hunk, writer: anytype) !void {
-        // Write header.
-        _ = try writer.write(PATCH_HEAD);
-        // Stream coordinates
-        if (patch.length1 == 0) {
-            try format(writer, "{d},0", .{patch.start1});
-        } else if (patch.length1 == 1) {
-            try format(writer, "{d}", .{patch.start1 + 1});
-        } else {
-            try format(writer, "{d},{d}", .{ patch.start1 + 1, patch.length1 });
-        }
-        _ = try writer.write(" +");
-        if (patch.length2 == 0) {
-            try std.fmt.format(writer, "{d},0", .{patch.start2});
-        } else if (patch.length2 == 1) {
-            _ = try format(writer, "{d}", .{patch.start2 + 1});
-        } else {
-            try format(writer, "{d},{d}", .{ patch.start2 + 1, patch.length2 });
-        }
-        _ = try writer.write(PATCH_TAIL);
-        // Escape the body of the patch with %xx notation.
-        for (patch.diffs.items) |edit| {
-            switch (edit.operation) {
-                .insert => try writer.writeByte('+'),
-                .delete => try writer.writeByte('-'),
-                .equal => try writer.writeByte(' '),
-            }
-            _ = try writeUriEncoded(writer, edit.text);
-            try writer.writeByte('\n');
-        }
-        try flushWriter(writer);
-        return;
-    }
 
     pub fn asText(patch: Hunk, allocator: Allocator) ![]const u8 {
         var text_array = ArrayList(u8).init(allocator);
@@ -335,20 +285,6 @@ pub fn toTextPatch(self: Patch, allocator: Allocator) error{OutOfMemory}![]const
 /// Stream a `PatchList` to the provided Writer.
 pub fn writeTextPatch(self: Patch, writer: anytype) !void {
     try writePatch(writer, self.hunks);
-}
-
-/// Take a list of patches and return a textual representation.
-/// This closely follows the legacy Unidiff format described here:
-/// https://github.com/google/diff-match-patch/wiki/Unidiff
-/// Prefer `toTextPatch` unless you need the compatibility this
-/// provides.
-pub fn toTextPatchLegacy(self: Patch, allocator: Allocator) error{OutOfMemory}![]const u8 {
-    return try patchListToTextLegacy(allocator, self.hunks);
-}
-
-/// Stream a `PatchList` to the provided Writer.
-pub fn writeTextPatchLegacy(self: Patch, writer: anytype) !void {
-    try writePatchLegacy(writer, self.hunks);
 }
 
 //| Private
@@ -1518,25 +1454,6 @@ fn writePatch(writer: anytype, patches: PatchList) !void {
     try flushWriter(writer);
 }
 
-/// Take a list of patches and return a textual representation.
-/// @param patches List of Patch objects.
-/// @return Text representation of patches.
-fn patchListToTextLegacy(allocator: Allocator, patches: PatchList) error{OutOfMemory}![]const u8 {
-    var text_array = ArrayList(u8).init(allocator);
-    defer text_array.deinit();
-    const writer = text_array.writer();
-    try writePatchLegacy(writer, patches);
-    return text_array.toOwnedSlice();
-}
-
-/// Stream a `PatchList` to the provided Writer.
-fn writePatchLegacy(writer: anytype, patches: PatchList) !void {
-    for (patches.items) |hunk| {
-        try hunk.writeTextLegacy(writer);
-    }
-    try flushWriter(writer);
-}
-
 fn flushWriter(writer: anytype) !void {
     if (@hasDecl(@TypeOf(writer), "flush")) {
         var w = writer;
@@ -1796,7 +1713,7 @@ fn writeEscaped(writer: anytype, text: []const u8) !usize {
     while (cursor < text.len) : (cursor += 1) {
         const byte = text[cursor];
         const should_escape = byte < 0x20 or switch (byte) {
-            '+', '-', '=', '%' => true,
+            '+', '-', '=', '%', '@' => true,
             else => false,
         };
 
@@ -1983,10 +1900,12 @@ test "writeEscaped" {
         .{ "-", "%2D" },
         .{ "=", "%3D" },
         .{ "%", "%25" },
+        .{ "@", "%40" },
         .{ "\x00", "%00" },
         .{ "\x1F", "%1F" },
         .{ "\n", "%0A" },
         .{ "+-=%\nabc", "%2B%2D%3D%25%0Aabc" },
+        .{ "@@ -1,3 +1,3 @@", "%40%40 %2D1,3 %2B1,3 %40%40" },
         .{ "a\tb\x01c", "a%09b%01c" },
     };
     for (cases) |case| {
@@ -2001,7 +1920,7 @@ fn testPatchWriteTextEscapesSpecialBodyChars(allocator: Allocator) !void {
         .length1 = 10,
         .length2 = 10,
         .diffs = try sliceToDiffList(allocator, &.{
-            .{ .operation = .equal, .owned = false, .text = "+-=%\nabc" },
+            .{ .operation = .equal, .owned = false, .text = "+-=@%\nabc" },
         }),
     };
     defer hunk.deinit(allocator);
@@ -2010,7 +1929,7 @@ fn testPatchWriteTextEscapesSpecialBodyChars(allocator: Allocator) !void {
     defer text.deinit();
     try hunk.writeText(text.writer());
     try testing.expectEqualStrings(
-        "@@ -1,10 +1,10 @@\n %2B%2D%3D%25%0Aabc\n",
+        "@@ -1,10 +1,10 @@\n %2B%2D%3D%40%25%0Aabc\n",
         text.items,
     );
 }
@@ -2025,13 +1944,44 @@ fn testPatchFromTextDecodesEscapedBodyChars(allocator: Allocator) !void {
 
     _ = try patch.fromTextPatch(
         allocator,
-        "@@ -1,10 +1,10 @@\n %2B%2D%3D%25%0Aabc\n",
+        "@@ -1,10 +1,10 @@\n %2B%2D%3D%40%25%0Aabc\n",
     );
     try testing.expectEqual(@as(usize, 1), patch.hunks.items.len);
     try testing.expectEqual(@as(usize, 1), patch.hunks.items[0].diffs.items.len);
     const edit = patch.hunks.items[0].diffs.items[0];
     try testing.expectEqual(Edit.Operation.equal, edit.operation);
-    try testing.expectEqualStrings("+-=%\nabc", edit.text);
+    try testing.expectEqualStrings("+-=@%\nabc", edit.text);
+}
+
+fn testPatchWriteTextEscapesPatchHeaderPayload(allocator: Allocator) !void {
+    var hunk: Hunk = .{
+        .start1 = 0,
+        .start2 = 0,
+        .length1 = 16,
+        .length2 = 16,
+        .diffs = try sliceToDiffList(allocator, &.{
+            .{ .operation = .equal, .owned = false, .text = "\n@@ -1,3 +1,3 @@" },
+        }),
+    };
+    defer hunk.deinit(allocator);
+
+    const patch_text = try hunk.asText(allocator);
+    defer allocator.free(patch_text);
+    try testing.expectEqualStrings(
+        "@@ -1,16 +1,16 @@\n %0A%40%40 %2D1,3 %2B1,3 %40%40\n",
+        patch_text,
+    );
+
+    var patch: Patch = .default;
+    defer patch.deinit(allocator);
+    _ = try patch.fromTextPatch(allocator, patch_text);
+    try testing.expectEqual(@as(usize, 1), patch.hunks.items.len);
+    try testing.expectEqual(@as(usize, 1), patch.hunks.items[0].diffs.items.len);
+    try testing.expectEqualStrings("\n@@ -1,3 +1,3 @@", patch.hunks.items[0].diffs.items[0].text);
+}
+
+test "patch writeText escapes patch header payload" {
+    try testPatchWriteTextEscapesPatchHeaderPayload(testing.allocator);
 }
 
 test "patch from text decodes escaped body chars" {
@@ -2449,38 +2399,6 @@ test matchMain {
 }
 
 fn testPatchToText(allocator: Allocator) !void {
-    //
-    var p: Hunk = Hunk{
-        .start1 = 20,
-        .start2 = 21,
-        .length1 = 18,
-        .length2 = 17,
-        .diffs = try sliceToDiffList(allocator, &.{
-            .{ .operation = .equal, .owned = false, .text = "jump" },
-            .{ .operation = .delete, .owned = false, .text = "s" },
-            .{ .operation = .insert, .owned = false, .text = "ed" },
-            .{ .operation = .equal, .owned = false, .text = " over " },
-            .{ .operation = .delete, .owned = false, .text = "the" },
-            .{ .operation = .insert, .owned = false, .text = "a" },
-            .{ .operation = .equal, .owned = false, .text = "\nlaz" },
-        }),
-    };
-    defer p.deinit(allocator);
-    const strp = "@@ -21,18 +22,17 @@\n jump\n-s\n+ed\n  over \n-the\n+a\n %0Alaz\n";
-    const patch_str = try p.asTextLegacy(allocator);
-    defer allocator.free(patch_str);
-    try testing.expectEqualStrings(strp, patch_str);
-}
-
-test "patch to text" {
-    try std.testing.checkAllAllocationFailures(
-        testing.allocator,
-        testPatchToText,
-        .{},
-    );
-}
-
-fn testPatchToTextModern(allocator: Allocator) !void {
     var p: Hunk = Hunk{
         .start1 = 20,
         .start2 = 21,
@@ -2503,8 +2421,8 @@ fn testPatchToTextModern(allocator: Allocator) !void {
     try testing.expectEqualStrings(strp, patch_str);
 }
 
-test "patch to text modern" {
-    try testPatchToTextModern(testing.allocator);
+test "patch to text" {
+    try std.testing.checkAllAllocationFailures(testing.allocator, testPatchToText, .{});
 }
 
 fn testPatchRoundTrip(allocator: Allocator, patch_in: []const u8) !void {
@@ -2514,42 +2432,6 @@ fn testPatchRoundTrip(allocator: Allocator, patch_in: []const u8) !void {
     const patch_out = try patch.toTextPatch(allocator);
     defer allocator.free(patch_out);
     try testing.expectEqualStrings(patch_in, patch_out);
-}
-
-fn testPatchRoundTripLegacy(allocator: Allocator, patch_in: []const u8) !void {
-    var patch: Patch = .default;
-    defer patch.deinit(allocator);
-    _ = try patch.fromTextPatch(allocator, patch_in);
-    const patch_out = try patch.toTextPatchLegacy(allocator);
-    defer allocator.free(patch_out);
-    try testing.expectEqualStrings(patch_in, patch_out);
-}
-
-fn expectPatchListsEqual(expected: Patch, actual: Patch) !void {
-    try testing.expectEqual(expected.hunks.items.len, actual.hunks.items.len);
-    for (expected.hunks.items, actual.hunks.items) |expected_hunk, actual_hunk| {
-        try testing.expectEqual(expected_hunk.start1, actual_hunk.start1);
-        try testing.expectEqual(expected_hunk.length1, actual_hunk.length1);
-        try testing.expectEqual(expected_hunk.start2, actual_hunk.start2);
-        try testing.expectEqual(expected_hunk.length2, actual_hunk.length2);
-        try testing.expectEqual(expected_hunk.diffs.items.len, actual_hunk.diffs.items.len);
-        for (expected_hunk.diffs.items, actual_hunk.diffs.items) |expected_edit, actual_edit| {
-            try testing.expectEqual(expected_edit.operation, actual_edit.operation);
-            try testing.expectEqualStrings(expected_edit.text, actual_edit.text);
-        }
-    }
-}
-
-fn testPatchModernAndLegacyHydrateSame(allocator: Allocator, legacy_text: []const u8, modern_text: []const u8) !void {
-    var legacy_patch: Patch = .default;
-    defer legacy_patch.deinit(allocator);
-    _ = try legacy_patch.fromTextPatch(allocator, legacy_text);
-
-    var modern_patch: Patch = .default;
-    defer modern_patch.deinit(allocator);
-    _ = try modern_patch.fromTextPatch(allocator, modern_text);
-
-    try expectPatchListsEqual(legacy_patch, modern_patch);
 }
 
 test "workshop" {
@@ -2573,28 +2455,22 @@ test "patch from text" {
         "@@ -0,0 +1,3 @@\n+abc\n@@ -0,0 +1,3 @@\n+abc\n",
     };
     for (round_trip_cases) |patch_text| {
-        try testPatchRoundTripLegacy(allocator, patch_text);
+        try testPatchRoundTrip(allocator, patch_text);
     }
 }
 
-test "modern patch text round trips" {
-    const round_trip_cases = [_][]const u8{
-        "@@ -21,18 +22,17 @@\n jump\n-s\n+ed\n  over \n-the\n+a\n %0Alaz\n",
-        "@@ -1 +1 @@\n-a\n+b\n",
-        "@@ -1,3 +0,0 @@\n-abc\n",
-        "@@ -0,0 +1,3 @@\n+abc\n",
-        "@@ -0,0 +1,3 @@\n+abc\n@@ -0,0 +1,3 @@\n+abc\n",
-    };
-    for (round_trip_cases) |patch_text| {
-        try testPatchRoundTrip(testing.allocator, patch_text);
-    }
-}
-
-test "legacy and modern text hydrate to same patch" {
-    try testPatchModernAndLegacyHydrateSame(
+test "legacy patch text normalizes to modern text" {
+    var patch: Patch = .default;
+    defer patch.deinit(testing.allocator);
+    _ = try patch.fromTextPatch(
         testing.allocator,
         "@@ -1,21 +1,21 @@\n-%601234567890-=%5B%5D%5C;',./\n+~!@#$%25%5E&*()_+%7B%7D%7C:%22%3C%3E?\n",
-        "@@ -1,21 +1,21 @@\n-`1234567890%2D%3D[]\\;',./\n+~!@#$%25^&*()_%2B{}|:\"<>?\n",
+    );
+    const patch_out = try patch.toTextPatch(testing.allocator);
+    defer testing.allocator.free(patch_out);
+    try testing.expectEqualStrings(
+        "@@ -1,21 +1,21 @@\n-`1234567890%2D%3D[]\\;',./\n+~!%40#$%25^&*()_%2B{}|:\"<>?\n",
+        patch_out,
     );
 }
 
@@ -2693,11 +2569,11 @@ fn testPatchAddContext(
 ) !void {
     _, var patch = try patchFromHeader(allocator, patch_text);
     defer patch.deinit(allocator);
-    const patch_og = try patch.asTextLegacy(allocator);
+    const patch_og = try patch.asText(allocator);
     defer allocator.free(patch_og);
     try testing.expectEqualStrings(patch_text, patch_og);
     try patchAddContext(config, allocator, &patch, text);
-    const patch_out = try patch.asTextLegacy(allocator);
+    const patch_out = try patch.asText(allocator);
     defer allocator.free(patch_out);
     try testing.expectEqualStrings(expect, patch_out);
 }
@@ -2762,10 +2638,10 @@ test "testPatchAddContext" {
             "@@ -9,6 +10,3 @@\n-remove\n+add\n",
             "⊗⊘⊙remove⊙⊘⊗",
             \\@@ -3,18 +4,15 @@
-            \\ %E2%8A%98%E2%8A%99
+            \\ ⊘⊙
             \\-remove
             \\+add
-            \\ %E2%8A%99%E2%8A%98
+            \\ ⊙⊘
             \\
         },
     );
@@ -2807,14 +2683,14 @@ fn testMakePatch(allocator: Allocator) !void {
         defer allocator.free(patch_text_2);
         try testing.expectEqualStrings(expectedPatch, patch_text_2);
     }
-    const expectedPatch2 = "@@ -1,21 +1,21 @@\n-%601234567890-=%5B%5D%5C;',./\n+~!@#$%25%5E&*()_+%7B%7D%7C:%22%3C%3E?\n";
+    const expectedPatch2 = "@@ -1,21 +1,21 @@\n-`1234567890%2D%3D[]\\;',./\n+~!%40#$%25^&*()_%2B{}|:\"<>?\n";
     {
         _ = try patch.fromTexts(
             allocator,
             "`1234567890-=[]\\;',./",
             "~!@#$%^&*()_+{}|:\"<>?",
         );
-        const patch_text = try patch.toTextPatchLegacy(allocator);
+        const patch_text = try patch.toTextPatch(allocator);
         defer allocator.free(patch_text);
         try testing.expectEqualStrings(expectedPatch2, patch_text);
     }
@@ -2945,12 +2821,12 @@ fn testPatchAddPadding(
     var patch: Patch = .default;
     defer patch.deinit(allocator);
     _ = try patch.fromTexts(allocator, before, after);
-    const patch_text_before = try patch.toTextPatchLegacy(allocator);
+    const patch_text_before = try patch.toTextPatch(allocator);
     defer allocator.free(patch_text_before);
     try testing.expectEqualStrings(expect_before, patch_text_before);
     const codes = try patchAddPadding(patch.config, allocator, &patch.hunks);
     allocator.free(codes);
-    const patch_text_after = try patch.toTextPatchLegacy(allocator);
+    const patch_text_after = try patch.toTextPatch(allocator);
     defer allocator.free(patch_text_after);
     try testing.expectEqualStrings(expect_after, patch_text_after);
 }
