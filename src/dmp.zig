@@ -12,9 +12,11 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const ArrayList = std.array_list.Managed;
 
 pub const Diff = @import("dmp/Diff.zig");
+pub const DiffContext = @import("diff_context.zig");
 pub const Patch = @import("dmp/Patch.zig");
 
 test {
     _ = Diff;
+    _ = DiffContext;
     _ = Patch;
 }
