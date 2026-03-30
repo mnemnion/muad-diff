@@ -476,29 +476,6 @@ const ParsedZDeltaHeader = struct {
     body_start: usize,
 };
 
-/// Clone a `DiffList`, including each edit's owned text.
-fn cloneDiffList(allocator: Allocator, diffs: *const DiffList) !DiffList {
-    var new_diffs: DiffList = .empty;
-    try new_diffs.ensureTotalCapacity(allocator, diffs.items.len);
-    errdefer deinitDiffList(allocator, &new_diffs);
-    for (diffs.items) |*edit| {
-        new_diffs.appendAssumeCapacity(try edit.clone(allocator));
-    }
-    return new_diffs;
-}
-
-/// Copy a `Difflist`, preserving the ownership status of the
-/// original.
-fn copyDiffList(allocator: Allocator, diffs: *const DiffList) !DiffList {
-    var new_diffs: DiffList = .empty;
-    try new_diffs.ensureTotalCapacity(allocator, diffs.items.len);
-    errdefer deinitDiffList(allocator, &new_diffs);
-    for (diffs.items) |*edit| {
-        new_diffs.appendAssumeCapacity(try edit.copy(allocator));
-    }
-    return new_diffs;
-}
-
 /// Test helper.
 fn diffListFromConfig(
     allocator: Allocator,
@@ -584,36 +561,6 @@ fn diffInternal(
     }
     try diffCleanupMerge(allocator, &diffs);
     return diffs;
-}
-
-/// Find a common prefix which respects UTF-8 code point boundaries.
-fn diffCommonPrefix(before: []const u8, after: []const u8) usize {
-    const n = @min(before.len, after.len);
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        const b = before[i];
-        const a = after[i];
-        if (a != b) {
-            return fixSplitBackward(before, i);
-        }
-    }
-
-    return n;
-}
-
-/// Find a common suffix which respects UTF-8 code point boundaries
-fn diffCommonSuffix(before: []const u8, after: []const u8) usize {
-    const n = @min(before.len, after.len);
-    var i: usize = 1;
-    while (i <= n) : (i += 1) {
-        const b = before[before.len - i];
-        const a = after[after.len - i];
-        if (a != b) {
-            return before.len - fixSplitForward(before, before.len - i + 1);
-        }
-    }
-
-    return n;
 }
 
 /// Find the differences between two texts.  Assumes that the texts do not
@@ -1510,54 +1457,6 @@ const LineIterator = struct {
     }
 };
 
-/// Reorder and merge like edit sections.  Merge equalities.
-/// Any edit section can move as long as it doesn't cross an equality.
-/// @param diffs List of Diff objects.
-fn diffRunAllBorrowed(run: []const *const Edit) bool {
-    for (run) |edit| {
-        if (edit.owned) return false;
-    }
-    return true;
-}
-
-fn diffBorrowedRunSpan(run: []const *const Edit) ?[]const u8 {
-    if (run.len == 0) return "";
-    var span = run[0].text;
-    for (run[1..]) |edit| {
-        if (span.ptr + span.len != edit.text.ptr) return null;
-        span = span.ptr[0 .. span.len + edit.text.len];
-    }
-    return span;
-}
-
-fn diffMaterializeRun(allocator: Allocator, run: []const *const Edit) OOM![]u8 {
-    var total: usize = 0;
-    for (run) |edit| total += edit.text.len;
-    const text = try allocator.alloc(u8, total);
-    var cursor: usize = 0;
-    for (run) |edit| {
-        @memcpy(text[cursor..][0..edit.text.len], edit.text);
-        cursor += edit.text.len;
-    }
-    return text;
-}
-
-fn diffMakeOwnedConcat2(
-    allocator: Allocator,
-    operation: Edit.Operation,
-    a: []const u8,
-    b: []const u8,
-) OOM!Edit {
-    const text = try allocator.alloc(u8, a.len + b.len);
-    @memcpy(text[0..a.len], a);
-    @memcpy(text[a.len..], b);
-    return .{
-        .operation = operation,
-        .owned = true,
-        .text = text,
-    };
-}
-
 fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void {
     // Add a dummy entry at the end.
     try diffs.append(allocator, Edit.asBorrow(.equal, ""));
@@ -1635,6 +1534,7 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void {
                                     );
                                 } else {
                                     diffs.items[ii] = try diffMakeOwnedConcat2(
+                                        Edit,
                                         allocator,
                                         .equal,
                                         old_equal.text,
@@ -1666,6 +1566,7 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void {
                                 unreachable; // This should be structurally impossible. If it isn't? I want that input!
                             } else {
                                 diffs.items[pointer] = try diffMakeOwnedConcat2(
+                                    Edit,
                                     allocator,
                                     old_edit.operation,
                                     text_delete[text_delete.len - common_length ..],
@@ -1719,6 +1620,7 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void {
                         );
                     } else {
                         diffs.items[pointer - 1] = try diffMakeOwnedConcat2(
+                            Edit,
                             allocator,
                             .equal,
                             old_prev.text,
@@ -2257,67 +2159,6 @@ fn diffCleanupSemanticLosslessBorrowed(
     }
 }
 
-fn hasSharedPrefixLen(a: []const u8, b: []const u8) ?usize {
-    if (a.len == 0 or b.len == 0) return null;
-    const a_len = std.unicode.utf8ByteSequenceLength(a[0]) catch return null;
-    const b_len = std.unicode.utf8ByteSequenceLength(b[0]) catch return null;
-    if (a_len != b_len or a_len > a.len or b_len > b.len) return null;
-    if (!std.mem.eql(u8, a[0..a_len], b[0..b_len])) return null;
-    return a_len;
-}
-
-/// Given two strings, compute a score representing whether the internal
-/// boundary falls on logical boundaries.
-/// Scores range from 6 (best) to 0 (worst).
-/// @param one First string.
-/// @param two Second string.
-/// @return The score.
-fn diffCleanupSemanticScore(one: []const u8, two: []const u8) usize {
-    if (one.len == 0 or two.len == 0) {
-        // Edges are the best.
-        return 6;
-    }
-
-    // Each port of this function behaves slightly differently due to
-    // subtle differences in each language's definition of things like
-    // 'whitespace'.  Since this function's purpose is largely cosmetic,
-    // the choice has been made to use each language's native features
-    // rather than force total conformity.
-    const char1 = one[one.len - 1];
-    const char2 = two[0];
-    const nonAlphaNumeric1 = !std.ascii.isAlphanumeric(char1);
-    const nonAlphaNumeric2 = !std.ascii.isAlphanumeric(char2);
-    const whitespace1 = nonAlphaNumeric1 and std.ascii.isWhitespace(char1);
-    const whitespace2 = nonAlphaNumeric2 and std.ascii.isWhitespace(char2);
-    const lineBreak1 = whitespace1 and std.ascii.isControl(char1);
-    const lineBreak2 = whitespace2 and std.ascii.isControl(char2);
-    const blankLine1 = lineBreak1 and
-        (std.mem.endsWith(u8, one, "\n\n") or std.mem.endsWith(u8, one, "\n\r\n"));
-    const blankLine2 = lineBreak2 and
-        (std.mem.startsWith(u8, two, "\n\n") or
-            std.mem.startsWith(u8, two, "\r\n\n") or
-            std.mem.startsWith(u8, two, "\n\r\n") or
-            std.mem.startsWith(u8, two, "\r\n\r\n"));
-
-    if (blankLine1 or blankLine2) {
-        // Five points for blank lines.
-        return 5;
-    } else if (lineBreak1 or lineBreak2) {
-        // Four points for line breaks.
-        return 4;
-    } else if (nonAlphaNumeric1 and !whitespace1 and whitespace2) {
-        // Three points for end of sentences.
-        return 3;
-    } else if (whitespace1 or whitespace2) {
-        // Two points for whitespace.
-        return 2;
-    } else if (nonAlphaNumeric1 or nonAlphaNumeric2) {
-        // One point for non-alphanumeric.
-        return 1;
-    }
-    return 0;
-}
-
 fn diffCleanupEfficiency(
     config: DiffConfig,
     allocator: std.mem.Allocator,
@@ -2417,41 +2258,6 @@ fn diffCleanupEfficiency(
 /// @param diffs List of Diff objects.
 /// @param loc Location within text1.
 /// @return Location within text2.
-///
-fn diffIndex(diffs: DiffList, u_loc: usize) usize {
-    var chars1: isize = 0;
-    var chars2: isize = 0;
-    var last_chars1: isize = 0;
-    var last_chars2: isize = 0;
-    const loc: isize = @intCast(u_loc);
-    //  Dummy diff
-    var last_diff: Edit = .{ .operation = .equal, .owned = false, .text = "" };
-    for (diffs.items) |edit| {
-        if (edit.operation != .insert) {
-            // Equality or deletion.
-            chars1 += @intCast(edit.text.len);
-        }
-        if (edit.operation != .delete) {
-            // Equality or insertion.
-            chars2 += @intCast(edit.text.len);
-        }
-        if (chars1 > loc) {
-            // Overshot the location.
-            last_diff = edit;
-            break;
-        }
-    }
-    last_chars1 = chars1;
-    last_chars2 = chars2;
-
-    if (last_diff.text.len != 0 and last_diff.operation == .delete) {
-        // The location was deleted.
-        return @intCast(last_chars2);
-    }
-    // Add the remaining character length.
-    return @intCast(last_chars2 + (loc - last_chars1));
-}
-
 fn writeZDeltaHeader(writer: anytype, version: ZDeltaVersion) !void {
     try writer.writeAll(zdelta_magic);
     try writer.writeByte(@tagName(version)[0]);
@@ -2807,154 +2613,6 @@ fn flushWriter(writer: anytype) !void {
     if (@hasDecl(@TypeOf(writer), "flush")) {
         var w = writer;
         try w.flush();
-    }
-}
-
-///
-/// Compute and return the source text (all equalities and deletions).
-/// @param diffs List of `Diff` objects.
-/// @return Source text.
-///
-fn diffBeforeText(allocator: Allocator, diffs: DiffList) OOM![]const u8 {
-    var chars = ArrayListUnmanaged(u8){};
-    defer chars.deinit(allocator);
-    for (diffs.items) |edit| {
-        if (edit.operation != .insert) {
-            try chars.appendSlice(allocator, edit.text);
-        }
-    }
-    return chars.toOwnedSlice(allocator);
-}
-
-///
-/// Compute and return the destination text (all equalities and insertions).
-/// @param diffs List of `Diff` objects.
-/// @return Destination text.
-///
-fn diffAfterText(allocator: Allocator, diffs: DiffList) OOM![]const u8 {
-    var chars = ArrayListUnmanaged(u8){};
-    defer chars.deinit(allocator);
-    for (diffs.items) |edit| {
-        if (edit.operation != .delete) {
-            try chars.appendSlice(allocator, edit.text);
-        }
-    }
-    return chars.toOwnedSlice(allocator);
-}
-
-/// Free a range of Diffs inside a list.  Used during cleanups and
-/// edits.
-fn freeRangeDiffList(
-    allocator: Allocator,
-    diffs: *DiffList,
-    start: usize,
-    len: usize,
-) void {
-    const after_range = start + len;
-    const range = diffs.items[start..after_range];
-    for (range) |*e| {
-        e.deinit(allocator);
-    }
-}
-
-/// Determine if the suffix of one string is the prefix of another.
-/// @param text1 First string.
-/// @param text2 Second string.
-/// @return The number of characters common to the end of the first
-///     string and the start of the second string.
-fn diffCommonOverlap(text1_in: []const u8, text2_in: []const u8) usize {
-    var text1 = text1_in;
-    var text2 = text2_in;
-
-    // Cache the text lengths to prevent multiple calls.
-    const text1_length = text1.len;
-    const text2_length = text2.len;
-    // Eliminate the null case.
-    if (text1_length == 0 or text2_length == 0) {
-        return 0;
-    }
-    // Truncate the longer string.
-    if (text1_length > text2_length) {
-        text1 = text1[text1_length - text2_length ..];
-    } else if (text1_length < text2_length) {
-        text2 = text2[0..text1_length];
-    }
-    const text_length = @min(text1_length, text2_length);
-    // Quick check for the worst case.
-    if (std.mem.eql(u8, text1, text2)) {
-        return text_length;
-    }
-
-    // Start by looking for a single character match
-    // and increase length until no match is found.
-    // Performance analysis: https://neil.fraser.name/news/2010/11/04/
-    var best: usize = 0;
-    var length: usize = 1;
-    const best_idx = idx: while (true) {
-        const pattern = text1[text_length - length ..];
-        const found = std.mem.indexOf(u8, text2, pattern) orelse
-            break :idx best;
-
-        length += found;
-
-        if (found == 0 or std.mem.eql(u8, text1[text_length - length ..], text2[0..length])) {
-            best = length;
-            length += 1;
-        }
-    };
-    if (best_idx == 0) return best_idx;
-    // This would mean a truncation: lead or follow, followed by a follow
-    // which differs (or it would be included in our overlap).
-    // TODO this currently appears to be dead code, keep an eye on that.
-    // Reasoning: we're looking for a suffix which matches a prefix, and
-    // we've already assured that edits end with a follow byte, and begin
-    // with a lead byte, ASCII being both for our purposes.  So a split
-    // should not be possible.
-    // I'm going to add a panic just so I know if test cases of any sort
-    // trigger this code path.
-    // XXX Remove this before merge if it can't be triggered.
-    if (is_follow(text2[best_idx])) {
-        // back out
-        return fixSplitBackward(text2, best_idx);
-    }
-    return best_idx;
-}
-
-inline fn boolInt(b: bool) u8 {
-    return @intFromBool(b);
-}
-
-inline fn is_follow(byte: u8) bool {
-    return byte & 0b1100_0000 == 0b1000_0000;
-}
-
-inline fn fixSplitForward(text: []const u8, i: usize) usize {
-    var idx = i;
-    while (idx < text.len and is_follow(text[idx])) : (idx += 1) {}
-    return idx;
-}
-
-inline fn fixSplitBackward(text: []const u8, i: usize) usize {
-    var idx = i;
-    if (idx < text.len) while (idx != 0 and is_follow(text[idx])) : (idx -= 1) {};
-    return idx;
-}
-
-inline fn cast(as: type, val: anytype) as {
-    return @as(as, @intCast(val));
-}
-
-inline fn u2i(val: usize) isize {
-    return @intCast(val);
-}
-
-inline fn i2u(val: isize) usize {
-    return @intCast(val);
-}
-
-inline fn dbgassert(ok: bool) void {
-    if (is_debug) {
-        assert(ok);
     }
 }
 
@@ -4962,3 +4620,26 @@ const Patch = @import("Patch.zig");
 const PatchConfig = Patch.PatchConfig;
 const dmp = @import("../dmp.zig");
 const common = @import("common.zig");
+const cloneDiffList = common.cloneDiffList;
+const copyDiffList = common.copyDiffList;
+const diffRunAllBorrowed = common.diffRunAllBorrowed;
+const diffBorrowedRunSpan = common.diffBorrowedRunSpan;
+const diffMaterializeRun = common.diffMaterializeRun;
+const diffMakeOwnedConcat2 = common.diffMakeOwnedConcat2;
+const diffCommonPrefix = common.diffCommonPrefix;
+const diffCommonSuffix = common.diffCommonSuffix;
+const hasSharedPrefixLen = common.hasSharedPrefixLen;
+const diffCleanupSemanticScore = common.diffCleanupSemanticScore;
+const diffIndex = common.diffIndex;
+const diffBeforeText = common.diffBeforeText;
+const diffAfterText = common.diffAfterText;
+const freeRangeDiffList = common.freeRangeDiffList;
+const diffCommonOverlap = common.diffCommonOverlap;
+const boolInt = common.boolInt;
+const is_follow = common.isFollow;
+const fixSplitForward = common.fixSplitForward;
+const fixSplitBackward = common.fixSplitBackward;
+const cast = common.cast;
+const u2i = common.u2i;
+const i2u = common.i2u;
+const dbgassert = common.dbgassert;
