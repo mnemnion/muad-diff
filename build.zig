@@ -51,53 +51,55 @@ pub fn build(b: *std.Build) void {
 
     test_step.dependOn(&run_module_unit_tests.step);
 
+    const exe_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const cli_test_module = b.createModule(.{
+        .root_source_file = b.path("src/cli.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_test_module.addImport("dmp", dmp_module);
+
     if (b.lazyDependency("clap", .{
         .target = target,
         .optimize = optimize,
     })) |clap_dep| {
-        const exe_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
         exe_module.addImport("dmp", dmp_module);
         exe_module.addImport("clap", clap_dep.module("clap"));
-
-        const exe = b.addExecutable(.{
-            .name = "muad-diff",
-            .root_module = exe_module,
-        });
-
-        b.installArtifact(exe);
-
-        const run_cmd = b.addRunArtifact(exe);
-        run_cmd.step.dependOn(b.getInstallStep());
-        if (b.args) |args| {
-            run_cmd.addArgs(args);
-        }
-
-        const run_step = b.step("run", "Run the muad-diff CLI");
-        run_step.dependOn(&run_cmd.step);
-
-        const cli_test_module = b.createModule(.{
-            .root_source_file = b.path("src/cli.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        cli_test_module.addImport("dmp", dmp_module);
         cli_test_module.addImport("clap", clap_dep.module("clap"));
-
-        const cli_unit_tests = b.addTest(.{
-            .root_module = cli_test_module,
-            .filters = test_filters,
-        });
-
-        const run_cli_unit_tests = b.addRunArtifact(cli_unit_tests);
-        test_step.dependOn(&run_cli_unit_tests.step);
     }
+
+    const exe = b.addExecutable(.{
+        .name = "muad-diff",
+        .root_module = exe_module,
+    });
+
+    b.installArtifact(exe);
+
+    const run_cmd = b.addRunArtifact(exe);
+    run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_cmd.addArgs(args);
+    }
+
+    const run_step = b.step("run", "Run the muad-diff CLI");
+    run_step.dependOn(&run_cmd.step);
+
+    const cli_unit_tests = b.addTest(.{
+        .root_module = cli_test_module,
+        .filters = test_filters,
+    });
+
+    const run_cli_unit_tests = b.addRunArtifact(cli_unit_tests);
+    test_step.dependOn(&run_cli_unit_tests.step);
 
     const corpus_step = b.step("corpus", "Run offline corpus-backed tests");
     corpus_step.dependOn(&run_corpus_unit_tests.step);
+    test_step.dependOn(&run_corpus_unit_tests.step);
 
     const refresh_corpus = b.addSystemCommand(&.{
         "/Users/atman/Dropbox/deck/m/skills/.venv/bin/python",

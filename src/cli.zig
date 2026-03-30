@@ -35,12 +35,14 @@ const ZDeltaVersionArg = enum {
     b,
 };
 
-const plain_diff_decorations: dmp.Diff.DiffDecorations = .{
+const plain_diff_decorations: dmp.DiffDecorations = .{
     .delete_start = "[-",
     .delete_end = "-]",
     .insert_start = "{+",
     .insert_end = "+}",
 };
+
+const diff_show_lines: usize = 3;
 
 const main_parsers = .{
     .command = clap.parsers.enumeration(Command),
@@ -379,15 +381,19 @@ fn runDiff(
     _ = try diff.diff(allocator, before, after);
     try applyCleanupMode(&diff, allocator, res.args.cleanup orelse .semantic);
 
+    var ctx = try dmp.DiffContext.fromDiff(allocator, diff);
+    defer ctx.deinit(allocator);
+    const diff_name = std.fs.path.basename(before_path);
+
     const color_mode = res.args.color orelse .auto;
     switch (color_mode) {
-        .never => _ = try diff.writePrettyFormat(allocator, stdout_writer, plain_diff_decorations),
-        .always => _ = try diff.writePrettyFormat(allocator, stdout_writer, .xterm_classic),
+        .never => _ = try ctx.render(stdout_writer, plain_diff_decorations, diff_name, diff_show_lines),
+        .always => _ = try ctx.render(stdout_writer, .xterm_classic, diff_name, diff_show_lines),
         .auto => {
             if (stdout_supports_color) {
-                _ = try diff.writePrettyFormat(allocator, stdout_writer, .xterm_classic);
+                _ = try ctx.render(stdout_writer, .xterm_classic, diff_name, diff_show_lines);
             } else {
-                _ = try diff.writePrettyFormat(allocator, stdout_writer, plain_diff_decorations);
+                _ = try ctx.render(stdout_writer, plain_diff_decorations, diff_name, diff_show_lines);
             }
         },
     }
@@ -517,8 +523,8 @@ fn runZDeltaEncode(
     _ = try diff.diff(allocator, before, after);
 
     const version = switch (res.args.version orelse .b) {
-        .a => dmp.Diff.ZDeltaVersion.a,
-        .b => dmp.Diff.ZDeltaVersion.b,
+        .a => dmp.ZDeltaVersion.a,
+        .b => dmp.ZDeltaVersion.b,
     };
     const encoded = try diff.toZDelta(allocator, version);
     defer allocator.free(encoded);
@@ -670,7 +676,8 @@ test "diff command prints a readable diff" {
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u8, 0), result.exit_code);
-    try std.testing.expectEqualStrings("ca{+r+}t", result.stdout);
+    try std.testing.expect(std.mem.startsWith(u8, result.stdout, "diff -- before.txt\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "\n ca{+r+}t"));
 }
 
 test "diff command reads files as positionals" {
@@ -695,7 +702,8 @@ test "diff command reads files as positionals" {
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u8, 0), result.exit_code);
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "β"));
+    try std.testing.expect(std.mem.startsWith(u8, result.stdout, "diff -- before.txt\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, " alpha{+β+}"));
 }
 
 test "diff requires both file positionals" {

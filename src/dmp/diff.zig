@@ -25,11 +25,6 @@
 //! to own that memory.
 //!
 
-/// The diff configuration, see `DiffConfig`
-config: DiffConfig = .default,
-/// An ArrayList of the individual `Edit`s in this diff.
-edits: DiffList = .empty,
-
 /// The configurable parameters for a Diff object.
 pub const DiffConfig = struct {
     /// Number of milliseconds to map a diff before giving up (0 for infinity).
@@ -55,11 +50,13 @@ pub const DiffConfig = struct {
     };
 };
 
+/// Version of zDelta format to use.
 pub const ZDeltaVersion = enum {
     a,
     b,
 };
 
+/// Error set of zDelta operations.
 pub const ZDeltaError = OOM || error{
     BadZDeltaHeader,
     UnknownZDeltaVersion,
@@ -72,26 +69,15 @@ pub const ZDeltaError = OOM || error{
 
 /// A single edit of a diff: insertion, deletion, or neither.
 pub const Edit = struct {
+    operation: Operation,
+    owned: bool,
+    text: []const u8,
+
     pub const Operation = enum {
         insert,
         delete,
         equal,
     };
-
-    operation: Operation,
-    owned: bool,
-    text: []const u8,
-
-    pub fn format(value: Edit, writer: anytype) !void {
-        try writer.print("({s}, \"{s}\")", .{
-            switch (value.operation) {
-                .equal => "=",
-                .insert => "+",
-                .delete => "-",
-            },
-            value.text,
-        });
-    }
 
     pub fn deinit(edit: *Edit, allocator: Allocator) void {
         if (edit.owned) allocator.free(edit.text);
@@ -155,9 +141,297 @@ pub const Edit = struct {
             .text = try allocator.dupe(u8, edit.text),
         };
     }
+
+    /// Format the Edit in a debug-and-test useful fashion.
+    pub fn format(value: Edit, writer: anytype) !void {
+        try writer.print("({s}, \"{s}\")", .{
+            switch (value.operation) {
+                .equal => "=",
+                .insert => "+",
+                .delete => "-",
+            },
+            value.text,
+        });
+    }
 };
 
+/// A struct holding bookends for `diffPrittyFormat(diffs)`.
+///
+/// May include a function taking an allocator and the Diff,
+/// which shall return the text of the Diff, appropriately munged.
+/// This allows for tasks like proper HTML escaping.  Note that if
+/// the function is provided, all text returned will be freed, so
+/// it should always return a copy whether or not edits are needed.
+pub const DiffDecorations = struct {
+    delete_start: []const u8 = "",
+    delete_end: []const u8 = "",
+    d_ws_start: []const u8 = "",
+    d_ws_end: []const u8 = "",
+    insert_start: []const u8 = "",
+    i_ws_start: []const u8 = "",
+    i_ws_end: []const u8 = "",
+    insert_end: []const u8 = "",
+    equals_start: []const u8 = "",
+    equals_end: []const u8 = "",
+    pre_process: ?fn (Allocator, Edit) OOM![]const u8 = null,
+
+    /// Decorations for classic Xterm printing: red for delete and
+    /// green for insert.
+    pub const xterm_classic: DiffDecorations = .{
+        .delete_start = "\x1b[91m",
+        .delete_end = "\x1b[m",
+        .d_ws_start = "\x1b[48;2;64;28;28m",
+        .d_ws_end = "\x1b[49m",
+        .insert_start = "\x1b[92m",
+        .i_ws_start = "\x1b[48;2;28;64;28m",
+        .i_ws_end = "\x1b[49m",
+        .insert_end = "\x1b[m",
+    };
+};
+
+pub const Diff = struct {
+    /// The diff configuration, see `DiffConfig`
+    config: DiffConfig = .default,
+    /// An ArrayList of the individual `Edit`s in this diff.
+    edits: DiffList = .empty,
+
+    pub const default: Diff = .{
+        .config = .default,
+        .edits = .empty,
+    };
+
+    /// Initialize an empty `Diff` with the provided `DiffConfig`.
+    pub fn init(config: DiffConfig) Diff {
+        return .{ .config = config };
+    }
+
+    /// Own all edits in the Diff.  After this operation it is safe
+    /// to dispose of the original strings.
+    pub fn own(difference: *Diff, allocator: Allocator) OOM!Diff {
+        for (difference.edits.items) |*e| {
+            try e.own(allocator);
+        }
+    }
+
+    /// Clone this `Diff`, including its owned edits.  The clone is
+    /// fully-owned, the ownership in the original does not change.
+    pub fn clone(difference: *const Diff, allocator: Allocator) OOM!Diff {
+        return .{
+            .config = difference.config,
+            .edits = try cloneDiffList(allocator, &difference.edits),
+        };
+    }
+
+    /// Make a copy of the Diff.  Each Edit in the new copy will have the
+    /// same ownership status as that of the original.
+    pub fn copy(difference: *const Diff, allocator: Allocator) OOM!Diff {
+        return .{
+            .config = difference.config,
+            .edits = try copyDiffList(allocator, &difference.edits),
+        };
+    }
+
+    /// Release the storage owned by this `Diff`.
+    pub fn deinit(difference: *Diff, allocator: Allocator) void {
+        deinitDiffList(allocator, &difference.edits);
+        difference.edits = .empty;
+    }
+
+    /// Find the differences between two texts.
+    /// @param before Old string to be diffed.
+    /// @param after New string to be diffed.
+    /// @return self.
+    pub fn diff(
+        difference: *Diff,
+        allocator: Allocator,
+        before: []const u8,
+        after: []const u8,
+    ) OOM!*Diff {
+        if (difference.edits.items.len != 0) {
+            deinitDiffList(allocator, &difference.edits);
+            difference.edits = .empty;
+        }
+        difference.edits = try diffImpl(difference.config, allocator, before, after);
+        return difference;
+    }
+
+    pub fn diffLines(
+        difference: *Diff,
+        allocator: Allocator,
+        before: []const u8,
+        after: []const u8,
+    ) OOM!*Diff {
+        if (difference.edits.items.len != 0) {
+            deinitDiffList(allocator, &difference.edits);
+            difference.edits = .empty;
+        }
+        difference.edits = try diffLine(difference.config, allocator, before, after, std.math.maxInit(u64));
+        return difference;
+    }
+
+    /// Reduce the number of edits by eliminating semantically trivial
+    /// equalities.
+    /// @return self.
+    pub fn cleanupSemantic(difference: *Diff, allocator: Allocator) OOM!*Diff {
+        try diffCleanupSemantic(allocator, &difference.edits);
+        return difference;
+    }
+
+    /// Look for single edits surrounded on both sides by equalities
+    /// which can be shifted sideways to align the edit to a word boundary.
+    /// e.g: The c<ins>at c</ins>ame. -> The <ins>cat </ins>came.
+    /// @return self.
+    pub fn cleanupSemanticLossless(difference: *Diff, allocator: Allocator) OOM!*Diff {
+        try diffCleanupSemanticLossless(allocator, &difference.edits);
+        return difference;
+    }
+
+    /// Reduce the number of edits by eliminating operationally trivial
+    /// equalities.
+    /// @return self.
+    pub fn cleanupEfficiency(difference: *Diff, allocator: Allocator) OOM!*Diff {
+        try diffCleanupEfficiency(difference.config, allocator, &difference.edits);
+        return difference;
+    }
+
+    /// Return text representing a pretty-formatted `Diff`.
+    /// See `DiffDecorations` for how to customize this output.
+    pub fn prettyFormat(difference: *const Diff, allocator: Allocator, deco: DiffDecorations) ![]const u8 {
+        return try diffPrettyFormat(allocator, difference.edits, deco);
+    }
+
+    /// Return text representing a pretty-formatted `DiffList`, in Xterm format.
+    pub fn prettyFormatXTerm(difference: *const Diff, allocator: Allocator) ![]const u8 {
+        return diffPrettyFormatXTerm(allocator, difference);
+    }
+
+    /// Write a pretty-formatted `Diff` to `writer`.  The `Allocator`
+    /// is only used if a custom text formatter is defined for
+    /// `DiffDecorations`.  Returns number of bytes written.
+    pub fn writePrettyFormat(
+        difference: *const Diff,
+        allocator: Allocator,
+        writer: anytype,
+        deco: DiffDecorations,
+    ) !usize {
+        return try writeDiffPrettyFormat(allocator, writer, difference.edits, deco);
+    }
+
+    /// Create a Patch from the Diff with the default PatchOptions.
+    pub fn toPatch(difference: *const Diff, allocator: Allocator) OOM!Patch {
+        var the_patch: Patch = .default;
+        return the_patch.fromDiff(allocator, difference);
+    }
+
+    /// Create a Patch from the Diff with the provided PatchOptions.
+    pub fn toPatchConfig(
+        difference: *const Diff,
+        allocator: Allocator,
+        cfg: PatchConfig,
+    ) OOM!Patch {
+        var the_patch: Patch = .init(cfg);
+        return the_patch.fromDiff(allocator, difference);
+    }
+
+    /// Write a Diff in a zdelta format.  Currently supported are
+    /// formats `.a` and `.b`, see documentation for more details.
+    pub fn toZDelta(
+        difference: *const Diff,
+        allocator: Allocator,
+        version: ZDeltaVersion,
+    ) ZDeltaError![]const u8 {
+        var out = ArrayList(u8).init(allocator);
+        defer out.deinit();
+        const writer = out.writer();
+        try writeZDeltaHeader(writer, version);
+        switch (version) {
+            .a => try writer.writeByte(zdelta_sep_a),
+            .b => try writer.writeByte(zdelta_sep_b),
+        }
+        for (difference.edits.items) |edit| {
+            switch (edit.operation) {
+                .insert => {
+                    try writeZDeltaInsert(writer, edit.text, version);
+                },
+                .delete => {
+                    try writeZDeltaCount(writer, edit.text.len, version, .delete);
+                },
+                .equal => {
+                    try writeZDeltaCount(writer, edit.text.len, version, .equal);
+                },
+            }
+        }
+        try flushWriter(writer);
+        return out.toOwnedSlice();
+    }
+
+    /// Populate a Diff from a zdelta string and the before text.
+    pub fn fromZDelta(
+        difference: *Diff,
+        allocator: Allocator,
+        before: []const u8,
+        zdelta: []const u8,
+    ) ZDeltaError!*Diff {
+        const parsed = try parseZDeltaHeader(zdelta);
+        var edits: DiffList = .empty;
+        errdefer deinitDiffList(allocator, &edits);
+        switch (parsed.version) {
+            .a => edits = try diffListFromZDeltaA(allocator, before, zdelta[parsed.body_start..]),
+            .b => edits = try diffListFromZDeltaB(allocator, before, zdelta[parsed.body_start..]),
+        }
+        if (difference.edits.items.len != 0) {
+            deinitDiffList(allocator, &difference.edits);
+        }
+        difference.edits = edits;
+        return difference;
+    }
+
+    ///
+    /// Compute and return the source text (all equalities and deletions).
+    /// @return Source text.
+    ///
+    pub fn beforeText(difference: Diff, allocator: Allocator) OOM![]const u8 {
+        return try diffBeforeText(allocator, difference.edits);
+    }
+
+    ///
+    /// Compute and return the destination text (all equalities and insertions).
+    /// @return Destination text.
+    ///
+    pub fn afterText(difference: Diff, allocator: Allocator) OOM![]const u8 {
+        return try diffAfterText(allocator, difference.edits);
+    }
+
+    /// loc is a location in text1, compute and return the equivalent location in
+    /// text2.
+    /// e.g. "The cat" vs "The big cat", 1->1, 5->8
+    /// @param loc Location within text1.
+    /// @return Location within text2.
+    ///
+    pub fn index(difference: Diff, loc: usize) usize {
+        return diffIndex(difference.edits, loc);
+    }
+
+    /// Answers the number of bytes total be added or removed by
+    /// applying this diff, in other words, the difference in length
+    /// between the before and after texts.
+    pub fn changeInBytes(difference: *const Diff) isize {
+        var count: isize = 0;
+        for (difference.edits.items) |edit| {
+            switch (edit.operation) {
+                .insert => count += u2i(edit.text.len),
+                .delete => count -= u2i(edit.text.len),
+                .equal => {},
+            }
+        }
+        return count;
+    }
+};
+
+/// File-public, not module-public.  Just a synonym in any case.
 pub const DiffList = ArrayListUnmanaged(Edit);
+
+//| Private
 
 const HalfMatchResult = struct {
     prefix_before: []const u8,
@@ -172,269 +446,10 @@ const HalfMatchResult = struct {
 /// or the other.
 const CHAR_OFFSET = 32;
 
-/// A struct holding bookends for `diffPrittyFormat(diffs)`.
-///
-/// May include a function taking an allocator and the Diff,
-/// which shall return the text of the Diff, appropriately munged.
-/// This allows for tasks like proper HTML escaping.  Note that if
-/// the function is provided, all text returned will be freed, so
-/// it should always return a copy whether or not edits are needed.
-pub const DiffDecorations = struct {
-    delete_start: []const u8 = "",
-    delete_end: []const u8 = "",
-    insert_start: []const u8 = "",
-    insert_end: []const u8 = "",
-    equals_start: []const u8 = "",
-    equals_end: []const u8 = "",
-    pre_process: ?fn (Allocator, Edit) OOM![]const u8 = null,
-
-    /// Decorations for classic Xterm printing: red for delete and
-    /// green for insert.
-    pub const xterm_classic: DiffDecorations = .{
-        .delete_start = "\x1b[91m",
-        .delete_end = "\x1b[m",
-        .insert_start = "\x1b[92m",
-        .insert_end = "\x1b[m",
-    };
-};
-
-pub const default: Diff = .{
-    .config = .default,
-    .edits = .empty,
-};
-
-/// Initialize an empty `Diff` with the provided `DiffConfig`.
-pub fn init(config: DiffConfig) Diff {
-    return .{ .config = config };
-}
-
-/// Own all edits in the Diff.  After this operation it is safe
-/// to dispose of the original strings.
-pub fn own(difference: *Diff, allocator: Allocator) OOM!Diff {
-    for (difference.edits.items) |*e| {
-        try e.own(allocator);
-    }
-}
-
-/// Clone this `Diff`, including its owned edits.  The clone is
-/// fully-owned, the ownership in the original does not change.
-pub fn clone(difference: *const Diff, allocator: Allocator) OOM!Diff {
-    return .{
-        .config = difference.config,
-        .edits = try cloneDiffList(allocator, &difference.edits),
-    };
-}
-
-/// Make a copy of the Diff.  Each Edit in the new copy will have the
-/// same ownership status as that of the original.
-pub fn copy(difference: *const Diff, allocator: Allocator) OOM!Diff {
-    return .{
-        .config = difference.config,
-        .edits = try copyDiffList(allocator, &difference.edits),
-    };
-}
-
-/// Release the storage owned by this `Diff`.
-pub fn deinit(difference: *Diff, allocator: Allocator) void {
-    deinitDiffList(allocator, &difference.edits);
-    difference.edits = .empty;
-}
-
-/// Find the differences between two texts.
-/// @param before Old string to be diffed.
-/// @param after New string to be diffed.
-/// @return self.
-pub fn diff(
-    difference: *Diff,
-    allocator: Allocator,
-    before: []const u8,
-    after: []const u8,
-) OOM!*Diff {
-    if (difference.edits.items.len != 0) {
-        deinitDiffList(allocator, &difference.edits);
-        difference.edits = .empty;
-    }
-    difference.edits = try diffImpl(difference.config, allocator, before, after);
-    return difference;
-}
-
-pub fn diffLines(
-    difference: *Diff,
-    allocator: Allocator,
-    before: []const u8,
-    after: []const u8,
-) OOM!*Diff {
-    if (difference.edits.items.len != 0) {
-        deinitDiffList(allocator, &difference.edits);
-        difference.edits = .empty;
-    }
-    difference.edits = try diffLine(difference.config, allocator, before, after, std.math.maxInit(u64));
-    return difference;
-}
-
-/// Reduce the number of edits by eliminating semantically trivial
-/// equalities.
-/// @return self.
-pub fn cleanupSemantic(difference: *Diff, allocator: Allocator) OOM!*Diff {
-    try diffCleanupSemantic(allocator, &difference.edits);
-    return difference;
-}
-
-/// Look for single edits surrounded on both sides by equalities
-/// which can be shifted sideways to align the edit to a word boundary.
-/// e.g: The c<ins>at c</ins>ame. -> The <ins>cat </ins>came.
-/// @return self.
-pub fn cleanupSemanticLossless(difference: *Diff, allocator: Allocator) OOM!*Diff {
-    try diffCleanupSemanticLossless(allocator, &difference.edits);
-    return difference;
-}
-
-/// Reduce the number of edits by eliminating operationally trivial
-/// equalities.
-/// @return self.
-pub fn cleanupEfficiency(difference: *Diff, allocator: Allocator) OOM!*Diff {
-    try diffCleanupEfficiencyConfig(difference.config, allocator, &difference.edits);
-    return difference;
-}
-
-/// Return text representing a pretty-formatted `Diff`.
-/// See `DiffDecorations` for how to customize this output.
-pub fn prettyFormat(difference: *const Diff, allocator: Allocator, deco: DiffDecorations) ![]const u8 {
-    return try diffPrettyFormat(allocator, difference.edits, deco);
-}
-
-/// Return text representing a pretty-formatted `DiffList`, in Xterm format.
-pub fn prettyFormatXTerm(difference: *const Diff, allocator: Allocator) ![]const u8 {
-    return diffPrettyFormatXTerm(allocator, difference);
-}
-
-/// Write a pretty-formatted `Diff` to `writer`.  The `Allocator`
-/// is only used if a custom text formatter is defined for
-/// `DiffDecorations`.  Returns number of bytes written.
-pub fn writePrettyFormat(
-    difference: *const Diff,
-    allocator: Allocator,
-    writer: anytype,
-    deco: DiffDecorations,
-) !usize {
-    return try writeDiffPrettyFormat(allocator, writer, difference.edits, deco);
-}
-
-/// Create a Patch from the Diff with the default PatchOptions.
-pub fn toPatch(difference: *const Diff, allocator: Allocator) OOM!Patch {
-    var the_patch: Patch = .default;
-    return the_patch.fromDiff(allocator, difference);
-}
-
-/// Create a Patch from the Diff with the provided PatchOptions.
-pub fn toPatchConfig(
-    difference: *const Diff,
-    allocator: Allocator,
-    cfg: PatchConfig,
-) OOM!Patch {
-    var the_patch: Patch = .init(cfg);
-    return the_patch.fromDiff(allocator, difference);
-}
-
-/// Write a Diff in a zdelta format.  Currently supported are
-/// formats `.a` and `.b`, see documentation for more details.
-pub fn toZDelta(
-    difference: *const Diff,
-    allocator: Allocator,
-    version: ZDeltaVersion,
-) ZDeltaError![]const u8 {
-    var out = ArrayList(u8).init(allocator);
-    defer out.deinit();
-    const writer = out.writer();
-    try writeZDeltaHeader(writer, version);
-    switch (version) {
-        .a => try writer.writeByte(zdelta_sep_a),
-        .b => try writer.writeByte(zdelta_sep_b),
-    }
-    for (difference.edits.items) |edit| {
-        switch (edit.operation) {
-            .insert => {
-                try writeZDeltaInsert(writer, edit.text, version);
-            },
-            .delete => {
-                try writeZDeltaCount(writer, edit.text.len, version, .delete);
-            },
-            .equal => {
-                try writeZDeltaCount(writer, edit.text.len, version, .equal);
-            },
-        }
-    }
-    try flushWriter(writer);
-    return out.toOwnedSlice();
-}
-
-/// Populate a Diff from a zdelta string and the before text.
-pub fn fromZDelta(
-    difference: *Diff,
-    allocator: Allocator,
-    before: []const u8,
-    zdelta: []const u8,
-) ZDeltaError!*Diff {
-    const parsed = try parseZDeltaHeader(zdelta);
-    var edits: DiffList = .empty;
-    errdefer deinitDiffList(allocator, &edits);
-    switch (parsed.version) {
-        .a => edits = try diffListFromZDeltaA(allocator, before, zdelta[parsed.body_start..]),
-        .b => edits = try diffListFromZDeltaB(allocator, before, zdelta[parsed.body_start..]),
-    }
-    if (difference.edits.items.len != 0) {
-        deinitDiffList(allocator, &difference.edits);
-    }
-    difference.edits = edits;
-    return difference;
-}
-
-///
-/// Compute and return the source text (all equalities and deletions).
-/// @return Source text.
-///
-pub fn beforeText(difference: Diff, allocator: Allocator) OOM![]const u8 {
-    return try diffBeforeText(allocator, difference.edits);
-}
-
-///
-/// Compute and return the destination text (all equalities and insertions).
-/// @return Destination text.
-///
-pub fn afterText(difference: Diff, allocator: Allocator) OOM![]const u8 {
-    return try diffAfterText(allocator, difference.edits);
-}
-
-/// loc is a location in text1, compute and return the equivalent location in
-/// text2.
-/// e.g. "The cat" vs "The big cat", 1->1, 5->8
-/// @param loc Location within text1.
-/// @return Location within text2.
-///
-pub fn index(difference: Diff, loc: usize) usize {
-    return diffIndex(difference.edits, loc);
-}
-
-/// Answers the number of bytes total be added or removed by
-/// applying this diff, in other words, the difference in length
-/// between the before and after texts.
-pub fn changeInBytes(difference: *const Diff) isize {
-    var count: isize = 0;
-    for (difference.edits.items) |edit| {
-        switch (edit.operation) {
-            .insert => count += u2i(edit.text.len),
-            .delete => count -= u2i(edit.text.len),
-            .equal => {},
-        }
-    }
-    return count;
-}
-
-//| Private
-
 /// Free all memory of the ArrayList of Edits in a Diff.
 const deinitDiffList = common.deinitDiffList;
 
+/// Magic lead string identifying a zDelta patch.
 const zdelta_magic = "zΔ⚡";
 
 // Paranoia earned from mighty blows:
@@ -448,6 +463,7 @@ comptime {
 const UTF8_BOM = "\xef\xbb\xbf"; // UTF-8 encoded byte-order mark
 const U_FEOE = "\xef\xb8\x8e"; // Variation selector: text
 const U_FEOF = "\xef\xb8\x8f"; // Variation selector: emoji
+// The variation selectors are why we check that zdelta_magic doesn't have them...
 
 const zdelta_sep_b: u8 = '|';
 const zdelta_sep_a: u8 = 0xff;
@@ -459,249 +475,6 @@ const ParsedZDeltaHeader = struct {
     version: ZDeltaVersion,
     body_start: usize,
 };
-
-fn writeZDeltaHeader(writer: anytype, version: ZDeltaVersion) !void {
-    try writer.writeAll(zdelta_magic);
-    try writer.writeByte(@tagName(version)[0]);
-}
-
-fn writeZDeltaInsert(writer: anytype, text: []const u8, version: ZDeltaVersion) ZDeltaError!void {
-    switch (version) {
-        .a => {
-            if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidZDeltaText;
-            try writer.writeByte(zdelta_insert_a);
-            try writer.writeAll(text);
-            try writer.writeByte(zdelta_sep_a);
-        },
-        .b => {
-            if (!std.unicode.wtf8ValidateSlice(text)) return error.InvalidZDeltaText;
-            try writer.writeByte('+');
-            _ = try writeZDeltaBText(writer, text);
-            try writer.writeByte(zdelta_sep_b);
-        },
-    }
-}
-
-fn writeZDeltaCount(
-    writer: anytype,
-    len: usize,
-    version: ZDeltaVersion,
-    operation: Edit.Operation,
-) !void {
-    switch (version) {
-        .a => try writer.writeByte(switch (operation) {
-            .delete => zdelta_delete_a,
-            .equal => zdelta_equal_a,
-            else => unreachable,
-        }),
-        .b => try writer.writeByte(switch (operation) {
-            .delete => '-',
-            .equal => '=',
-            else => unreachable,
-        }),
-    }
-    try writer.print("{x}", .{len});
-    switch (version) {
-        .a => try writer.writeByte(zdelta_sep_a),
-        .b => try writer.writeByte(zdelta_sep_b),
-    }
-}
-
-fn writeZDeltaBText(writer: anytype, text: []const u8) !usize {
-    var written: usize = 0;
-    for (text) |byte| {
-        const must_escape = switch (byte) {
-            0x00...0x1f, '+', '-', '=', '|', '%' => true,
-            else => false,
-        };
-        if (!must_escape) {
-            try writer.writeByte(byte);
-            written += 1;
-            continue;
-        }
-        try writer.writeByte('%');
-        const hex = std.fmt.bytesToHex(&[_]u8{byte}, .upper);
-        try writer.writeAll(&hex);
-        written += 3;
-    }
-    return written;
-}
-
-fn parseZDeltaHeader(zdelta: []const u8) ZDeltaError!ParsedZDeltaHeader {
-    var cursor: usize = 0;
-    if (std.mem.startsWith(u8, zdelta, UTF8_BOM)) {
-        cursor += UTF8_BOM.len;
-    }
-    if (!std.mem.startsWith(u8, zdelta[cursor..], zdelta_magic)) return error.BadZDeltaHeader;
-    cursor += zdelta_magic.len;
-    if (std.mem.startsWith(u8, zdelta[cursor..], U_FEOE)) {
-        cursor += U_FEOE.len;
-    } else if (std.mem.startsWith(u8, zdelta[cursor..], U_FEOF)) {
-        cursor += U_FEOF.len;
-    }
-    if (cursor >= zdelta.len) return error.BadZDeltaHeader;
-    const version = switch (zdelta[cursor]) {
-        'a' => ZDeltaVersion.a,
-        'b' => ZDeltaVersion.b,
-        else => return error.UnknownZDeltaVersion,
-    };
-    cursor += 1;
-    if (cursor >= zdelta.len) return error.BadZDeltaHeader;
-    const sep = switch (version) {
-        .a => zdelta_sep_a,
-        .b => zdelta_sep_b,
-    };
-    if (zdelta[cursor] != sep) return error.BadZDeltaHeader;
-    return .{ .version = version, .body_start = cursor + 1 };
-}
-
-fn diffListFromZDeltaA(allocator: Allocator, before: []const u8, body: []const u8) ZDeltaError!DiffList {
-    var edits: DiffList = .empty;
-    errdefer deinitDiffList(allocator, &edits);
-    if (body.len == 0) {
-        if (before.len != 0) return error.ZDeltaLengthMismatch;
-        return edits;
-    }
-    if (body[body.len - 1] != zdelta_sep_a) return error.BadZDeltaOperation;
-
-    var pointer: usize = 0;
-    var field_start: usize = 0;
-    while (field_start < body.len) {
-        const field_end = std.mem.indexOfScalarPos(u8, body, field_start, zdelta_sep_a) orelse unreachable;
-        const field = body[field_start..field_end];
-        if (field.len == 0) return error.BadZDeltaOperation;
-        try appendZDeltaField(allocator, &edits, before, &pointer, field, .a);
-        field_start = field_end + 1;
-    }
-    if (pointer != before.len) return error.ZDeltaLengthMismatch;
-    return edits;
-}
-
-fn diffListFromZDeltaB(allocator: Allocator, before: []const u8, body: []const u8) ZDeltaError!DiffList {
-    var compact_storage: ?[]u8 = null;
-    defer if (compact_storage) |compact| allocator.free(compact);
-    const compact = compact: {
-        const first_whitespace = std.mem.indexOfAny(u8, body, "\r\n") orelse break :compact body;
-        var compact = ArrayList(u8).init(allocator);
-        defer compact.deinit();
-        try compact.ensureUnusedCapacity(body.len);
-        try compact.appendSlice(body[0..first_whitespace]);
-        var cursor = first_whitespace + 1;
-        while (std.mem.indexOfAnyPos(u8, body, cursor, "\r\n")) |next_whitespace| {
-            try compact.appendSlice(body[cursor..next_whitespace]);
-            cursor = next_whitespace + 1;
-        }
-        try compact.appendSlice(body[cursor..]);
-        compact_storage = try compact.toOwnedSlice();
-        break :compact compact_storage.?;
-    };
-
-    var edits: DiffList = .empty;
-    errdefer deinitDiffList(allocator, &edits);
-    if (compact.len == 0) {
-        if (before.len != 0) return error.ZDeltaLengthMismatch;
-        return edits;
-    }
-    if (compact[compact.len - 1] != zdelta_sep_b) return error.BadZDeltaOperation;
-
-    var pointer: usize = 0;
-    var field_start: usize = 0;
-    while (field_start < compact.len) {
-        const field_end = std.mem.indexOfScalarPos(u8, compact, field_start, zdelta_sep_b) orelse unreachable;
-        const field = compact[field_start..field_end];
-        if (field.len == 0) return error.BadZDeltaOperation;
-        try appendZDeltaField(allocator, &edits, before, &pointer, field, .b);
-        field_start = field_end + 1;
-    }
-    if (pointer != before.len) return error.ZDeltaLengthMismatch;
-    return edits;
-}
-
-fn appendZDeltaField(
-    allocator: Allocator,
-    edits: *DiffList,
-    before: []const u8,
-    pointer: *usize,
-    field: []const u8,
-    version: ZDeltaVersion,
-) ZDeltaError!void {
-    const action = field[0];
-    const payload = field[1..];
-    switch (version) {
-        .a => switch (action) {
-            zdelta_insert_a => {
-                if (!std.unicode.utf8ValidateSlice(payload)) return error.InvalidZDeltaText;
-                try edits.append(allocator, .{
-                    .operation = .insert,
-                    .owned = true,
-                    .text = try allocator.dupe(u8, payload),
-                });
-            },
-            zdelta_delete_a => try appendZDeltaCountEdit(allocator, edits, before, pointer, payload, .delete),
-            zdelta_equal_a => try appendZDeltaCountEdit(allocator, edits, before, pointer, payload, .equal),
-            else => return error.BadZDeltaOperation,
-        },
-        .b => switch (action) {
-            '+' => {
-                const decoded = try decodeZDeltaPercent(allocator, payload);
-                errdefer allocator.free(decoded);
-                if (!std.unicode.wtf8ValidateSlice(decoded)) return error.InvalidZDeltaText;
-                try edits.append(allocator, .{
-                    .operation = .insert,
-                    .owned = true,
-                    .text = decoded,
-                });
-            },
-            '-' => try appendZDeltaCountEdit(allocator, edits, before, pointer, payload, .delete),
-            '=' => try appendZDeltaCountEdit(allocator, edits, before, pointer, payload, .equal),
-            else => return error.BadZDeltaOperation,
-        },
-    }
-}
-
-fn appendZDeltaCountEdit(
-    allocator: Allocator,
-    edits: *DiffList,
-    before: []const u8,
-    pointer: *usize,
-    payload: []const u8,
-    operation: Edit.Operation,
-) ZDeltaError!void {
-    const len = try parseZDeltaCount(payload);
-    if (pointer.* + len < pointer.* or pointer.* + len > before.len) return error.ZDeltaLengthMismatch;
-    try edits.append(allocator, .{
-        .operation = operation,
-        .owned = false,
-        .text = before[pointer.* .. pointer.* + len],
-    });
-    pointer.* += len;
-}
-
-fn parseZDeltaCount(payload: []const u8) ZDeltaError!usize {
-    if (payload.len == 0) return error.BadZDeltaNumber;
-    return std.fmt.parseInt(usize, payload, 16) catch error.BadZDeltaNumber;
-}
-
-fn decodeZDeltaPercent(allocator: Allocator, text: []const u8) ZDeltaError![]u8 {
-    if (std.mem.indexOfScalar(u8, text, '%') == null) {
-        return allocator.dupe(u8, text);
-    }
-    var out = ArrayList(u8).init(allocator);
-    defer out.deinit();
-    var cursor: usize = 0;
-    while (cursor < text.len) {
-        if (text[cursor] != '%') {
-            try out.append(text[cursor]);
-            cursor += 1;
-            continue;
-        }
-        if (cursor + 2 >= text.len) return error.BadZDeltaEscape;
-        const byte = std.fmt.parseInt(u8, text[cursor + 1 .. cursor + 3], 16) catch return error.BadZDeltaEscape;
-        try out.append(byte);
-        cursor += 3;
-    }
-    return out.toOwnedSlice();
-}
 
 /// Clone a `DiffList`, including each edit's owned text.
 fn cloneDiffList(allocator: Allocator, diffs: *const DiffList) !DiffList {
@@ -2130,8 +1903,16 @@ fn diffCleanupSemantic(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void 
             const insert_edit = diffs.items[pointer];
             const deletion = delete_edit.text;
             const insertion = insert_edit.text;
-            const overlap_length1: usize = diffCommonOverlap(deletion, insertion);
-            const overlap_length2: usize = diffCommonOverlap(insertion, deletion);
+            const raw_overlap_length1 = diffCommonOverlap(deletion, insertion);
+            const overlap_length1 = @min(
+                deletion.len - fixSplitForward(deletion, deletion.len - raw_overlap_length1),
+                fixSplitBackward(insertion, raw_overlap_length1),
+            );
+            const raw_overlap_length2 = diffCommonOverlap(insertion, deletion);
+            const overlap_length2 = @min(
+                insertion.len - fixSplitForward(insertion, insertion.len - raw_overlap_length2),
+                fixSplitBackward(deletion, raw_overlap_length2),
+            );
             if (overlap_length1 >= overlap_length2) {
                 if (@as(f32, @floatFromInt(overlap_length1)) >= @as(f32, @floatFromInt(deletion.len)) / 2.0 or
                     @as(f32, @floatFromInt(overlap_length1)) >= @as(f32, @floatFromInt(insertion.len)) / 2.0)
@@ -2346,13 +2127,17 @@ fn diffCleanupSemanticLosslessOwned(
     var best_score = diffCleanupSemanticScore(equality_1.items, edit.items) +
         diffCleanupSemanticScore(edit.items, equality_2.items);
 
-    while (edit.items.len != 0 and equality_2.items.len != 0 and edit.items[0] == equality_2.items[0]) {
-        try equality_1.append(allocator, edit.items[0]);
+    while (hasSharedPrefixLen(edit.items, equality_2.items)) |cp_len| {
+        var cp_buf: [4]u8 = undefined;
+        @memcpy(cp_buf[0..cp_len], edit.items[0..cp_len]);
+        try equality_1.appendSlice(allocator, cp_buf[0..cp_len]);
 
-        _ = edit.orderedRemove(0);
-        try edit.append(allocator, equality_2.items[0]);
+        std.mem.copyForwards(u8, edit.items[0 .. edit.items.len - cp_len], edit.items[cp_len..]);
+        edit.items.len -= cp_len;
+        try edit.appendSlice(allocator, equality_2.items[0..cp_len]);
 
-        _ = equality_2.orderedRemove(0);
+        std.mem.copyForwards(u8, equality_2.items[0 .. equality_2.items.len - cp_len], equality_2.items[cp_len..]);
+        equality_2.items.len -= cp_len;
 
         const score = diffCleanupSemanticScore(equality_1.items, edit.items) +
             diffCleanupSemanticScore(edit.items, equality_2.items);
@@ -2436,10 +2221,11 @@ fn diffCleanupSemanticLosslessBorrowed(
     var best_score = diffCleanupSemanticScore(equality_1, edit) +
         diffCleanupSemanticScore(edit, equality_2);
 
-    while (edit.len != 0 and equality_2.len != 0 and edit[0] == equality_2[0]) {
-        equality_1 = equality_1.ptr[0 .. equality_1.len + 1];
-        edit = edit[1..].ptr[0..edit.len];
-        equality_2 = equality_2[1..];
+    while (hasSharedPrefixLen(edit, equality_2)) |cp_len| {
+        const old_edit = edit;
+        equality_1 = equality_1.ptr[0 .. equality_1.len + cp_len];
+        edit = old_edit[cp_len..].ptr[0..old_edit.len];
+        equality_2 = equality_2[cp_len..];
 
         const score = diffCleanupSemanticScore(equality_1, edit) +
             diffCleanupSemanticScore(edit, equality_2);
@@ -2469,6 +2255,15 @@ fn diffCleanupSemanticLosslessBorrowed(
             pointer.* -= 1;
         }
     }
+}
+
+fn hasSharedPrefixLen(a: []const u8, b: []const u8) ?usize {
+    if (a.len == 0 or b.len == 0) return null;
+    const a_len = std.unicode.utf8ByteSequenceLength(a[0]) catch return null;
+    const b_len = std.unicode.utf8ByteSequenceLength(b[0]) catch return null;
+    if (a_len != b_len or a_len > a.len or b_len > b.len) return null;
+    if (!std.mem.eql(u8, a[0..a_len], b[0..b_len])) return null;
+    return a_len;
 }
 
 /// Given two strings, compute a score representing whether the internal
@@ -2523,7 +2318,7 @@ fn diffCleanupSemanticScore(one: []const u8, two: []const u8) usize {
     return 0;
 }
 
-fn diffCleanupEfficiencyConfig(
+fn diffCleanupEfficiency(
     config: DiffConfig,
     allocator: std.mem.Allocator,
     diffs: *DiffList,
@@ -2657,6 +2452,249 @@ fn diffIndex(diffs: DiffList, u_loc: usize) usize {
     return @intCast(last_chars2 + (loc - last_chars1));
 }
 
+fn writeZDeltaHeader(writer: anytype, version: ZDeltaVersion) !void {
+    try writer.writeAll(zdelta_magic);
+    try writer.writeByte(@tagName(version)[0]);
+}
+
+fn writeZDeltaInsert(writer: anytype, text: []const u8, version: ZDeltaVersion) ZDeltaError!void {
+    switch (version) {
+        .a => {
+            if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidZDeltaText;
+            try writer.writeByte(zdelta_insert_a);
+            try writer.writeAll(text);
+            try writer.writeByte(zdelta_sep_a);
+        },
+        .b => {
+            if (!std.unicode.wtf8ValidateSlice(text)) return error.InvalidZDeltaText;
+            try writer.writeByte('+');
+            _ = try writeZDeltaBText(writer, text);
+            try writer.writeByte(zdelta_sep_b);
+        },
+    }
+}
+
+fn writeZDeltaCount(
+    writer: anytype,
+    len: usize,
+    version: ZDeltaVersion,
+    operation: Edit.Operation,
+) !void {
+    switch (version) {
+        .a => try writer.writeByte(switch (operation) {
+            .delete => zdelta_delete_a,
+            .equal => zdelta_equal_a,
+            else => unreachable,
+        }),
+        .b => try writer.writeByte(switch (operation) {
+            .delete => '-',
+            .equal => '=',
+            else => unreachable,
+        }),
+    }
+    try writer.print("{x}", .{len});
+    switch (version) {
+        .a => try writer.writeByte(zdelta_sep_a),
+        .b => try writer.writeByte(zdelta_sep_b),
+    }
+}
+
+fn writeZDeltaBText(writer: anytype, text: []const u8) !usize {
+    var written: usize = 0;
+    for (text) |byte| {
+        const must_escape = switch (byte) {
+            0x00...0x1f, '+', '-', '=', '|', '%' => true,
+            else => false,
+        };
+        if (!must_escape) {
+            try writer.writeByte(byte);
+            written += 1;
+            continue;
+        }
+        try writer.writeByte('%');
+        const hex = std.fmt.bytesToHex(&[_]u8{byte}, .upper);
+        try writer.writeAll(&hex);
+        written += 3;
+    }
+    return written;
+}
+
+fn parseZDeltaHeader(zdelta: []const u8) ZDeltaError!ParsedZDeltaHeader {
+    var cursor: usize = 0;
+    if (std.mem.startsWith(u8, zdelta, UTF8_BOM)) {
+        cursor += UTF8_BOM.len;
+    }
+    if (!std.mem.startsWith(u8, zdelta[cursor..], zdelta_magic)) return error.BadZDeltaHeader;
+    cursor += zdelta_magic.len;
+    if (std.mem.startsWith(u8, zdelta[cursor..], U_FEOE)) {
+        cursor += U_FEOE.len;
+    } else if (std.mem.startsWith(u8, zdelta[cursor..], U_FEOF)) {
+        cursor += U_FEOF.len;
+    }
+    if (cursor >= zdelta.len) return error.BadZDeltaHeader;
+    const version = switch (zdelta[cursor]) {
+        'a' => ZDeltaVersion.a,
+        'b' => ZDeltaVersion.b,
+        else => return error.UnknownZDeltaVersion,
+    };
+    cursor += 1;
+    if (cursor >= zdelta.len) return error.BadZDeltaHeader;
+    const sep = switch (version) {
+        .a => zdelta_sep_a,
+        .b => zdelta_sep_b,
+    };
+    if (zdelta[cursor] != sep) return error.BadZDeltaHeader;
+    return .{ .version = version, .body_start = cursor + 1 };
+}
+
+fn diffListFromZDeltaA(allocator: Allocator, before: []const u8, body: []const u8) ZDeltaError!DiffList {
+    var edits: DiffList = .empty;
+    errdefer deinitDiffList(allocator, &edits);
+    if (body.len == 0) {
+        if (before.len != 0) return error.ZDeltaLengthMismatch;
+        return edits;
+    }
+    if (body[body.len - 1] != zdelta_sep_a) return error.BadZDeltaOperation;
+
+    var pointer: usize = 0;
+    var field_start: usize = 0;
+    while (field_start < body.len) {
+        const field_end = std.mem.indexOfScalarPos(u8, body, field_start, zdelta_sep_a) orelse unreachable;
+        const field = body[field_start..field_end];
+        if (field.len == 0) return error.BadZDeltaOperation;
+        try appendZDeltaField(allocator, &edits, before, &pointer, field, .a);
+        field_start = field_end + 1;
+    }
+    if (pointer != before.len) return error.ZDeltaLengthMismatch;
+    return edits;
+}
+
+fn diffListFromZDeltaB(allocator: Allocator, before: []const u8, body: []const u8) ZDeltaError!DiffList {
+    var compact_storage: ?[]u8 = null;
+    defer if (compact_storage) |compact| allocator.free(compact);
+    const compact = compact: {
+        const first_whitespace = std.mem.indexOfAny(u8, body, "\r\n") orelse break :compact body;
+        var compact = ArrayList(u8).init(allocator);
+        defer compact.deinit();
+        try compact.ensureUnusedCapacity(body.len);
+        try compact.appendSlice(body[0..first_whitespace]);
+        var cursor = first_whitespace + 1;
+        while (std.mem.indexOfAnyPos(u8, body, cursor, "\r\n")) |next_whitespace| {
+            try compact.appendSlice(body[cursor..next_whitespace]);
+            cursor = next_whitespace + 1;
+        }
+        try compact.appendSlice(body[cursor..]);
+        compact_storage = try compact.toOwnedSlice();
+        break :compact compact_storage.?;
+    };
+
+    var edits: DiffList = .empty;
+    errdefer deinitDiffList(allocator, &edits);
+    if (compact.len == 0) {
+        if (before.len != 0) return error.ZDeltaLengthMismatch;
+        return edits;
+    }
+    if (compact[compact.len - 1] != zdelta_sep_b) return error.BadZDeltaOperation;
+
+    var pointer: usize = 0;
+    var field_start: usize = 0;
+    while (field_start < compact.len) {
+        const field_end = std.mem.indexOfScalarPos(u8, compact, field_start, zdelta_sep_b) orelse unreachable;
+        const field = compact[field_start..field_end];
+        if (field.len == 0) return error.BadZDeltaOperation;
+        try appendZDeltaField(allocator, &edits, before, &pointer, field, .b);
+        field_start = field_end + 1;
+    }
+    if (pointer != before.len) return error.ZDeltaLengthMismatch;
+    return edits;
+}
+
+fn appendZDeltaField(
+    allocator: Allocator,
+    edits: *DiffList,
+    before: []const u8,
+    pointer: *usize,
+    field: []const u8,
+    version: ZDeltaVersion,
+) ZDeltaError!void {
+    const action = field[0];
+    const payload = field[1..];
+    switch (version) {
+        .a => switch (action) {
+            zdelta_insert_a => {
+                if (!std.unicode.utf8ValidateSlice(payload)) return error.InvalidZDeltaText;
+                try edits.append(allocator, .{
+                    .operation = .insert,
+                    .owned = true,
+                    .text = try allocator.dupe(u8, payload),
+                });
+            },
+            zdelta_delete_a => try appendZDeltaCountEdit(allocator, edits, before, pointer, payload, .delete),
+            zdelta_equal_a => try appendZDeltaCountEdit(allocator, edits, before, pointer, payload, .equal),
+            else => return error.BadZDeltaOperation,
+        },
+        .b => switch (action) {
+            '+' => {
+                const decoded = try decodeZDeltaPercent(allocator, payload);
+                errdefer allocator.free(decoded);
+                if (!std.unicode.wtf8ValidateSlice(decoded)) return error.InvalidZDeltaText;
+                try edits.append(allocator, .{
+                    .operation = .insert,
+                    .owned = true,
+                    .text = decoded,
+                });
+            },
+            '-' => try appendZDeltaCountEdit(allocator, edits, before, pointer, payload, .delete),
+            '=' => try appendZDeltaCountEdit(allocator, edits, before, pointer, payload, .equal),
+            else => return error.BadZDeltaOperation,
+        },
+    }
+}
+
+fn appendZDeltaCountEdit(
+    allocator: Allocator,
+    edits: *DiffList,
+    before: []const u8,
+    pointer: *usize,
+    payload: []const u8,
+    operation: Edit.Operation,
+) ZDeltaError!void {
+    const len = try parseZDeltaCount(payload);
+    if (pointer.* + len < pointer.* or pointer.* + len > before.len) return error.ZDeltaLengthMismatch;
+    try edits.append(allocator, .{
+        .operation = operation,
+        .owned = false,
+        .text = before[pointer.* .. pointer.* + len],
+    });
+    pointer.* += len;
+}
+
+fn parseZDeltaCount(payload: []const u8) ZDeltaError!usize {
+    if (payload.len == 0) return error.BadZDeltaNumber;
+    return std.fmt.parseInt(usize, payload, 16) catch error.BadZDeltaNumber;
+}
+
+fn decodeZDeltaPercent(allocator: Allocator, text: []const u8) ZDeltaError![]u8 {
+    if (std.mem.indexOfScalar(u8, text, '%') == null) {
+        return allocator.dupe(u8, text);
+    }
+    var out = ArrayList(u8).init(allocator);
+    defer out.deinit();
+    var cursor: usize = 0;
+    while (cursor < text.len) {
+        if (text[cursor] != '%') {
+            try out.append(text[cursor]);
+            cursor += 1;
+            continue;
+        }
+        if (cursor + 2 >= text.len) return error.BadZDeltaEscape;
+        const byte = std.fmt.parseInt(u8, text[cursor + 1 .. cursor + 3], 16) catch return error.BadZDeltaEscape;
+        try out.append(byte);
+        cursor += 3;
+    }
+    return out.toOwnedSlice();
+}
+
 /// Return text representing a pretty-formatted `DiffList`.
 /// See `DiffDecorations` for how to customize this output.
 fn diffPrettyFormat(
@@ -2687,34 +2725,81 @@ fn writeDiffPrettyFormat(
 ) !usize {
     var written: usize = 0;
     for (diffs.items) |edit| {
-        const text = if (deco.pre_process) |lambda|
-            try lambda(allocator, edit)
-        else
-            edit.text;
-        defer {
-            if (deco.pre_process) |_|
-                allocator.free(text);
-        }
-        switch (edit.operation) {
-            .delete => {
-                //
-                written += try writer.write(deco.delete_start);
-                written += try writer.write(text);
-                written += try writer.write(deco.delete_end);
-            },
-            .insert => {
-                written += try writer.write(deco.insert_start);
-                written += try writer.write(text);
-                written += try writer.write(deco.insert_end);
-            },
-            .equal => {
-                written += try writer.write(deco.equals_start);
-                written += try writer.write(text);
-                written += try writer.write(deco.equals_end);
-            },
-        }
+        written += try writeDecoratedEdit(allocator, writer, deco, edit);
     }
     try flushWriter(writer);
+    return written;
+}
+
+pub fn writeDecoratedEdit(
+    allocator: Allocator,
+    writer: anytype,
+    deco: DiffDecorations,
+    edit: Edit,
+) !usize {
+    const text = if (deco.pre_process) |lambda|
+        try lambda(allocator, edit)
+    else
+        edit.text;
+    defer {
+        if (deco.pre_process) |_|
+            allocator.free(text);
+    }
+
+    const markers: struct {
+        start: []const u8,
+        end: []const u8,
+        ws_start: []const u8,
+        ws_end: []const u8,
+    } = switch (edit.operation) {
+        .delete => .{
+            .start = deco.delete_start,
+            .end = deco.delete_end,
+            .ws_start = deco.d_ws_start,
+            .ws_end = deco.d_ws_end,
+        },
+        .insert => .{
+            .start = deco.insert_start,
+            .end = deco.insert_end,
+            .ws_start = deco.i_ws_start,
+            .ws_end = deco.i_ws_end,
+        },
+        .equal => .{
+            .start = deco.equals_start,
+            .end = deco.equals_end,
+            .ws_start = "",
+            .ws_end = "",
+        },
+    };
+
+    var written: usize = 0;
+    written += try writer.write(markers.start);
+
+    if (markers.ws_start.len == 0 or edit.operation == .equal) {
+        written += try writer.write(text);
+        written += try writer.write(markers.end);
+        return written;
+    }
+
+    const left_trimmed = std.mem.trimLeft(u8, text, &std.ascii.whitespace);
+    const leading_len = text.len - left_trimmed.len;
+    if (leading_len != 0) {
+        written += try writer.write(markers.ws_start);
+        written += try writer.write(text[0..leading_len]);
+        written += try writer.write(markers.ws_end);
+    }
+
+    const fully_trimmed = std.mem.trimRight(u8, left_trimmed, &std.ascii.whitespace);
+    written += try writer.write(fully_trimmed);
+
+    const trailing_len = left_trimmed.len - fully_trimmed.len;
+    if (trailing_len != 0) {
+        written += try writer.write(markers.ws_start);
+        written += try writer.write(left_trimmed[fully_trimmed.len .. fully_trimmed.len + trailing_len]);
+        written += try writer.write(markers.ws_end);
+    }
+
+    written += try writer.write(markers.end);
     return written;
 }
 
@@ -2834,8 +2919,6 @@ fn diffCommonOverlap(text1_in: []const u8, text2_in: []const u8) usize {
     }
     return best_idx;
 }
-
-const Diff = @This();
 
 inline fn boolInt(b: bool) u8 {
     return @intFromBool(b);
@@ -4473,7 +4556,7 @@ fn testDiffCleanupEfficiency(
             .text = try allocator.dupe(u8, item.text),
         });
     }
-    try diffCleanupEfficiencyConfig(config, allocator, &diffs);
+    try diffCleanupEfficiency(config, allocator, &diffs);
     try expectEqualDiff(params.expected, diffs.items);
 }
 
@@ -4485,7 +4568,7 @@ test "diffCleanupEfficiency" {
         break :blk config;
     };
     var diffs: DiffList = .empty;
-    try diffCleanupEfficiencyConfig(config, allocator, &diffs);
+    try diffCleanupEfficiency(config, allocator, &diffs);
     try testing.expectEqualDeep(DiffList.empty, diffs);
     try testing.checkAllAllocationFailures(
         allocator,
@@ -4834,6 +4917,32 @@ test diffPrettyFormat {
     defer allocator.free(out_text);
     try testing.expectEqualStrings(
         "<+>A thing of</+><->Singular</-><=> beauty is </=><+>a </+><->en</-><=>joy</=><->ed</-><=> forever</=>",
+        out_text,
+    );
+}
+
+test "diffPrettyFormat decorates leading and trailing whitespace in edits" {
+    const allocator = testing.allocator;
+    var diffs: DiffList = .empty;
+    defer deinitDiffList(allocator, &diffs);
+
+    try diffs.append(allocator, Edit.asBorrow(.delete, "  gone\t"));
+    try diffs.append(allocator, Edit.asBorrow(.insert, "\tnew  "));
+
+    const out_text = try diffPrettyFormat(allocator, diffs, .{
+        .delete_start = "<d>",
+        .delete_end = "</d>",
+        .d_ws_start = "<dw>",
+        .d_ws_end = "</dw>",
+        .insert_start = "<i>",
+        .insert_end = "</i>",
+        .i_ws_start = "<iw>",
+        .i_ws_end = "</iw>",
+    });
+    defer allocator.free(out_text);
+
+    try testing.expectEqualStrings(
+        "<d><dw>  </dw>gone<dw>\t</dw></d><i><iw>\t</iw>new<iw>  </iw></i>",
         out_text,
     );
 }
