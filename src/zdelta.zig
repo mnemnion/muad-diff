@@ -157,11 +157,7 @@ pub const TextManager = struct {
         const before_len, const head_room, const tail_room = try zdelta.textNumbers();
         if (before.len != before_len) return error.ZDeltaTextLengthMismatch;
         const midpoint = before_len / 2;
-        const total_len = try std.math.add(
-            usize,
-            try std.math.add(usize, before.len, head_room),
-            tail_room,
-        );
+        const total_len: usize = before.len + head_room + tail_room;
         var text = try allocator.alloc(u8, total_len);
         @memcpy(text[head_room..][0..before.len], before);
         return .{
@@ -252,20 +248,20 @@ pub const TextManager = struct {
     fn growForNeed(tm: *TextManager, need: u32) !void {
         if (need <= tm.budget) return;
         const shortfall = need - tm.budget;
-        const growth = try std.math.add(usize, shortfall, growth_fudge);
-        const new_len = try std.math.add(usize, tm.buffer.len, growth);
+        const growth = shortfall +| growth_fudge;
+        const new_len = tm.buffer.len + growth;
         tm.buffer = try tm.allocator.realloc(tm.buffer, new_len);
-        tm.budget +|= @intCast(growth);
+        tm.budget +|= growth;
     }
 
-    fn ensureHeadRoom(tm: *TextManager, need: u32) !void {
+    fn makeHeadGap(tm: *TextManager, need: u32) !void {
         if (need <= tm.start) return;
         if (need > tm.budget) try tm.growForNeed(need);
         dbgassert(need <= tm.totalSlack());
         tm.rebase(need);
     }
 
-    fn ensureTailRoom(tm: *TextManager, need: u32) !void {
+    fn makeTailGap(tm: *TextManager, need: u32) !void {
         const tail_room: u32 = @intCast(tm.buffer.len - tm.end);
         if (need <= tail_room) return;
         if (need > tm.budget) try tm.growForNeed(need);
@@ -283,7 +279,7 @@ pub const TextManager = struct {
         dbgassert(at <= tm.textLen());
 
         if (at < tm.pivot) {
-            try tm.ensureHeadRoom(new_len);
+            try tm.makeHeadGap(new_len);
             const new_start = tm.start - new_len;
             @memmove(
                 tm.buffer[new_start..][0..at],
@@ -291,7 +287,7 @@ pub const TextManager = struct {
             );
             tm.start = new_start;
         } else {
-            try tm.ensureTailRoom(new_len);
+            try tm.makeTailGap(new_len);
             const abs_start = tm.start + at;
             @memmove(
                 tm.buffer[abs_start + new_len ..][0 .. tm.end - abs_start],
