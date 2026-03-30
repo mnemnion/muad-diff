@@ -21,6 +21,7 @@ pub const ZDeltaError = Allocator.Error || error{
     BadZDeltaOperation,
     BadZDeltaNumber,
     ZDeltaLengthMismatch,
+    ZDeltaTextLengthMismatch,
     InvalidZDeltaText,
 };
 
@@ -40,10 +41,259 @@ pub const ZDelta = struct {
     insert_text: []u8,
     ops: []DeltaOp,
 
+    pub fn beforeLength(delta: *const ZDelta) !u32 {
+        var len: u32 = 0;
+        for (delta.ops) |op| {
+            switch (op) {
+                .delete => |count| len = try addU32(len, count),
+                .equal => |count| len = try addU32(len, count),
+                .insert => {},
+            }
+        }
+        return len;
+    }
+
+    pub fn midpoint(delta: *const ZDelta) !u32 {
+        return (try delta.beforeLength()) / 2;
+    }
+
+    pub fn afterLength(delta: *const ZDelta) !u32 {
+        var len: u32 = @intCast(delta.insert_text.len);
+        for (delta.ops) |op| {
+            switch (op) {
+                .equal => |count| len = try addU32(len, count),
+                .insert, .delete => {},
+            }
+        }
+        return len;
+    }
+
+    pub fn padding(delta: *const ZDelta) !struct { u32, u32 } {
+        const mid = try delta.midpoint();
+        var t_idx: u32 = 0;
+        var index: u32 = mid;
+        var head_now: i64 = 0;
+        var tail_now: i64 = 0;
+        var head_max: i64 = 0;
+        var tail_max: i64 = 0;
+
+        for (delta.ops) |op| {
+            switch (op) {
+                .equal => |len| {
+                    t_idx += len;
+                },
+                .delete => |len| {
+                    if (t_idx < index) {
+                        head_now -= len;
+                    } else {
+                        tail_now -= len;
+                    }
+                    remapManagerIndex(&index, t_idx, len, 0);
+                },
+                .insert => |span| {
+                    if (t_idx < index) {
+                        head_now += span.len;
+                    } else {
+                        tail_now += span.len;
+                    }
+                    remapManagerIndex(&index, t_idx, 0, span.len);
+                    t_idx += span.len;
+                },
+            }
+            head_max = @max(head_max, head_now);
+            tail_max = @max(tail_max, tail_now);
+        }
+
+        return .{
+            try checkedU32(@intCast(@max(@as(i64, 0), head_max))),
+            try checkedU32(@intCast(@max(@as(i64, 0), tail_max))),
+        };
+    }
+
+    pub fn textNumbers(delta: *const ZDelta) !struct { u32, u32, u32 } {
+        const before_len = try delta.beforeLength();
+        const pre_padding, const post_padding = try delta.padding();
+        return .{
+            before_len,
+            pre_padding,
+            post_padding,
+        };
+    }
+
     pub fn deinit(delta: *ZDelta, allocator: Allocator) void {
         allocator.free(delta.insert_text);
         allocator.free(delta.ops);
         delta.* = undefined;
+    }
+};
+
+/// Manages text through zdelta application without reallocating.
+const TextManager = struct {
+    allocator: Allocator,
+    buffer: []u8,
+    start: u32,
+    end: u32,
+    index: u32,
+    t_idx: u32,
+    z_idx: u32,
+
+    fn init(
+        allocator: Allocator,
+        before: []const u8,
+        zdelta: *const ZDelta,
+    ) !TextManager {
+        const before_len, const head_room, const tail_room = try zdelta.textNumbers();
+        if (before.len != before_len) return error.ZDeltaTextLengthMismatch;
+        const midpoint = before_len / 2;
+        const total_len = std.math.add(
+            usize,
+            std.math.add(usize, before.len, head_room) catch return error.BadZDeltaNumber,
+            tail_room,
+        ) catch return error.BadZDeltaNumber;
+        var text = try allocator.alloc(u8, total_len);
+        @memcpy(text[head_room..][0..before.len], before);
+        return .{
+            .allocator = allocator,
+            .buffer = text,
+            .start = head_room,
+            .end = head_room + before_len,
+            .index = midpoint,
+            .t_idx = 0,
+            .z_idx = 0,
+        };
+    }
+
+    fn deinit(tm: *TextManager) void {
+        tm.allocator.free(tm.buffer);
+        tm.* = undefined;
+    }
+
+    fn view(tm: *const TextManager) []const u8 {
+        return tm.buffer[tm.start..tm.end];
+    }
+
+    fn activeLen(tm: *const TextManager) u32 {
+        return tm.end - tm.start;
+    }
+
+    fn totalSlack(tm: *const TextManager) u32 {
+        return tm.start + @as(u32, @intCast(tm.buffer.len)) - tm.end;
+    }
+
+    fn rebase(tm: *TextManager, new_start: u32) void {
+        if (new_start == tm.start) return;
+        const active_len = tm.activeLen();
+        @memmove(
+            tm.buffer[new_start..][0..active_len],
+            tm.buffer[tm.start..][0..active_len],
+        );
+        tm.start = new_start;
+        tm.end = new_start + active_len;
+    }
+
+    fn ensureHeadRoom(tm: *TextManager, need: u32) void {
+        if (need <= tm.start) return;
+        dbgassert(need <= tm.totalSlack());
+        tm.rebase(need);
+    }
+
+    fn ensureTailRoom(tm: *TextManager, need: u32) void {
+        const tail_room: u32 = @intCast(tm.buffer.len - tm.end);
+        if (need <= tail_room) return;
+        dbgassert(need <= tm.totalSlack());
+        tm.rebase(tm.totalSlack() - need);
+    }
+
+    fn insert(
+        tm: *TextManager,
+        at: u32,
+        new_text: []const u8,
+    ) void {
+        dbgassert(new_text.len <= std.math.maxInt(u32));
+        const new_len: u32 = @intCast(new_text.len);
+        dbgassert(at <= tm.activeLen());
+
+        if (at < tm.index) {
+            tm.ensureHeadRoom(new_len);
+            const new_start = tm.start - new_len;
+            @memmove(
+                tm.buffer[new_start..][0..at],
+                tm.buffer[tm.start..][0..at],
+            );
+            tm.start = new_start;
+        } else {
+            tm.ensureTailRoom(new_len);
+            const abs_start = tm.start + at;
+            @memmove(
+                tm.buffer[abs_start + new_len ..][0 .. tm.end - abs_start],
+                tm.buffer[abs_start..][0 .. tm.end - abs_start],
+            );
+            tm.end += new_len;
+        }
+
+        remapManagerIndex(&tm.index, at, 0, new_len);
+        @memcpy(tm.buffer[tm.start + at ..][0..new_len], new_text);
+    }
+
+    fn delete(
+        tm: *TextManager,
+        start: u32,
+        len: u32,
+    ) void {
+        const abs_start = tm.start + start;
+        const abs_end = abs_start + len;
+        dbgassert(start <= tm.activeLen());
+        dbgassert(len <= tm.activeLen() - start);
+
+        if (start < tm.index) {
+            @memmove(
+                tm.buffer[tm.start + len ..][0..start],
+                tm.buffer[tm.start..][0..start],
+            );
+            tm.start += len;
+        } else {
+            @memmove(
+                tm.buffer[abs_start..][0 .. tm.end - abs_end],
+                tm.buffer[abs_end..][0 .. tm.end - abs_end],
+            );
+            tm.end -= len;
+        }
+
+        remapManagerIndex(&tm.index, start, len, 0);
+    }
+
+    fn finish(tm: *TextManager) ![]u8 {
+        const text_len = tm.end - tm.start;
+        @memmove(tm.buffer[0..text_len], tm.buffer[tm.start..][0..text_len]);
+        const text = try tm.allocator.realloc(tm.buffer, text_len);
+        tm.buffer = &.{};
+        return text;
+    }
+
+    fn applyNext(
+        tm: *TextManager,
+        zdelta: *const ZDelta,
+    ) ?void {
+        while (currentDeltaOp(tm, zdelta)) |op| {
+            switch (op) {
+                .equal => |len| {
+                    tm.t_idx += len;
+                    tm.z_idx += 1;
+                },
+                .delete => |len| {
+                    tm.delete(tm.t_idx, len);
+                    tm.z_idx += 1;
+                    return {};
+                },
+                .insert => |span| {
+                    tm.insert(tm.t_idx, deltaInsertText(zdelta, span));
+                    tm.t_idx += span.len;
+                    tm.z_idx += 1;
+                    return {};
+                },
+            }
+        }
+        return null;
     }
 };
 
@@ -438,7 +688,7 @@ fn decodeField(
         .a => switch (action) {
             insert_a => {
                 if (!std.unicode.utf8ValidateSlice(payload)) return error.InvalidZDeltaText;
-                try appendInsertSpan(allocator, insert_text, ops, payload);
+                try appendInsertSpan(insert_text, ops, payload);
             },
             delete_a => try ops.append(.{ .delete = try parseCountU32(payload) }),
             equal_a => try ops.append(.{ .equal = try parseCountU32(payload) }),
@@ -449,7 +699,7 @@ fn decodeField(
                 const decoded = try decodePercent(allocator, payload);
                 defer allocator.free(decoded);
                 if (!std.unicode.wtf8ValidateSlice(decoded)) return error.InvalidZDeltaText;
-                try appendInsertSpan(allocator, insert_text, ops, decoded);
+                try appendInsertSpan(insert_text, ops, decoded);
             },
             '-' => try ops.append(.{ .delete = try parseCountU32(payload) }),
             '=' => try ops.append(.{ .equal = try parseCountU32(payload) }),
@@ -478,32 +728,34 @@ fn appendCountEdit(
     pointer.* += len;
 }
 
-fn parseCount(payload: []const u8) ZDeltaError!usize {
+fn parseCount(payload: []const u8) !usize {
     if (payload.len == 0) return error.BadZDeltaNumber;
     return std.fmt.parseInt(usize, payload, 16) catch error.BadZDeltaNumber;
 }
 
-fn parseCountU32(payload: []const u8) ZDeltaError!u32 {
+fn parseCountU32(payload: []const u8) !u32 {
     return checkedU32(try parseCount(payload));
 }
 
 fn appendInsertSpan(
-    allocator: Allocator,
     insert_text: *ArrayList(u8),
     ops: *ArrayList(DeltaOp),
     text: []const u8,
-) ZDeltaError!void {
+) !void {
     const span = try makeDeltaSpan(insert_text.items.len, text.len);
     try insert_text.appendSlice(text);
     try ops.append(.{ .insert = span });
-    _ = allocator;
 }
 
-fn checkedU32(value: usize) ZDeltaError!u32 {
+fn checkedU32(value: usize) !u32 {
     return std.math.cast(u32, value) orelse error.BadZDeltaNumber;
 }
 
-fn makeDeltaSpan(offset: usize, len: usize) ZDeltaError!DeltaSpan {
+fn addU32(a: u32, b: u32) !u32 {
+    return std.math.add(u32, a, b) catch error.BadZDeltaNumber;
+}
+
+fn makeDeltaSpan(offset: usize, len: usize) !DeltaSpan {
     const end = std.math.add(usize, offset, len) catch return error.BadZDeltaNumber;
     if (end < offset) return error.BadZDeltaNumber;
     if (end > std.math.maxInt(u32)) return error.BadZDeltaNumber;
@@ -513,7 +765,44 @@ fn makeDeltaSpan(offset: usize, len: usize) ZDeltaError!DeltaSpan {
     };
 }
 
-fn decodePercent(allocator: Allocator, text: []const u8) ZDeltaError![]u8 {
+fn remapManagerIndex(
+    index: *u32,
+    start: u32,
+    len: u32,
+    new_len: u32,
+) void {
+    const old = index.*;
+    const end = start + len;
+    if (old <= start) return;
+    if (old < end) {
+        index.* = start + new_len;
+        return;
+    }
+    if (new_len >= len) {
+        index.* = old + (new_len - len);
+    } else {
+        index.* = old - (len - new_len);
+    }
+}
+
+fn currentDeltaOp(
+    tm: *const TextManager,
+    zdelta: *const ZDelta,
+) ?DeltaOp {
+    if (tm.z_idx >= zdelta.ops.len) return null;
+    return zdelta.ops[tm.z_idx];
+}
+
+fn deltaInsertText(
+    zdelta: *const ZDelta,
+    span: DeltaSpan,
+) []const u8 {
+    const offset: usize = span.offset;
+    const len: usize = span.len;
+    return zdelta.insert_text[offset..][0..len];
+}
+
+fn decodePercent(allocator: Allocator, text: []const u8) ![]u8 {
     if (std.mem.indexOfScalar(u8, text, '%') == null) return allocator.dupe(u8, text);
     var out = ArrayList(u8).init(allocator);
     defer out.deinit();
@@ -642,6 +931,50 @@ fn testBadDecodeReifiedCase(
     expected: ZDeltaError,
 ) anyerror!void {
     try testing.expectError(expected, decode(allocator, zdelta));
+}
+
+fn testZDelta(
+    allocator: Allocator,
+    insert_text: []const u8,
+    ops: []const DeltaOp,
+) !ZDelta {
+    return .{
+        .version = .b,
+        .insert_text = try allocator.dupe(u8, insert_text),
+        .ops = try allocator.dupe(DeltaOp, ops),
+    };
+}
+
+const TestManager = struct {
+    zdelta: ZDelta,
+    tm: TextManager,
+
+    fn init(
+        allocator: Allocator,
+        before: []const u8,
+        insert_text: []const u8,
+        ops: []const DeltaOp,
+    ) !TestManager {
+        var zdelta = try testZDelta(allocator, insert_text, ops);
+        errdefer zdelta.deinit(allocator);
+        return .{
+            .zdelta = zdelta,
+            .tm = try TextManager.init(allocator, before, &zdelta),
+        };
+    }
+
+    fn deinit(test_manager: *TestManager) void {
+        const allocator = test_manager.tm.allocator;
+        test_manager.tm.deinit();
+        test_manager.zdelta.deinit(allocator);
+    }
+};
+
+fn expectManagerText(
+    expected: []const u8,
+    tm: *const TextManager,
+) !void {
+    try testing.expectEqualStrings(expected, tm.view());
 }
 
 test "ZDelta encode" {
@@ -815,6 +1148,211 @@ test "ZDelta decode insert overflow maps to BadZDeltaNumber" {
     try testing.expectError(error.BadZDeltaNumber, makeDeltaSpan(0, @as(usize, std.math.maxInt(u32)) + 1));
 }
 
+test "ZDelta derived text numbers" {
+    const allocator = testing.allocator;
+    var zdelta = try testZDelta(allocator, "XY", &.{
+        .{ .insert = .{ .offset = 0, .len = 1 } },
+        .{ .equal = 2 },
+        .{ .delete = 1 },
+        .{ .insert = .{ .offset = 1, .len = 1 } },
+        .{ .equal = 1 },
+    });
+    defer zdelta.deinit(allocator);
+
+    try testing.expectEqual(@as(u32, 4), try zdelta.beforeLength());
+    try testing.expectEqual(@as(u32, 5), try zdelta.afterLength());
+    try testing.expectEqual(@as(u32, 2), try zdelta.midpoint());
+    try testing.expectEqual(@as(usize, 2), zdelta.insert_text.len);
+    const pre_padding, const post_padding = try zdelta.padding();
+    try testing.expectEqual(@as(u32, 1), pre_padding);
+    try testing.expectEqual(@as(u32, 0), post_padding);
+
+    const before_len, const pre, const post = try zdelta.textNumbers();
+    try testing.expectEqual(@as(u32, 4), before_len);
+    try testing.expectEqual(@as(u32, 1), pre);
+    try testing.expectEqual(@as(u32, 0), post);
+}
+
+test "ZDelta TextManager rejects wrong text length" {
+    const allocator = testing.allocator;
+    var zdelta = try testZDelta(allocator, "", &.{
+        .{ .equal = 3 },
+    });
+    defer zdelta.deinit(allocator);
+
+    try testing.expectError(
+        error.ZDeltaTextLengthMismatch,
+        TextManager.init(allocator, "ab", &zdelta),
+    );
+}
+
+test "ZDelta TextManager init empty" {
+    const allocator = testing.allocator;
+    var test_manager = try TestManager.init(allocator, "", "", &.{});
+    defer test_manager.deinit();
+
+    try testing.expectEqual(@as(u32, 0), test_manager.tm.start);
+    try testing.expectEqual(@as(u32, 0), test_manager.tm.end);
+    try testing.expectEqual(@as(u32, 0), test_manager.tm.index);
+    try testing.expectEqual(@as(usize, 0), test_manager.zdelta.insert_text.len);
+    try testing.expectEqual(@as(u32, 0), test_manager.tm.t_idx);
+    try testing.expectEqual(@as(u32, 0), test_manager.tm.z_idx);
+    try expectManagerText("", &test_manager.tm);
+}
+
+test "ZDelta TextManager plans front and tail slack" {
+    const allocator = testing.allocator;
+
+    var front = try TestManager.init(allocator, "abc", "X", &.{
+        .{ .insert = .{ .offset = 0, .len = 1 } },
+        .{ .equal = 3 },
+    });
+    defer front.deinit();
+    try testing.expectEqual(@as(u32, 1), front.tm.start);
+    try testing.expectEqual(@as(u32, 4), front.tm.end);
+    try testing.expectEqual(@as(usize, 1), front.zdelta.insert_text.len);
+
+    var tail = try TestManager.init(allocator, "abc", "X", &.{
+        .{ .equal = 3 },
+        .{ .insert = .{ .offset = 0, .len = 1 } },
+    });
+    defer tail.deinit();
+    try testing.expectEqual(@as(u32, 0), tail.tm.start);
+    try testing.expectEqual(@as(u32, 3), tail.tm.end);
+    try testing.expectEqual(@as(usize, 1), tail.zdelta.insert_text.len);
+    try testing.expectEqual(@as(usize, 1), tail.tm.buffer.len - tail.tm.end);
+}
+
+test "ZDelta TextManager plans mixed pressure" {
+    const allocator = testing.allocator;
+    var test_manager = try TestManager.init(allocator, "abcd", "XY", &.{
+        .{ .insert = .{ .offset = 0, .len = 1 } },
+        .{ .equal = 2 },
+        .{ .delete = 1 },
+        .{ .insert = .{ .offset = 1, .len = 1 } },
+        .{ .equal = 1 },
+    });
+    defer test_manager.deinit();
+
+    try testing.expectEqual(@as(u32, 1), test_manager.tm.start);
+    try testing.expectEqual(@as(usize, 0), test_manager.tm.buffer.len - test_manager.tm.end);
+    try testing.expectEqual(@as(usize, 2), test_manager.zdelta.insert_text.len);
+}
+
+test "ZDelta TextManager replace same size" {
+    const allocator = testing.allocator;
+    var test_manager = try TestManager.init(allocator, "abcd", "", &.{
+        .{ .equal = 4 },
+    });
+    defer test_manager.deinit();
+
+    test_manager.tm.delete(1, 2);
+    test_manager.tm.insert(1, "XY");
+    try expectManagerText("aXYd", &test_manager.tm);
+    try testing.expectEqual(@as(usize, 0), test_manager.zdelta.insert_text.len);
+}
+
+test "ZDelta TextManager grow from head side" {
+    const allocator = testing.allocator;
+    var test_manager = try TestManager.init(allocator, "abcd", "XY", &.{
+        .{ .insert = .{ .offset = 0, .len = 2 } },
+        .{ .equal = 4 },
+    });
+    defer test_manager.deinit();
+
+    test_manager.tm.insert(0, "XY");
+    try expectManagerText("XYabcd", &test_manager.tm);
+    try testing.expectEqual(@as(u32, 0), test_manager.tm.start);
+    try testing.expectEqual(@as(usize, 2), test_manager.zdelta.insert_text.len);
+}
+
+test "ZDelta TextManager grow from tail side" {
+    const allocator = testing.allocator;
+    var test_manager = try TestManager.init(allocator, "abcd", "XY", &.{
+        .{ .equal = 4 },
+        .{ .insert = .{ .offset = 0, .len = 2 } },
+    });
+    defer test_manager.deinit();
+
+    test_manager.tm.insert(4, "XY");
+    try expectManagerText("abcdXY", &test_manager.tm);
+    try testing.expectEqual(@as(usize, 2), test_manager.zdelta.insert_text.len);
+}
+
+test "ZDelta TextManager shrink from head side" {
+    const allocator = testing.allocator;
+    var test_manager = try TestManager.init(allocator, "abcd", "", &.{
+        .{ .delete = 2 },
+        .{ .equal = 2 },
+    });
+    defer test_manager.deinit();
+
+    test_manager.tm.delete(0, 2);
+    try expectManagerText("cd", &test_manager.tm);
+    try testing.expectEqual(@as(u32, 2), test_manager.tm.start);
+    try testing.expectEqual(@as(usize, 0), test_manager.zdelta.insert_text.len);
+}
+
+test "ZDelta TextManager shrink from tail side" {
+    const allocator = testing.allocator;
+    var test_manager = try TestManager.init(allocator, "abcd", "", &.{
+        .{ .equal = 2 },
+        .{ .delete = 2 },
+    });
+    defer test_manager.deinit();
+
+    test_manager.tm.delete(2, 2);
+    try expectManagerText("ab", &test_manager.tm);
+    try testing.expectEqual(@as(usize, 0), test_manager.zdelta.insert_text.len);
+}
+
+test "ZDelta TextManager finish trims slack" {
+    const allocator = testing.allocator;
+    var test_manager = try TestManager.init(allocator, "abcd", "XY", &.{
+        .{ .insert = .{ .offset = 0, .len = 2 } },
+        .{ .equal = 4 },
+    });
+    defer test_manager.zdelta.deinit(allocator);
+
+    test_manager.tm.insert(0, "XY");
+    const finished = try test_manager.tm.finish();
+    defer allocator.free(finished);
+    test_manager.tm.buffer = &.{};
+    try testing.expectEqualStrings("XYabcd", finished);
+}
+
+test "ZDelta TextManager applyNext" {
+    const allocator = testing.allocator;
+    var test_manager = try TestManager.init(allocator, "abcd", "XY", &.{
+        .{ .insert = .{ .offset = 0, .len = 1 } },
+        .{ .equal = 2 },
+        .{ .delete = 1 },
+        .{ .insert = .{ .offset = 1, .len = 1 } },
+        .{ .equal = 1 },
+    });
+    defer test_manager.deinit();
+
+    try testing.expectEqual(@as(?void, {}), test_manager.tm.applyNext(&test_manager.zdelta));
+    try testing.expectEqual(@as(u32, 1), test_manager.tm.t_idx);
+    try testing.expectEqual(@as(u32, 1), test_manager.tm.z_idx);
+    try expectManagerText("Xabcd", &test_manager.tm);
+
+    try testing.expectEqual(@as(?void, {}), test_manager.tm.applyNext(&test_manager.zdelta));
+    try testing.expectEqual(@as(u32, 3), test_manager.tm.t_idx);
+    try testing.expectEqual(@as(u32, 3), test_manager.tm.z_idx);
+    try expectManagerText("Xabd", &test_manager.tm);
+
+    try testing.expectEqual(@as(?void, {}), test_manager.tm.applyNext(&test_manager.zdelta));
+    try testing.expectEqual(@as(u32, 4), test_manager.tm.t_idx);
+    try testing.expectEqual(@as(u32, 4), test_manager.tm.z_idx);
+    try expectManagerText("XabYd", &test_manager.tm);
+
+    try testing.expectEqual(@as(?void, null), test_manager.tm.applyNext(&test_manager.zdelta));
+    try testing.expectEqual(@as(u32, 5), test_manager.tm.t_idx);
+    try testing.expectEqual(@as(u32, 5), test_manager.tm.z_idx);
+    try expectManagerText("XabYd", &test_manager.tm);
+}
+
 const TestEdit = struct {
     operation: Operation,
     owned: bool,
@@ -850,3 +1388,5 @@ const ArrayList = std.array_list.Managed;
 const testing = std.testing;
 const dmp = @import("dmp.zig");
 const Edit = dmp.Edit;
+const common = @import("dmp/common.zig");
+const dbgassert = common.dbgassert;
