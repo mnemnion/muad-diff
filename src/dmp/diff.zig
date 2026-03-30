@@ -50,7 +50,7 @@ pub const DiffConfig = struct {
     };
 };
 
-pub const ZDeltaVersion = zdelta_mod.ZDeltaVersion;
+const ZDeltaVersion = zdelta_mod.ZDeltaVersion;
 pub const ZDeltaError = zdelta_mod.ZDeltaError;
 
 /// A single edit of a diff: insertion, deletion, or neither.
@@ -59,7 +59,7 @@ pub const Edit = struct {
     owned: bool,
     text: []const u8,
 
-    pub const Operation = enum {
+    pub const Operation = enum(u2) {
         insert,
         delete,
         equal,
@@ -336,7 +336,7 @@ pub const Diff = struct {
         before: []const u8,
         zdelta: []const u8,
     ) ZDeltaError!*Diff {
-        var edits = try zdelta_mod.decode(Edit, DiffList, allocator, before, zdelta);
+        var edits = try zdelta_mod.toDiffList(Edit, DiffList, allocator, before, zdelta);
         errdefer deinitDiffList(allocator, &edits);
         if (difference.edits.items.len != 0) {
             deinitDiffList(allocator, &difference.edits);
