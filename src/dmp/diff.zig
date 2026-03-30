@@ -1903,8 +1903,16 @@ fn diffCleanupSemantic(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void 
             const insert_edit = diffs.items[pointer];
             const deletion = delete_edit.text;
             const insertion = insert_edit.text;
-            const overlap_length1: usize = diffCommonOverlap(deletion, insertion);
-            const overlap_length2: usize = diffCommonOverlap(insertion, deletion);
+            const raw_overlap_length1 = diffCommonOverlap(deletion, insertion);
+            const overlap_length1 = @min(
+                deletion.len - fixSplitForward(deletion, deletion.len - raw_overlap_length1),
+                fixSplitBackward(insertion, raw_overlap_length1),
+            );
+            const raw_overlap_length2 = diffCommonOverlap(insertion, deletion);
+            const overlap_length2 = @min(
+                insertion.len - fixSplitForward(insertion, insertion.len - raw_overlap_length2),
+                fixSplitBackward(deletion, raw_overlap_length2),
+            );
             if (overlap_length1 >= overlap_length2) {
                 if (@as(f32, @floatFromInt(overlap_length1)) >= @as(f32, @floatFromInt(deletion.len)) / 2.0 or
                     @as(f32, @floatFromInt(overlap_length1)) >= @as(f32, @floatFromInt(insertion.len)) / 2.0)
@@ -2119,13 +2127,17 @@ fn diffCleanupSemanticLosslessOwned(
     var best_score = diffCleanupSemanticScore(equality_1.items, edit.items) +
         diffCleanupSemanticScore(edit.items, equality_2.items);
 
-    while (edit.items.len != 0 and equality_2.items.len != 0 and edit.items[0] == equality_2.items[0]) {
-        try equality_1.append(allocator, edit.items[0]);
+    while (hasSharedPrefixLen(edit.items, equality_2.items)) |cp_len| {
+        var cp_buf: [4]u8 = undefined;
+        @memcpy(cp_buf[0..cp_len], edit.items[0..cp_len]);
+        try equality_1.appendSlice(allocator, cp_buf[0..cp_len]);
 
-        _ = edit.orderedRemove(0);
-        try edit.append(allocator, equality_2.items[0]);
+        std.mem.copyForwards(u8, edit.items[0 .. edit.items.len - cp_len], edit.items[cp_len..]);
+        edit.items.len -= cp_len;
+        try edit.appendSlice(allocator, equality_2.items[0..cp_len]);
 
-        _ = equality_2.orderedRemove(0);
+        std.mem.copyForwards(u8, equality_2.items[0 .. equality_2.items.len - cp_len], equality_2.items[cp_len..]);
+        equality_2.items.len -= cp_len;
 
         const score = diffCleanupSemanticScore(equality_1.items, edit.items) +
             diffCleanupSemanticScore(edit.items, equality_2.items);
@@ -2209,10 +2221,11 @@ fn diffCleanupSemanticLosslessBorrowed(
     var best_score = diffCleanupSemanticScore(equality_1, edit) +
         diffCleanupSemanticScore(edit, equality_2);
 
-    while (edit.len != 0 and equality_2.len != 0 and edit[0] == equality_2[0]) {
-        equality_1 = equality_1.ptr[0 .. equality_1.len + 1];
-        edit = edit[1..].ptr[0..edit.len];
-        equality_2 = equality_2[1..];
+    while (hasSharedPrefixLen(edit, equality_2)) |cp_len| {
+        const old_edit = edit;
+        equality_1 = equality_1.ptr[0 .. equality_1.len + cp_len];
+        edit = old_edit[cp_len..].ptr[0..old_edit.len];
+        equality_2 = equality_2[cp_len..];
 
         const score = diffCleanupSemanticScore(equality_1, edit) +
             diffCleanupSemanticScore(edit, equality_2);
@@ -2242,6 +2255,15 @@ fn diffCleanupSemanticLosslessBorrowed(
             pointer.* -= 1;
         }
     }
+}
+
+fn hasSharedPrefixLen(a: []const u8, b: []const u8) ?usize {
+    if (a.len == 0 or b.len == 0) return null;
+    const a_len = std.unicode.utf8ByteSequenceLength(a[0]) catch return null;
+    const b_len = std.unicode.utf8ByteSequenceLength(b[0]) catch return null;
+    if (a_len != b_len or a_len > a.len or b_len > b.len) return null;
+    if (!std.mem.eql(u8, a[0..a_len], b[0..b_len])) return null;
+    return a_len;
 }
 
 /// Given two strings, compute a score representing whether the internal
