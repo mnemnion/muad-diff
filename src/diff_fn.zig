@@ -101,11 +101,11 @@ pub fn DiffFn(config: anytype) type {
 
     return struct {
         /// The diff configuration, see `DiffConfig`.
-        config: DiffConfig = .default,
+        config: DiffConfig,
         /// User-provided specialization context, stored on every `Diff`.
-        context: Context = defaultContext(Context),
+        context: Context,
         /// The individual edits making up this difference.
-        edits: DiffList = .empty,
+        edits: DiffList,
 
         const Diff = @This();
 
