@@ -876,7 +876,7 @@ fn applyDestructiveImpl(
     const null_padding = try patchAddPadding(patch.config, allocator, &patch.hunks);
     defer allocator.free(null_padding);
     try patch.patchSplitMax(allocator);
-    var tm = try TextManager.init(allocator, og_text, null_padding, pre, post);
+    var tm = try PatchManager.init(allocator, og_text, null_padding, pre, post);
     errdefer tm.errDeinit(allocator);
     var all_applied = true;
     // delta keeps track of the offset between the expected and actual
@@ -989,7 +989,7 @@ fn applyDestructiveImpl(
 }
 
 /// Manages our text through patch application.
-const TextManager = struct {
+const PatchManager = struct {
     text: []u8,
     /// Amount of remaining padding before the text.
     pre: usize,
@@ -1006,7 +1006,7 @@ const TextManager = struct {
         padding: []const u8,
         pre: usize,
         post: usize,
-    ) error{OutOfMemory}!TextManager {
+    ) error{OutOfMemory}!PatchManager {
         var text = try allocator.alloc(u8, og_text.len + pre + post + padding.len * 2);
         const pad_len = padding.len;
         @memset(text[0..pre], 0);
@@ -1025,17 +1025,17 @@ const TextManager = struct {
         };
     }
 
-    fn asText(tm: *const TextManager) []const u8 {
+    fn asText(tm: *const PatchManager) []const u8 {
         return tm.text[tm.pre .. tm.text.len - tm.post];
     }
 
-    fn fetchRange(tm: *const TextManager, start: usize, end: usize) []const u8 {
+    fn fetchRange(tm: *const PatchManager, start: usize, end: usize) []const u8 {
         const text = tm.asText();
         return text[start..@min(end, text.len)];
     }
 
     fn replaceRange(
-        tm: *TextManager,
+        tm: *PatchManager,
         start: usize,
         len: usize,
         new_text: []const u8,
@@ -1090,15 +1090,15 @@ const TextManager = struct {
         }
     }
 
-    fn insert(tm: *TextManager, at: usize, new_text: []const u8) void {
+    fn insert(tm: *PatchManager, at: usize, new_text: []const u8) void {
         tm.replaceRange(at, 0, new_text);
     }
 
-    fn delete(tm: *TextManager, start: usize, len: usize) void {
+    fn delete(tm: *PatchManager, start: usize, len: usize) void {
         tm.replaceRange(start, len, &.{});
     }
 
-    fn finish(tm: *TextManager, allocator: Allocator) error{OutOfMemory}![]const u8 {
+    fn finish(tm: *PatchManager, allocator: Allocator) error{OutOfMemory}![]const u8 {
         const text_start = tm.pre + tm.padding;
         const text_len = tm.text.len - tm.pre - tm.post - 2 * tm.padding;
         @memmove(tm.text[0..text_len], tm.text[text_start..][0..text_len]);
@@ -1107,7 +1107,7 @@ const TextManager = struct {
         return text;
     }
 
-    fn errDeinit(tm: *TextManager, allocator: Allocator) void {
+    fn errDeinit(tm: *PatchManager, allocator: Allocator) void {
         allocator.free(tm.text);
     }
 };
@@ -3097,7 +3097,7 @@ test "patching does not affect patches" {
 }
 
 fn testTextManagerReplaceRangeEqualLength(allocator: Allocator) !void {
-    var tm = try TextManager.init(allocator, "abcdef", "", 0, 0);
+    var tm = try PatchManager.init(allocator, "abcdef", "", 0, 0);
     errdefer {
         tm.errDeinit(allocator); // kcov-test-cleanup
     }
@@ -3108,7 +3108,7 @@ fn testTextManagerReplaceRangeEqualLength(allocator: Allocator) !void {
 }
 
 fn testTextManagerReplaceRangeEqualLengthErrdefer(allocator: Allocator) error{ Sentinel, OutOfMemory }!void {
-    var tm = try TextManager.init(allocator, "abcdef", "", 0, 0);
+    var tm = try PatchManager.init(allocator, "abcdef", "", 0, 0);
     errdefer {
         tm.errDeinit(allocator); // kcov-test-cleanup
     }
