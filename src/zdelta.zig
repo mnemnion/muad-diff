@@ -231,16 +231,8 @@ pub const TextManager = struct {
         return null;
     }
 
-    const growth_fudge: u32 = 16;
-
-    fn textLen(tm: *const TextManager) u32 {
-        return tm.end - tm.start;
-    }
-
-    fn totalSlack(tm: *const TextManager) u32 {
-        return tm.start + cast(u32, tm.buffer.len) - tm.end;
-    }
-
+    /// Move the entire text to new_start.  This is only called
+    /// if a budget shortfall caused us to have to reallocate.
     fn rebase(tm: *TextManager, new_start: u32) void {
         if (new_start == tm.start) return;
         const active_len = tm.textLen();
@@ -252,6 +244,7 @@ pub const TextManager = struct {
         tm.end = new_start + active_len;
     }
 
+    /// Reallocate the buffer, only if necessary.
     fn growForNeed(tm: *TextManager, need: u32) !void {
         if (need <= tm.budget) return;
         const shortfall = need - tm.budget;
@@ -261,14 +254,18 @@ pub const TextManager = struct {
         tm.budget +|= growth;
     }
 
-    fn makeHeadGap(tm: *TextManager, need: u32) !void {
+    /// Ensure there are `need` bytes available at the head,
+    /// reallocating and rebasing if necessary.
+    fn ensureHeadRoom(tm: *TextManager, need: u32) !void {
         if (need <= tm.start) return;
         if (need > tm.budget) try tm.growForNeed(need);
         dbgassert(need <= tm.totalSlack());
         tm.rebase(need);
     }
 
-    fn makeTailGap(tm: *TextManager, need: u32) !void {
+    /// Ensure there are `need` bytes available at the tail,
+    /// reallocating and rebasing if necessary.
+    fn ensureTailRoom(tm: *TextManager, need: u32) !void {
         const tail_room: u32 = @intCast(tm.buffer.len - tm.end);
         if (need <= tail_room) return;
         if (need > tm.budget) try tm.growForNeed(need);
@@ -286,7 +283,7 @@ pub const TextManager = struct {
         dbgassert(at <= tm.textLen());
 
         if (at < tm.pivot) {
-            try tm.makeHeadGap(new_len);
+            try tm.ensureHeadRoom(new_len);
             const new_start = tm.start - new_len;
             @memmove(
                 tm.buffer[new_start..][0..at],
@@ -294,7 +291,7 @@ pub const TextManager = struct {
             );
             tm.start = new_start;
         } else {
-            try tm.makeTailGap(new_len);
+            try tm.ensureTailRoom(new_len);
             const abs_start = tm.start + at;
             @memmove(
                 tm.buffer[abs_start + new_len ..][0 .. tm.end - abs_start],
@@ -334,22 +331,34 @@ pub const TextManager = struct {
         tm.budget +|= len;
     }
 
+    /// Verify we have a ZDelta, and retrieve its current span given
+    /// that we do.
     fn currentDeltaOp(tm: *const TextManager) !?DeltaOp {
         const zdelta = tm.zdelta orelse return error.MissingZDelta;
         if (tm.z_idx >= zdelta.ops.len) return null;
         return zdelta.ops[tm.z_idx];
     }
 
+    /// Retrieve the insert text from a delta span.
     fn deltaInsertText(
         tm: *const TextManager,
         span: DeltaSpan,
     ) ![]const u8 {
-        const zdelta = tm.zdelta orelse return error.MissingZDelta;
+        const zdelta = tm.zdelta.?; // We got the span, we have a zdelta.
         const offset: usize = span.offset;
         const len: usize = span.len;
         return zdelta.insert_text[offset..][0..len];
     }
 
+    const growth_fudge: u32 = 16;
+
+    fn textLen(tm: *const TextManager) u32 {
+        return tm.end - tm.start;
+    }
+
+    fn totalSlack(tm: *const TextManager) u32 {
+        return tm.start + cast(u32, tm.buffer.len) - tm.end;
+    }
 };
 
 /// Write a Diff in a zdelta format.  Currently supported are
