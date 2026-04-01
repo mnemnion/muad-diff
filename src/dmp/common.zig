@@ -228,6 +228,106 @@ pub fn diffCommonSuffix(before: []const u8, after: []const u8) usize {
     return n;
 }
 
+/// Encode one u32 'plan 9' style, up to six bytes for the whole range.
+pub fn plan9Encode(c: u31, out: []u8) u3 {
+    const length = plan9Width(c);
+    assert(out.len >= length);
+
+    switch (length) {
+        1 => out[0] = @as(u8, @intCast(c)),
+        2 => {
+            out[0] = @as(u8, @intCast(0b1100_0000 | (c >> 6)));
+            out[1] = @as(u8, @intCast(0b1000_0000 | (c & 0b0011_1111)));
+        },
+        3 => {
+            out[0] = @as(u8, @intCast(0b1110_0000 | (c >> 12)));
+            out[1] = @as(u8, @intCast(0b1000_0000 | ((c >> 6) & 0b0011_1111)));
+            out[2] = @as(u8, @intCast(0b1000_0000 | (c & 0b0011_1111)));
+        },
+        4 => {
+            out[0] = @as(u8, @intCast(0b1111_0000 | (c >> 18)));
+            out[1] = @as(u8, @intCast(0b1000_0000 | ((c >> 12) & 0b0011_1111)));
+            out[2] = @as(u8, @intCast(0b1000_0000 | ((c >> 6) & 0b0011_1111)));
+            out[3] = @as(u8, @intCast(0b1000_0000 | (c & 0b0011_1111)));
+        },
+        5 => {
+            out[0] = @as(u8, @intCast(0b1111_1000 | (c >> 24)));
+            out[1] = @as(u8, @intCast(0b1000_0000 | ((c >> 18) & 0b0011_1111)));
+            out[2] = @as(u8, @intCast(0b1000_0000 | ((c >> 12) & 0b0011_1111)));
+            out[3] = @as(u8, @intCast(0b1000_0000 | ((c >> 6) & 0b0011_1111)));
+            out[4] = @as(u8, @intCast(0b1000_0000 | (c & 0b0011_1111)));
+        },
+        6 => {
+            out[0] = @as(u8, @intCast(0b1111_1100 | (c >> 30)));
+            out[1] = @as(u8, @intCast(0b1000_0000 | ((c >> 24) & 0b0011_1111)));
+            out[2] = @as(u8, @intCast(0b1000_0000 | ((c >> 18) & 0b0011_1111)));
+            out[3] = @as(u8, @intCast(0b1000_0000 | ((c >> 12) & 0b0011_1111)));
+            out[4] = @as(u8, @intCast(0b1000_0000 | ((c >> 6) & 0b0011_1111)));
+            out[5] = @as(u8, @intCast(0b1000_0000 | (c & 0b0011_1111)));
+        },
+        else => unreachable,
+    }
+
+    return length;
+}
+
+pub fn plan9Width(c: u31) u3 {
+    return switch (c) {
+        0x0000_0000...0x0000_007f => 1,
+        0x0000_0080...0x0000_07ff => 2,
+        0x0000_0800...0x0000_ffff => 3,
+        0x0001_0000...0x001f_ffff => 4,
+        0x0020_0000...0x03ff_ffff => 5,
+        0x0400_0000...0x7fff_ffff => 6,
+    };
+}
+
+pub fn plan9DecodeCursor(bytes: []const u8, cursor: *usize) u32 {
+    var byte: u16 = bytes[cursor.*];
+    cursor.* += 1;
+    if (byte < 0x80) return byte;
+
+    var class: u8 = byte_class[byte];
+    var state: u8 = state_dfa[class];
+    var codepoint: u32 = byte & class_mask[class];
+
+    byte = bytes[cursor.*];
+    class = byte_class[byte];
+    state = state_dfa[state * 16 + class];
+    codepoint = (byte & 0x3f) | (codepoint << 6);
+    cursor.* += 1;
+    if (state == UTF_ACCEPT) return codepoint;
+
+    byte = bytes[cursor.*];
+    class = byte_class[byte];
+    state = state_dfa[state * 16 + class];
+    codepoint = (byte & 0x3f) | (codepoint << 6);
+    cursor.* += 1;
+    if (state == UTF_ACCEPT) return codepoint;
+
+    byte = bytes[cursor.*];
+    class = byte_class[byte];
+    state = state_dfa[state * 16 + class];
+    codepoint = (byte & 0x3f) | (codepoint << 6);
+    cursor.* += 1;
+    if (state == UTF_ACCEPT) return codepoint;
+
+    byte = bytes[cursor.*];
+    class = byte_class[byte];
+    state = state_dfa[state * 16 + class];
+    codepoint = (byte & 0x3f) | (codepoint << 6);
+    cursor.* += 1;
+    if (state == UTF_ACCEPT) return codepoint;
+
+    byte = bytes[cursor.*];
+    codepoint = (byte & 0x3f) | (codepoint << 6);
+    cursor.* += 1;
+    return codepoint;
+}
+
+pub const UTF_ACCEPT = 0;
+pub const UTF_REJECT = 1;
+
 /// Convert a boolean to `0` or `1`.
 pub inline fn boolInt(b: bool) u8 {
     return @intFromBool(b);
@@ -271,6 +371,54 @@ pub inline fn i2u(val: isize) usize {
 pub inline fn dbgassert(ok: bool) void {
     if (is_debug) assert(ok);
 }
+
+// The Höhrmann-Thompson-Pike mashup we need and deserve
+
+// zig fmt: off
+const byte_class: [256]u8 = .{
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 ,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0, // 00..1f
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 ,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0, // 20..3f
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 ,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0, // 40..5f
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 ,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0, // 60..7f
+    1,1,1,1,2,2,2,2,3,3,3,3,3,3,3,3 ,4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,4,4, // 80..9f
+    5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5 ,5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,5,5, // a0..bf
+    7,7,6,6,6,6,6,6,6,6,6,6,6,6,6,6 ,6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,6,6, // c0..df
+    9,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,11,10,10,10,10,10,10,10,13,12,12,12,15,14,7,7, // e0..ff
+};
+
+const class_mask: [16]u8 = .{
+    0xff,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0b0001_1111,
+    0,
+    0b0000_1111,
+    0b0000_1111,
+    0b0000_0111,
+    0b0000_0111,
+    0b0000_0011,
+    0b0000_0011,
+    0b0000_0001,
+    0b0000_0001,
+};
+
+const state_dfa: [176]u8 = .{
+    0,1,1,1,1,1,2,1,3,7,4,8,5,9,6,10,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    1,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,
+    1,2,2,2,2,2,1,1,1,1,1,1,1,1,1,1,
+    1,3,3,3,3,3,1,1,1,1,1,1,1,1,1,1,
+    1,4,4,4,4,4,1,1,1,1,1,1,1,1,1,1,
+    1,5,5,5,5,5,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,1,2,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,3,3,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,4,4,4,1,1,1,1,1,1,1,1,1,1,
+    1,1,5,5,5,5,1,1,1,1,1,1,1,1,1,1,
+};
+// zig fmt: on
 
 const std = @import("std");
 

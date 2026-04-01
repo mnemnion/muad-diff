@@ -79,7 +79,15 @@ pub const ZDelta = struct {
     insert_text: []u8,
     ops: []HarmonizedDeltaOp,
 
-    pub fn beforeLength(delta: *const ZDelta) u32 {
+    /// TODO: Given a delta which has been through a TextManager, return
+    /// a delta which, when applied to the text at the state it was in
+    /// when the delta was exhausted, will return it to the state it
+    /// was in when the delta was applied.
+    fn reverse(delta: *const ZDelta, allocator: Allocator) !*ZDelta {
+        _ = .{ delta, allocator };
+    }
+
+    fn beforeLength(delta: *const ZDelta) u32 {
         var len: u32 = 0;
         for (delta.ops) |op| {
             switch (op.effective) {
@@ -91,7 +99,7 @@ pub const ZDelta = struct {
         return len;
     }
 
-    pub fn originalBeforeLength(delta: *const ZDelta) u32 {
+    fn originalBeforeLength(delta: *const ZDelta) u32 {
         var len: u32 = 0;
         for (delta.ops) |op| {
             switch (op.original) {
@@ -103,11 +111,11 @@ pub const ZDelta = struct {
         return len;
     }
 
-    pub fn midpoint(delta: *const ZDelta) u32 {
+    fn midpoint(delta: *const ZDelta) u32 {
         return delta.beforeLength() / 2;
     }
 
-    pub fn afterLength(delta: *const ZDelta) u32 {
+    fn afterLength(delta: *const ZDelta) u32 {
         var len: u32 = @intCast(delta.insert_text.len);
         for (delta.ops) |op| {
             switch (op.effective) {
@@ -118,7 +126,7 @@ pub const ZDelta = struct {
         return len;
     }
 
-    pub fn padding(delta: *const ZDelta) struct { u32, u32 } {
+    fn padding(delta: *const ZDelta) struct { u32, u32 } {
         const mid = delta.midpoint();
         var t_idx: u32 = 0;
         var head_now: i64 = 0;
@@ -157,7 +165,7 @@ pub const ZDelta = struct {
         };
     }
 
-    pub fn textNumbers(delta: *const ZDelta) struct { u32, u32, u32 } {
+    fn textNumbers(delta: *const ZDelta) struct { u32, u32, u32 } {
         const before_len = delta.beforeLength();
         const pre_padding, const post_padding = delta.padding();
         return .{
@@ -167,7 +175,7 @@ pub const ZDelta = struct {
         };
     }
 
-    pub fn totalChange(delta: *const ZDelta) i33 {
+    fn totalChange(delta: *const ZDelta) i33 {
         var change: i33 = 0;
         for (delta.ops) |op| {
             switch (op.effective) {
@@ -189,6 +197,9 @@ pub const ZDelta = struct {
         delta.deinit(allocator);
         allocator.destroy(delta);
     }
+
+    // TODO: format: debug-style printers, and std.fmt.alt-s which
+    // render it as a zDelta a or b (etc?) string.
 };
 
 /// A TextManager handles a text through at least one ZDelta application.
