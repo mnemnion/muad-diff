@@ -64,6 +64,12 @@ pub const HarmonizedDeltaOp = struct {
     }
 };
 
+pub const PreviewDeltaOp = struct {
+    text_index: u32,
+    delta_index: u32,
+    op: HarmonizedDeltaOp,
+};
+
 pub const SkippedDeltaOp = struct {
     at: u32,
     z_idx: u32,
@@ -344,6 +350,26 @@ pub fn TextManager(comptime tm_kind: TextManagerKind) type {
         pub fn skippedItems(tm: *const TManager) []const SkippedDeltaOp {
             if (tm_kind != .partial) @compileError("skippedItems is only available on TextManager(.partial)");
             return tm.skipped.items;
+        }
+
+        pub fn previewNext(tm: *const TManager) !?PreviewDeltaOp {
+            if (tm_kind != .partial) @compileError("previewNext is only available on TextManager(.partial)");
+            const zdelta = tm.zdelta orelse return error.MissingZDelta;
+            var t_idx = tm.t_idx;
+            var z_idx = tm.z_idx;
+            while (z_idx < zdelta.ops.len) {
+                const op = zdelta.ops[z_idx];
+                if (op.state == .blocked or op.effective != .equal) {
+                    return .{
+                        .text_index = t_idx,
+                        .delta_index = z_idx,
+                        .op = op,
+                    };
+                }
+                t_idx += op.effective.equal;
+                z_idx += 1;
+            }
+            return null;
         }
 
         /// Move the text out of the TextManager.  The memory is now
