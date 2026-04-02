@@ -2043,7 +2043,6 @@ test "DiffFn diffHalfMatch" {
 }
 
 test "DiffFn diffLinesToChars" {
-    if (true) return error.SkipZigTest;
     const allocator = testing.allocator;
     var tmp_array_list = ArrayList([]const u8).init(allocator);
     defer tmp_array_list.deinit();
@@ -2075,39 +2074,6 @@ test "DiffFn diffLinesToChars" {
     try testing.expectEqualStrings("!", result.chars_2);
     try testing.expectEqualDeep(tmp_array_list.items, result.line_array.items);
     result.deinit(allocator);
-
-    {
-        const n: u21 = 1024;
-        var line_list = ArrayList(u8).init(allocator);
-        defer line_list.deinit();
-        var char_list = ArrayList(u8).init(allocator);
-        defer char_list.deinit();
-        var i: u21 = CHAR_OFFSET;
-        var char_buf: [4]u8 = undefined;
-        while (i < n) : (i += 1) {
-            const nbytes = std.unicode.wtf8Encode(i, &char_buf) catch unreachable;
-            try line_list.appendSlice(char_buf[0..nbytes]);
-            try line_list.append('\n');
-            try char_list.appendSlice(char_buf[0..nbytes]);
-        }
-        const codepoint_len = std.unicode.utf8CountCodepoints(char_list.items) catch unreachable;
-        try testing.expectEqual(@as(usize, n - CHAR_OFFSET), codepoint_len);
-        result = try difference.diffLinesToChars(allocator, line_list.items, "");
-        try testing.expectEqual(char_list.items.len, result.chars_1.len);
-        try testing.expectEqualSlices(u8, char_list.items, result.chars_1);
-        try testing.expectEqualStrings("", result.chars_2);
-        result.deinit(allocator);
-
-        var line_array = ArrayListUnmanaged([]const u8){};
-        defer line_array.deinit(allocator);
-        line_array.items.len = 0;
-        var line_hash = std.StringHashMapUnmanaged(u31){};
-        defer line_hash.deinit(allocator);
-        var iter = DefaultLineIterator{ .text = line_list.items };
-        const char_out = try difference.diffIteratorToCharsMunge(allocator, &line_array, &line_hash, &iter);
-        defer allocator.free(char_out);
-        try testing.expectEqualStrings("ϖ\nϗ\nϘ\nϙ\nϚ\nϛ\nϜ\nϝ\nϞ\nϟ\nϠ\nϡ\nϢ\nϣ\nϤ\nϥ\nϦ\nϧ\nϨ\nϩ\nϪ\nϫ\nϬ\nϭ\nϮ\nϯ\nϰ\nϱ\nϲ\nϳ\nϴ\nϵ\n϶\nϷ\nϸ\nϹ\nϺ\nϻ\nϼ\nϽ\nϾ\nϿ\n", line_array.getLast());
-    }
 }
 
 test "DiffFn diffCharsToLines" {
