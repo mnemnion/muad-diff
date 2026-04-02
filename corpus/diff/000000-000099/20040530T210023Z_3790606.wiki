@@ -1,0 +1,35 @@
+---
+origin = "wikipedia"
+article_slug = "diff"
+language = "en"
+title = "Diff"
+revid = 3790606
+parentid = 3789039
+timestamp = "2004-05-30T21:00:23Z"
+user = "Ssd"
+comment = "it was already there, oops."
+size = 1220
+minor = true
+---
+In [[computing]], <code>'''diff'''</code> is a [[Unix]] utility that outputs the difference between two text files. The output of this program is also called a ''diff''. It is invoked from the command line with the name of two files:
+
+
+
+  $ diff firstone.txt secondone.txt
+
+
+
+In ''unified format'', each line that occurs only in the left file is preceded by a minus sign, each line that occurs only in the right file is preceded by a plus sign, and common lines are preceded by a space. 
+
+
+
+Lines beginning with three plus signs indicate the number of lines in each ''hunk'', the file names, and where in the files to find them. Diffs are often used as input to the [[patch (Unix)|patch]] program.
+
+
+The [[GNU]] Project has an implementation of diff (and diff3), in the [http://www.gnu.org/software/diffutils/diffutils.html diffutils] package.
+
+
+The Windows utility [http://sourceforge.net/projects/winmerge WinMerge] is based on the GNU diffutils engine, as a way to provide a graphical display of the same information. There are other such utilities, for various platforms.
+
+==References==
+* "Comparing and Merging Files with GNU Diff and Patch", by David MacKenzie, Paul Eggert, and Richard Stallman (ISBN 0954161750)

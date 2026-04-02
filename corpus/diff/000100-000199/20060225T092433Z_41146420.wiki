@@ -1,0 +1,17 @@
+---
+origin = "wikipedia"
+article_slug = "diff"
+language = "en"
+title = "Diff"
+revid = 41146420
+parentid = 40992725
+timestamp = "2006-02-25T09:24:33Z"
+user = "213.42.2.25"
+comment = ""
+size = 182
+minor = false
+---
+{{lowercase|title=diff}} 
+
+I HATE YOU DIFF, IM GONNA SHIT U DOWN I SWEAR ON ALL THINGS HOLY ILL GET YOU!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+[[fr:Diff]]

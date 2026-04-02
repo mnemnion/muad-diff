@@ -1,0 +1,38 @@
+---
+origin = "wikipedia"
+article_slug = "diff"
+language = "en"
+title = "Diff"
+revid = 4534361
+parentid = 4531301
+timestamp = "2004-07-09T18:05:51Z"
+user = "132.198.104.111"
+comment = "Added note on binary files.  Description of diff output was actually of \"unified format\"."
+size = 1949
+minor = false
+---
+In [[computing]], <code>'''diff'''</code> is a [[Unix]] utility that outputs the difference between two text files. The output of this program is also called a ''diff''. It is invoked from the command line with the name of two files:
+
+  $ diff firstone.txt secondone.txt
+
+The first editions of the program were designed for line comparisons in text files.  By the 1980s, support for binary files was necessary resulting in a shift in the application's design.
+
+In ''unified format'', each line that occurs only in the left file is preceded by a minus sign, each line that occurs only in the right file is preceded by a plus sign, and common lines are preceded by a space.
+
+Lines beginning with three plus signs indicate the number of lines in each ''hunk'', the file names, and where in the files to find them. Diffs are often used as input to the [[patch (Unix)|patch]] program.
+
+==Free Software Implementations==
+
+The [[GNU]] Project has an implementation of diff (and diff3), in the [http://www.gnu.org/software/diffutils/diffutils.html diffutils] package.
+
+
+The Windows utility [http://sourceforge.net/projects/winmerge WinMerge] is based on the GNU diffutils engine, as a way to provide a graphical display of the same information. There are other such utilities, for various platforms.
+
+==References==
+* Hunt, James W. and McIlroy, M. Douglas, "An Algorithm for Differential File Comparison," 41, Computing Science Technical Report, Bell Laboratories, June 1976. [http://www.cs.dartmouth.edu/~doug/]
+
+* "Comparing and Merging Files with GNU Diff and Patch", by David MacKenzie, Paul Eggert, and Richard Stallman (ISBN 0954161750)
+
+* E. Myers, ``An O(ND) Difference Algorithm and Its Variations,'' Algorithmica 1, 2 (1986), 251-266. [http://www.cs.arizona.edu/people/gene/PAPERS/diff.ps]
+
+* A generic implementation of the Myers SES/LCS algorithm with the Hirschberg linear space refinement [http://www.ioplex.com/~miallen/libmba/dl/src/diff.c]

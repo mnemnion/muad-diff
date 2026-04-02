@@ -5,7 +5,6 @@ const corpus_root = "corpus";
 const FixtureError = error{
     MissingOpeningFrontmatter,
     MissingClosingFrontmatter,
-    MissingBody,
     MissingLanguage,
     MissingTitle,
     MissingTimestamp,
@@ -137,9 +136,6 @@ fn parseFixture(
     };
     const frontmatter_end = 4 + closing_rel;
     const body = file_data[frontmatter_end + "\n---\n".len ..];
-    if (body.len == 0) {
-        return FixtureError.MissingBody;
-    }
 
     var revision = RevisionFixture{
         .relative_path = try arena.dupe(u8, relative_path),
@@ -328,19 +324,17 @@ test "corpus parser rejects malformed fixture" {
     );
 }
 
-test "corpus parser requires a body" {
+test "corpus parser allows an empty body" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    try testing.expectError(
-        FixtureError.MissingBody,
-        parseFixture(
-            arena,
-            "broken/example.wiki",
-            "---\nlanguage = \"en\"\ntitle = \"Example\"\ntimestamp = \"2024-01-01T00:00:00Z\"\nrevid = 1\n---\n",
-        ),
+    const revision = try parseFixture(
+        arena,
+        "broken/example.wiki",
+        "---\nlanguage = \"en\"\ntitle = \"Example\"\ntimestamp = \"2024-01-01T00:00:00Z\"\nrevid = 1\n---\n",
     );
+    try testing.expectEqualStrings("", revision.body);
 }
 
 test "corpus fixtures load and include multilingual plus emoji coverage" {

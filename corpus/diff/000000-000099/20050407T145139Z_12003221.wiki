@@ -1,0 +1,13 @@
+---
+origin = "wikipedia"
+article_slug = "diff"
+language = "en"
+title = "Diff"
+revid = 12003221
+parentid = 11997483
+timestamp = "2005-04-07T14:51:39Z"
+user = "213.186.107.149"
+comment = ""
+size = 0
+minor = false
+---

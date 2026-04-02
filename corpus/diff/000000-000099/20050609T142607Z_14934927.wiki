@@ -1,0 +1,139 @@
+---
+origin = "wikipedia"
+article_slug = "diff"
+language = "en"
+title = "Diff"
+revid = 14934927
+parentid = 14928627
+timestamp = "2005-06-09T14:26:07Z"
+user = "81.25.36.215"
+comment = "Added section about commercial implementations"
+size = 9328
+minor = false
+---
+{{wrongtitle|title=diff}} 
+
+In [[computing]], '''diff''' is a utility that outputs the difference between two text files.
+==Usage==
+The output of this program is also called a ''diff''. It is invoked from the command line with the names of two files:
+ diff firstone.txt secondone.txt
+The result might look like this:
+ 0a1,3
+ > This is an important notice! It should
+ > therefore be located at the beginning of
+ > this document!
+ 7,12d9
+ < This paragraph contains text that is
+ < outdated - it will be deprecated and
+ < deleted in the near future.
+ < This is an important notice! It should
+ < therefore be located at the beginning of
+ < this document!
+ 14,15c11,14
+ < spell check this dokument. On the other
+ < hand, I could do with some shoarma.
+ ---
+ > spell check this document. On the other
+ > hand, I could do with some shoarma.
+ > This paragraph contains important new
+ > additions to this document.
+Note that in this ''normal diff output'', '''a''' stands for ''added'', '''d''' for ''deleted'' and '''c''' for ''changed''. By default, lines common to both files are not shown. Lines that have moved will show up as added on their new location and as deleted on their old location.
+
+In ''unified format'', each line that occurs only in the first file is preceded by a minus sign, each line that occurs only in the second file is preceded by a plus sign, and common lines are preceded by a space.
+
+Lines beginning with three plus signs indicate the number of lines in each ''hunk'', the file names, and where in the files to find them. Diff output is often used as input to the [[patch (Unix)|patch]] program.
+
+The first editions of the diff program were designed for line comparisons in text files.  By the 1980s, support for binary files was necessary resulting in a shift in the application's design and implementation.
+
+== History ==
+
+The '''diff''' program was developed in the early 1970s on the [[Unix]] operating system which was emerging from [[ATT|AT&T]] [[Bell Labs]] in Murray Hill, New Jersey.  The final version incorporated into these early Unix systems was written completely by [[Douglas McIlroy]].  This research was published in a 1976 paper which he co-wrote with [[James W. Hunt]] who also wrote one of the initial prototypes of diff.
+
+McIlroy's work was preceded and influenced by [[Stephen C. Johnson|Steve Johnson]]'s comparison program on [[GECOS]] and [[Mike Lesk]]'s '''proof''' program.  '''Proof''' originated on Unix and produced line-by-line changes like diff and even used angle-brackets (">" and "<") for presenting line insertions and deletions in the program's output.  The [[heuristic]]s used in these early applications were deemed unreliable though.  The potential usefulness of a diff tool provoked McIlroy into researching and designing a more robust tool that could be used in a variety of tasks but perform well in the processing and space limitations of the [[PDP-11]]'s hardware.  His approach resulted from collaboration also with individuals at Bell Labs including [[Alfred Aho]], [[Elliot Pinson]], [[Jeffrey Ullman]], and [[Harold S. Stone]].
+
+In the context of Unix, the use of the [[ed]] line editor provided diff with the natural ability to create machine-usable "edit scripts".  These edit scripts, when saved to a file, can, along with the original file, be reconstituted by '''ed''' into the modified file in its entirety.  This greatly reduced the space necessary to maintain multiple versions of a file.  McIlroy considered writing a post-processor for diff where a variety of output formats could be designed and implemented, but he found it more frugal and simpler to have diff be responsible for generating the syntax and reverse-order input accepted by the '''ed''' command.
+
+In diff's early years, common uses included comparing changes in programming language source code, source to technical documents, verifying program debugging output, comparing filesystem listings and analyzing computer assembly code.  The output targeted for '''ed''' was motivated to provide compression for a sequence of modifications made to a file.  The [[SCCS|Source Code Control System]] (SCCS) emerged in the late 1970s as a direct consequence of this development.
+
+A conceptual predecessor of diff includes [[Project Xanadu]], a hypertext project established in 1960 that had envisioned a version tracking system necessary for its "transpointing windows" feature.  As part of this feature, file differences were subsumed in the expansive term "[[transclusion]]", when a document has included in it parts of other documents or revisions.
+
+In the digital realm of the humanities, computer comparison systems were understood to have been created for working on literary works published as large volumes.
+
+===Variations===
+Most all diff implementations remain outwardly unchanged since 1975.  The modifications include improvements to the core algorithm, the addition of useful features to the command, and the design of new output formats.
+
+Postprocessors '''sdiff''' and '''diffmk''' render side-by-side diff listings and applied change marks to printed documents, respectively.  Both were developed elsewhere in Bell Labs in or before 1981.
+
+The [[BSD|Berkeley distribution of Unix]] made a point of adding the context format (-C) and the ability to recurse on filesystem directory structures (-r).
+
+The context format of diff introduced at Berkeley helped with distributing patches for source code that may have been changed minimally.
+
+[[Paul Jensen]], faced with consolidating changes from two branches of a program's source code tree proposed [[diff3]], which persists for most as a curiosity, but is still useful to those finding themselves in Jensen's situation.
+
+The [[GNU|GNU Project]]'s diff application includes the unified context format and is combined in a package with other diff and [[Patch (Unix)|patch]] related utilities.
+
+==Related Proprietary Software==
+
+[[MS-DOS]] 3.30 and later and all versions of [[Microsoft Windows]] have an '''fc''' (File Compare) command. Whenever '''fc''' encounters a difference between the two files it is presented in the following format:
+ ***** old.txt
+ deleted lines
+ ***** NEW.TXT
+ inserted lines
+ *****
+Note that '''fc''' capitalizes the filename of the second file.
+
+[[Image:WinDiff_demonstration.png|thumb|right|WinDiff sample output]][[Microsoft]]'s '''WinDiff''' is a graphical diff-like program. Although criticized for its user interface and lack of documentation, it can still be a useful tool. Its limited file selection options have inspired a front-end called [http://www.codeproject.com/tools/runwindiff.asp RunWinDiff].
+
+In addition to the obvious Unix options, [[Mac OS X]] includes the graphical '''FileMerge''' program from Apple in the developer tools package.  This program offers automatic file merging, but is most useful as a simple but powerful manual merge tool for text based files.  '''FileMerge''' expects Unix style [[newline]]s.
+
+== Free Software Implementations ==
+
+The [[GNU]] Project has an implementation of diff (and diff3) that is available from the [http://www.gnu.org/software/diffutils/diffutils.html GNU diffutils] package.
+
+Several tools on various platforms use the GNU diffutils engine and provide a graphical display, and some combine editing and merging capabilities. The following are some of these [[free software|free]] tools.
+
+* [[Emacs]] - Provided by Ediff mode.
+* [[gtkdiff]] ([http://home.catv.ne.jp/pp/ginoue/software/gtkdiff/index-e.html homepage])
+* [[KDiff3]]
+* [[kompare]]
+* [[Meld]]
+* [[tkdiff]] ([http://tkdiff.sourceforge.net homepage])
+* [[WinMerge]] ([http://winmerge.sourceforge.net homepage])
+* [[xxdiff]] ([http://xxdiff.sourceforge.net homepage])
+
+
+== Commercial implementations ==
+
+There are number of shareware tools available too. They are trying to impress users with good interface or some additional features. Just a few of them are:
+
+Windows:
+* [[Compare It!]] - ([http://www.grigsoft.com/ homepage])
+* [[Araxis merge]] - ([http://www.araxis.com/ homepage])
+* [[ExamDiff]] ([http://www.prestosoft.com homepage])
+
+Macintosh:
+* [[Differences Examiner]] ([http://alphaomega.software.free.fr/ homepage])
+
+== See also ==
+* [[Delta encoding]]
+* [[Levenshtein distance]]
+* [[Longest-common subsequence problem]]
+* [[Patch (Unix)|Patch]]
+* [[Revision Control System]]
+* [[Source Code Control System]]
+
+== References ==
+* Hunt, James W. and McIlroy, M. Douglas, "An Algorithm for Differential File Comparison," 41, Computing Science Technical Report, Bell Laboratories, June 1976. [http://www.cs.dartmouth.edu/~doug/]
+
+* "Comparing and Merging Files with GNU Diff and Patch", by David MacKenzie, Paul Eggert, and Richard Stallman (ISBN 0954161750) [http://www.gnu.org/software/diffutils/manual/]
+
+* E. Myers, "An O(ND) Difference Algorithm and Its Variations," Algorithmica 1, 2 (1986), 251-266. [http://www.cs.arizona.edu/people/gene/PAPERS/diff.ps (Postscript)]
+
+* A generic implementation of the Myers SES/LCS algorithm with the Hirschberg linear space refinement [http://www.ioplex.com/~miallen/libmba/dl/src/diff.c (C source code)]
+
+==External links==
+* [http://www.gnu.org/software/diffutils/diffutils.html GNU Diff utilities]. Made available by the [[Free Software Foundation]]. Free Documentation. Free source code.
+
+[[de:Diff]]
+
+[[Category:Unix programs]]

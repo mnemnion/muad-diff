@@ -1,0 +1,13 @@
+---
+origin = "wikipedia"
+article_slug = "diff"
+language = "en"
+title = "Diff"
+revid = 40341699
+parentid = 40341553
+timestamp = "2006-02-19T22:57:53Z"
+user = "Andre Francis"
+comment = ""
+size = 0
+minor = false
+---

@@ -1,0 +1,14 @@
+---
+origin = "wikipedia"
+article_slug = "diff"
+language = "en"
+title = "Diff"
+revid = 11997483
+parentid = 11997290
+timestamp = "2005-04-07T14:44:59Z"
+user = "213.186.107.149"
+comment = ""
+size = 35
+minor = false
+---
+Mega '''KAKLYA''' from Ternopil, UA

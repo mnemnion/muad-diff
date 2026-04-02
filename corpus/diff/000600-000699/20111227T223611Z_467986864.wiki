@@ -1,0 +1,17 @@
+---
+origin = "wikipedia"
+article_slug = "diff"
+language = "en"
+title = "Diff"
+revid = 467986864
+parentid = 465983979
+timestamp = "2011-12-27T22:36:11Z"
+user = "Clcoghlan"
+comment = "[[WP:AES|←]]Replaced content with 'Diff is anything and everything; An example is:\"What did you diff today?\"\n\"Go diff your self\"\n\"Would you care yo take this diff?\"\nDiff is every word type, Ve...'"
+size = 170
+minor = false
+---
+Diff is anything and everything; An example is:"What did you diff today?"
+"Go diff your self"
+"Would you care yo take this diff?"
+Diff is every word type, Verb, Noun ect.

@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
-import json
+import argparse
 import shutil
 import subprocess
 import sys
 import tempfile
+import importlib.util
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +24,33 @@ FETCH_SCRIPT = (
     / "scripts"
     / "fetch_wikipedia_revisions.py"
 )
+CONVERT_SCRIPT = (
+    Path.home()
+    / "Dropbox"
+    / "deck"
+    / "m"
+    / "skills"
+    / "wiki"
+    / "wikipedia-corpus-fetch"
+    / "scripts"
+    / "convert_wikipedia_json_to_fixtures.py"
+)
+
+
+def load_converter_write_revision_file():
+    spec = importlib.util.spec_from_file_location(
+        "convert_wikipedia_json_to_fixtures",
+        CONVERT_SCRIPT,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load converter script: {CONVERT_SCRIPT}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.write_revision_file
+
+
+write_revision_file = load_converter_write_revision_file()
 
 FIXTURES = [
     {"slug": "unicode", "language": "en", "title": "Unicode"},
@@ -33,42 +61,11 @@ FIXTURES = [
 REVISION_COUNT = 5
 
 
-def escape_string(value: str) -> str:
-    return json.dumps(value, ensure_ascii=False)
-
-
-def write_revision_file(
-    directory: Path,
-    *,
-    article_slug: str,
-    origin: str,
-    language: str,
-    title: str,
-    revision: dict,
-) -> None:
-    directory.mkdir(parents=True, exist_ok=True)
-    revid = revision["revid"]
-    timestamp = revision["timestamp"]
-    safe_stamp = timestamp.replace(":", "").replace("-", "")
-    path = directory / f"{safe_stamp}_{revid}.wiki"
-
-    lines = [
-        "---",
-        f'origin = {escape_string(origin)}',
-        f'article_slug = {escape_string(article_slug)}',
-        f'language = {escape_string(language)}',
-        f'title = {escape_string(title)}',
-        f"revid = {revid}",
-        f"parentid = {revision.get('parentid', 'null') if revision.get('parentid') is not None else 'null'}",
-        f'timestamp = {escape_string(timestamp)}',
-        f'user = {escape_string(revision.get("user", ""))}',
-        f'comment = {escape_string(revision.get("comment", ""))}',
-        f"size = {revision.get('size', len(revision.get('content', '')))}",
-        f"minor = {'true' if revision.get('minor', False) else 'false'}",
-        "---",
-        revision.get("content", ""),
-    ]
-    path.write_text("\n".join(lines), encoding="utf-8")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Refresh checked-in corpus fixtures from Wikipedia JSON snapshots.",
+    )
+    return parser.parse_args()
 
 
 def fetch_fixture(entry: dict, temp_dir: Path) -> Path:
@@ -91,25 +88,25 @@ def fetch_fixture(entry: dict, temp_dir: Path) -> Path:
     return output_path
 
 
-def emit_wikipedia_fixtures(temp_dir: Path) -> None:
+def emit_wikipedia_fixtures(temp_dir: Path, corpus_root: Path) -> None:
     for entry in FIXTURES:
         payload_path = fetch_fixture(entry, temp_dir)
-        payload = json.loads(payload_path.read_text(encoding="utf-8"))
-        result = payload["results"][entry["language"]]
-        target_dir = CORPUS_ROOT / "wiki" / entry["language"]
-        for revision in reversed(result["revisions"]):
-            write_revision_file(
-                target_dir,
-                article_slug=entry["slug"],
-                origin="wikipedia",
-                language=entry["language"],
-                title=result["title"],
-                revision=revision,
-            )
+        target_dir = corpus_root / "wiki" / entry["language"]
+        cmd = [
+            sys.executable,
+            str(CONVERT_SCRIPT),
+            "--input",
+            str(payload_path),
+            "--output-dir",
+            str(target_dir),
+            "--article-slug",
+            entry["slug"],
+        ]
+        subprocess.run(cmd, check=True)
 
 
-def emit_emoji_fixture() -> None:
-    target_dir = CORPUS_ROOT / "synth"
+def emit_emoji_fixture(corpus_root: Path) -> None:
+    target_dir = corpus_root / "synth"
     revisions = [
         {
             "revid": 900001,
@@ -175,17 +172,25 @@ def emit_emoji_fixture() -> None:
 
 
 def main() -> int:
+    _ = parse_args()
+
     if not FETCH_SCRIPT.exists():
         raise SystemExit(f"Missing fetch script: {FETCH_SCRIPT}")
-
-    if CORPUS_ROOT.exists():
-        shutil.rmtree(CORPUS_ROOT)
-    CORPUS_ROOT.mkdir(parents=True, exist_ok=True)
+    if not CONVERT_SCRIPT.exists():
+        raise SystemExit(f"Missing convert script: {CONVERT_SCRIPT}")
 
     with tempfile.TemporaryDirectory() as tmp:
-        emit_wikipedia_fixtures(Path(tmp))
+        temp_root = Path(tmp)
+        fresh_corpus_root = temp_root / "corpus"
+        fresh_corpus_root.mkdir(parents=True, exist_ok=True)
 
-    emit_emoji_fixture()
+        emit_wikipedia_fixtures(temp_root, fresh_corpus_root)
+        emit_emoji_fixture(fresh_corpus_root)
+
+        if CORPUS_ROOT.exists():
+            shutil.rmtree(CORPUS_ROOT)
+        shutil.move(str(fresh_corpus_root), str(CORPUS_ROOT))
+
     print(f"Refreshed corpus fixtures under {CORPUS_ROOT}")
     return 0
 

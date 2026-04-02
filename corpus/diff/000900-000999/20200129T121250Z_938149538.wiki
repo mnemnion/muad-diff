@@ -1,0 +1,264 @@
+---
+origin = "wikipedia"
+article_slug = "diff"
+language = "en"
+title = "Diff"
+revid = 938149538
+parentid = 938149511
+timestamp = "2020-01-29T12:12:50Z"
+user = "182.0.233.253"
+comment = ""
+size = 14301
+minor = false
+---
+{{About|a specific file comparison utility|file comparison in general|File comparison|diffs in Wikipedia|:help:diff|other uses|DIFF (disambiguation){{!}}DIFF}}
+{{lowercase|title=diff}}
+{{Infobox software
+| name = diff
+| title = diff
+| screenshot = <!-- Image name is enough -->
+| caption = 
+| screenshot size = 
+| screenshot alt = 
+| collapsible = 
+| author = [[Douglas McIlroy]]
+| developer = [[AT&T Bell Laboratories]]
+| released = {{Start date and age|1974|6}}
+| latest release version = 
+| latest release date = <!-- {{Start date and age|YYYY|MM|DD|df=yes/no}} -->
+| programming language = 
+| platform = [[Unix]] and [[Unix-like]]
+| genre = [[Command (computing)|Command]]
+| license = 
+| website = 
+| standard = 
+| AsOf = 
+}}
+In [[computing]], the '''{{Mono|diff}} utility''' is a [[data comparison]] tool that calculates and displays the differences between two files. Unlike [[edit distance]] notions used for other purposes, {{Mono|diff}} is line-oriented rather than character-oriented, but it is like [[Levenshtein distance]] in that it tries to determine the smallest set of deletions and insertions to create one file from the other. The {{Mono|diff}} command displays the changes made in a standard format, such that both humans and machines can understand the changes and apply them: given one file and the changes, the other file can be created.
+
+Typically, {{Mono|diff}} is used to show the changes between two versions of the same file. Modern implementations also support [[binary file]]s.<ref>MacKenzie ''et al.''  "Binary Files and Forcing Text Comparison" in ''Comparing and Merging Files with GNU Diff and Patch''.  Downloaded 28 April 2007.  [https://www.gnu.org/software/diffutils/manual/html_node/Binary.html]</ref> The output is called a "diff", or a [[patch (computing)|patch]], since the output can be applied with the [[Unix]] program [[patch (Unix)|{{Mono|patch}}]]. The output of similar file comparison utilities are also called a "diff"; like the use of the word "[[grep]]" for describing the act of searching, the word ''diff'' became a generic term for calculating data difference and the results thereof.<ref>Eric S. Raymond (ed.), [http://catb.org/jargon/html/D/diff.html &ldquo;diff&rdquo;], ''The Jargon File'', version 4.4.7</ref> The [[POSIX]] standard specifies the behavior of the "diff" and "patch" utilities and their file formats.<ref>{{cite book|author1 = IEEE Computer Society|author2-link = The Open Group|author2 = The Open Group|date=26 September 2008|title = Standard for Information Technology&mdash;Portable Operating System Interface (POSIX) Base Specifications, Issue 7|pages = 2599–2607|author1-link = IEEE Computer Society}} IEEE Std. 1003.1-2001 specifies traditional, "ed script", and context diff output formats; IEEE Std. 1003.1-2008 added the (by then more common) unified format.</ref>
+
+== History ==
+The {{Mono|diff}} utility was developed in the early 1970s on the Unix operating system which was emerging from [[Bell Labs]] in Murray Hill, New Jersey. The final version, first shipped with the 5th Edition of Unix in 1974, was entirely written by [[Douglas McIlroy]]. This research was published in a 1976 paper co-written with James W. Hunt who developed an initial prototype of {{Mono|diff}}.<ref name="diff paper">{{cite journal|author1=James W. Hunt |author2=M. Douglas McIlroy |title=An Algorithm for Differential File Comparison|volume=41|journal=Computing Science Technical Report, Bell Laboratories|date=June 1976|pages=|url=http://www.cs.dartmouth.edu/~doug/diff.pdf}}</ref> The algorithm this paper described became known as the [[Hunt–McIlroy algorithm]].
+
+McIlroy's work was preceded and influenced by [[Stephen C. Johnson|Steve Johnson]]'s comparison program on [[GECOS]] and [[Mike Lesk]]'s {{Mono|proof}} program. {{Mono|Proof}} also originated on Unix and, like {{Mono|diff}}, produced line-by-line changes and even used angle-brackets (">" and "&lt;") for presenting line insertions and deletions in the program's output. The [[heuristic]]s used in these early applications were, however, deemed unreliable. The potential usefulness of a diff tool provoked McIlroy into researching and designing a more robust tool that could be used in a variety of tasks but perform well in the processing and size limitations of the [[PDP-11]]'s hardware. His approach to the problem resulted from collaboration also with individuals at Bell Labs including [[Alfred Aho]], Elliot Pinson, [[Jeffrey Ullman]], and Harold S. Stone.
+
+In the context of Unix, the use of the [[ed (Unix)|{{Mono|ed}}]] line editor provided {{Mono|diff}} with the natural ability to create machine-usable "edit scripts". These edit scripts, when saved to a file, can, along with the original file, be reconstituted by {{Mono|ed}} into the modified file in its entirety. This greatly reduced the [[secondary storage]] necessary to maintain multiple versions of a file. McIlroy considered writing a post-processor for {{Mono|diff}} where a variety of output formats could be designed and implemented, but he found it more frugal and simpler to have {{Mono|diff}} be responsible for generating the syntax and reverse-order input accepted by the {{Mono|ed}} command.
+
+Late in 1984 [[Larry Wall]] created a separate utility, [[patch (Unix)|patch]],
+releasing its source code on the ''mod.sources'' and ''net.sources'' newsgroups.<ref>{{cite newsgroup
+ | title = A patch applier--YOU WANT THIS!!!
+ | author = Larry Wall
+ | date = November 9, 1984
+ | newsgroup = net.sources
+ | message-id = 1457@sdcrdcf.UUCP
+ | url = https://groups.google.com/d/msg/net.sources/qtfVio1sSHs/G0cPT5HFDFcJ
+ | access-date = May 11, 2015
+ }}</ref><ref>{{cite newsgroup
+ | title = patch version 1.2--YOU WANT THIS
+ | author = Larry Wall
+ | date = November 29, 1984
+ | newsgroup = net.sources
+ | message-id = 1508@sdcrdcf.UUCP
+ | url = https://groups.google.com/d/msg/net.sources/uWFr9NOp_fw/SRS_P2vSgFgJ
+ | access-date = May 11, 2015
+ }}</ref><ref>{{cite newsgroup
+ | title = patch version 1.3
+ | author = Larry Wall
+ | date = May 8, 1985
+ | newsgroup = net.sources
+ | message-id = 813@genrad.UUCP
+ | url = https://groups.google.com/d/msg/mod.sources/xSQM63e39YY/apNNJSkJi0gJ
+ | access-date = May 11, 2015
+ }}</ref>
+This program generalized and extended the ability to modify files with output from {{Mono|diff}}.
+
+Modes in [[Emacs]] also allow for converting the format of patches and even editing patches interactively.
+
+In {{Mono|diff}}'s early years, common uses included comparing changes in the source of software code and markup for technical documents, verifying program debugging output, comparing filesystem listings and analyzing computer assembly code.  The output targeted for {{Mono|ed}} was motivated to provide compression for a sequence of modifications made to a file.  The [[Source Code Control System]] (SCCS) and its ability to archive revisions emerged in the late 1970s as a consequence of storing edit scripts from {{Mono|diff}}.
+
+== Algorithm ==
+The operation of {{Mono|diff}} is based on solving the [[longest common subsequence problem]].<ref name="diff paper" />
+
+In this problem, given two sequences of items:
+
+        {{underline|a}} {{underline|b}} {{underline|c}} {{underline|d}} {{underline|f}} {{underline|g}} h {{underline|j}} q {{underline|z}}
+
+        {{underline|a}} {{underline|b}} {{underline|c}} {{underline|d}} e {{underline|f}} {{underline|g}} i {{underline|j}} k r x y {{underline|z}}
+
+and we want to find a longest sequence of items that is present in both original sequences in the same order. That is, we want to find a new sequence which can be obtained from the first original sequence by deleting some items, and from the second original sequence by deleting other items. We also want this sequence to be as long as possible. In this case it is
+
+        a b c d  f  g  j  z
+
+From a longest common subsequence it is only a small step to get {{Mono|diff}}-like output: if an item is absent in the subsequence but present in the first original sequence, it must have been deleted (as indicated by the '-' marks, below). If it is absent in the subsequence but present in the second original sequence, it must have been inserted (as indicated by the '+' marks).
+
+        e   h i   q   k r x y
+        +   - +   -   + + + +
+
+== Usage ==
+The <code>diff</code> command is invoked from the command line, passing it the names of two files: <code>diff ''original'' ''new''</code>. The output of the command represents the changes required to transform the ''original'' file into the ''new'' file.
+
+If ''original'' and ''new'' are directories, then {{Mono|diff}} will be run on each file that exists in both directories. An option, <code>-r</code>, will recursively descend any matching subdirectories to compare files between directories.
+
+Any of the examples in the article use the following two files, ''original'' and ''new'':
+{{Col-begin}}
+{{Col-break|width=33%}}
+''original'':
+<source lang="text" line>
+This part of the
+document has stayed the
+same from version to
+version.  It shouldn't
+be shown if it doesn't
+change.  Otherwise, that
+would not be helping to
+compress the size of the
+changes.
+
+This paragraph contains
+text that is outdated.
+It will be deleted in the
+near future.
+
+It is important to spell
+check this dokument. On
+the other hand, a
+misspelled word isn't
+the end of the world.
+Nothing in the rest of
+this paragraph needs to
+be changed. Things can
+be added after it.
+</source>
+{{col-break}}
+''new'':
+<source lang="text" line>
+This is an important
+notice! It should
+therefore be located at
+the beginning of this
+document!
+
+This part of the
+document has stayed the
+same from version to
+version.  It shouldn't
+be shown if it doesn't
+change.  Otherwise, that
+would not be helping to
+compress the size of the
+changes.
+
+It is important to spell
+check this document. On
+the other hand, a
+misspelled word isn't
+the end of the world.
+Nothing in the rest of
+this paragraph needs to
+be changed. Things can
+be added after it.
+
+This paragraph contains
+important new additions
+to this document.
+</source>
+{{col-break|width=33%}}
+The command '''<code>diff original new</code>''' produces the following ''normal diff output'':
+{{pre|
+0a1,6
+{{font color|darkgreen|> This is an important
+> notice! It should
+> therefore be located at
+> the beginning of this
+> document!
+>}}
+11,15d16
+{{font color|darkred|< This paragraph contains
+< text that is outdated.
+< It will be deleted in the
+< near future.
+<}}
+17c18
+{{font color|darkred|< check this dokument. On}}
+---
+{{font color|darkgreen|> check this document. On}}
+24a26,29
+{{font color|darkgreen|>
+> This paragraph contains
+> important new additions
+> to this document.}}}}
+
+{{Note2}} ''Here, the diff output is shown with colors to make it easier to read. The diff utility does not produce colored output; its output is [[plain text]]. However, many tools can show the output with colors by using [[syntax highlighting]].''
+{{col-end}}
+In this traditional output format, '''<samp>a</samp>''' stands for ''added'', '''<samp>d</samp>''' for ''deleted'' and '''<samp>c</samp>''' for ''changed''. Line numbers of the original file appear before <samp>a</samp>/<samp>d</samp>/<samp>c</samp> and those of the new file appear after. The [[Less-than sign|less-than]] and [[Greater-than sign|greater-than]] signs (at the beginning of lines that are added, deleted or changed) indicate which file the lines appear in. Addition lines are added to the original file to appear in the new file. Deletion lines are deleted from the original file to be missing in the new file.
+
+By default, lines common to both files are not shown. Lines that have moved are shown as added at their new location and as deleted from their old location.<ref>{{cite book|title=Comparing and Merging Files with GNU Diff and Patch|url=https://www.gnu.org/software/diffutils/manual/|author1=David MacKenzie |author2=Paul Eggert |author3=Richard Stallman |isbn=978-0-9541617-5-0|publisher=Network Theory|year=1997|location=Bristol}}</ref> However, some diff tools highlight moved lines.
+
+==Free file comparison tools==
+{{colbegin}}
+*[[cmp (Unix)|cmp]]
+*[[comm]]
+*[[Diff-Text]]
+*[[diff3]]
+*[[Kompare]]
+*[[tkdiff]]
+*[[WinMerge]] (Microsoft Windows)
+*[[meld (software)|meld]]
+*[[Pretty Diff]]
+*[[spiff (UNIX)|spiff]]
+{{colend}}
+
+==See also==
+{{colbegin}}
+*[[Comparison of file comparison tools]]
+*[[Delta encoding]]
+*[[Difference operator]]
+*[[Edit distance]]
+**[[Levenshtein distance]]
+*[[History of software configuration management]]
+*[[Longest common subsequence problem]]
+*[[Microsoft File Compare]]
+*[[Revision control]]
+*[[Software configuration management]]
+{{colend}}
+
+==References==
+{{Reflist|30em}}
+
+==Further reading==
+*{{cite journal|author=Paul Heckel|title=A technique for isolating differences between files|journal=Communications of the ACM|volume=21|issue=4|date=April 1978|pages=264–268|doi=10.1145/359460.359467}}[http://doi.acm.org/10.1145/359460.359467]
+*A generic implementation of the Myers SES/LCS algorithm with the Hirschberg linear space refinement [http://www.ioplex.com/~miallen/libmba/dl/src/diff.c (C source code)]
+
+==External links==
+{{Prone to spam|date=May 2012}}
+{{Z148}}<!--     {{No more links}}
+
+       Please be cautious adding more external links.
+
+Wikipedia is not a collection of links and should not be used for advertising.
+
+     Excessive or inappropriate links will be removed.
+
+ See [[Wikipedia:External links]] & [[Wikipedia:Spam]] for details.
+
+If there are already suitable links, propose additions or replacements on
+the article's talk page, or submit your link to the relevant category at 
+the Open Directory Project (dmoz.org) and link there using {{Dmoz}}.
+
+-->
+*{{man|cu|diff|SUS|compare two files}}
+*{{Dmoz|Computers/Software/File_Management/File_Comparison|File comparison}}
+*[https://www.gnu.org/software/diffutils/ GNU Diff utilities]. Made available by the [[Free Software Foundation]]. Free Documentation. Free source code.
+*[http://www.bodurov.com/JavaScriptDiff/ JavaScript Implementation]
+
+{{Unix commands}}
+{{Version control software}}
+
+[[Category:1974 software]]
+[[Category:Free file comparison tools]]
+[[Category:Formal languages]]
+[[Category:Pattern matching]]
+[[Category:Data differencing]]
+[[Category:Standard Unix programs]]
+[[Category:Unix SUS2008 utilities]]

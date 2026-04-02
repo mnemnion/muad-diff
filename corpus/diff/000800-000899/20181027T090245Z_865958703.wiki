@@ -1,0 +1,20 @@
+---
+origin = "wikipedia"
+article_slug = "diff"
+language = "en"
+title = "Diff"
+revid = 865958703
+parentid = 862643518
+timestamp = "2018-10-27T09:02:45Z"
+user = "75.131.218.210"
+comment = "[[WP:AES|←]]Replaced content with '[[Category:1974 software]] [[Category:Free file comparison tools]] [[Category:Formal languages]] [[Category:Pattern matching]] [[Category:Data differencing]]...'"
+size = 229
+minor = false
+---
+[[Category:1974 software]]
+[[Category:Free file comparison tools]]
+[[Category:Formal languages]]
+[[Category:Pattern matching]]
+[[Category:Data differencing]]
+[[Category:Standard Unix programs]]
+[[Category:Unix SUS2008 utilities]]

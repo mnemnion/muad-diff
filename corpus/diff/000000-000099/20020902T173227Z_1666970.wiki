@@ -1,0 +1,14 @@
+---
+origin = "wikipedia"
+article_slug = "diff"
+language = "en"
+title = "Diff"
+revid = 1666970
+parentid = 0
+timestamp = "2002-09-02T17:32:27Z"
+user = "PierreAbbat"
+comment = "start"
+size = 484
+minor = false
+---
+'''diff''' is a [[Unix]] utility that outputs the difference between two files. In ''unified format'', each line that occurs only in the left file is preceded by a minus sign, each line that occurs only in the right file is preceded by a plus sign, and common lines are preceded by a space. Lines beginning with three plus signs indicate the number of lines in each ''hunk'', the file names, and where in the files to find them. Diffs are often used as input to the [[patch]] program.

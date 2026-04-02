@@ -1,0 +1,69 @@
+---
+origin = "wikipedia"
+article_slug = "diff"
+language = "en"
+title = "Diff"
+revid = 10037011
+parentid = 9996854
+timestamp = "2005-02-06T10:46:15Z"
+user = "217.232.197.65"
+comment = "/* Free Software Implementations */"
+size = 6479
+minor = false
+---
+In [[computing]], <code>'''diff'''</code> is a [[Unix]] utility that outputs the difference between two text files. The output of this program is also called a ''diff''. It is invoked from the command line with the name of two files:
+
+  $ diff firstone.txt secondone.txt
+
+The first editions of the program were designed for line comparisons in text files.  By the 1980s, support for binary files was necessary resulting in a shift in the application's design.
+
+In ''unified format'', each line that occurs only in the first file is preceded by a minus sign, each line that occurs only in the second file is preceded by a plus sign, and common lines are preceded by a space.
+
+Lines beginning with three plus signs indicate the number of lines in each ''hunk'', the file names, and where in the files to find them. Diffs are often used as input to the [[patch (Unix)|patch]] program.
+
+== History ==
+
+The '''diff''' program was developed in the early 1970s on the [[Unix]] operating system which was emerging from [[ATT|AT&T]] [[Bell Labs]] in Murray Hill, New Jersey.  The final version incorporated into these early Unix systems was written completely by [[Douglas McIlroy]].  This research was published in a 1976 paper which he co-wrote with [[James W. Hunt]] who also wrote one of the initial prototypes of diff.
+
+McIlroy's work was preceded and influenced by [[Steve Johnson]]'s comparison program on [[GECOS]] and [[Mike Lesk]]'s '''proof''' program--which like diff--also originated on Unix.  '''Proof''' produced line-by-line changes like diff and even used angle-brackets (">" and "<") for presenting line insertions and deletions in the program's output.  The [[heuristic]]s these applications used were deemed unreliable though.  The potential usefulness of a diff tool provoked McIlroy into researching and designing a more robust tool that could be used in a variety of tasks but perform well in the processing and space limitations of the [[PDP-11]]'s hardware. His approach was also a result from collaboration with individuals at Bell Labs including [[Alfred Aho]], [[Elliot Pinson]], [[Jeffrey Ullman]], and [[Harold S. Stone]].
+
+In the context of Unix, the use of the [[ed]] line editor provided diff with the natural ability to create machine-usable "edit scripts".  These edit scripts when saved to a file can, along with the original file, be reconsitituted by '''ed''' into the modified file in its entirety.  This greatly reduced the space necessary to maintain multiple versions of a file.  McIlroy considered writing a post-processor for diff where a variety of output formats could be designed and implemented, but he found it more frugal and simpler to have diff generate directly the syntax and reverse-order input accepted by the '''ed''' command.
+
+Most all diff implementations remain outwardly unchanged since 1975 with but improvements to the core algorithm, the addition of useful features to the command, and the design of new output formats.  Postprocessors sdiff and diffmk rendered side-by-side diff listings and applied change marks to printed documents, respectively, and were developed elsewhere in Bell Labs in or before 1981.  The [[BSD|Berkeley distribution of Unix]] made a point of adding the context format (-C) and recursion on filesystem directory structures (-r).  The [[GNU|GNU Project]]'s diff application includes the unified context format and is combined in a package with other diff and [[patch]] related utilities.
+
+In diff's early years, common uses included comparing changes in computer language source code, the source to technical documents, verifying program debugging output, comparing filesystem listings and computer assembly code.  The output targeted for '''ed''' was purposely added to allow compression of a sequence of modifications to a file.  Emerging in the late 1970s, the [[SCCS|Source Code Control System]] (SCCS) was a direct consequence of this development.  The context format of diff introduced at Berkeley helped in distributing patches that would be applied to code that possibly may have been modified.  [[Paul Jensen]], faced with consolidating changes from two branches of a program's source code tree proposed [[diff3]], which persists for most as a curiosity, but is still useful to those finding themselves in Jensen's situation.
+
+A conceptual predecessor of diff includes [[Project Xanadu]], a hypertext project established in 1960 that had envisioned a version tracking system necessary for its "transpointing windows" feature.  As part of this feature, file differences were subsumed in the expansive term "[[transclusion]]", when a document has included in it parts of other documents or revisions.
+
+In the digital realm of the humanities, computer comparison systems were understood to have been created for working on literary works published in large volumes.
+
+== Free Software Implementations ==
+
+The [[GNU]] Project has an implementation of diff (and diff3), in the [http://www.gnu.org/software/diffutils/diffutils.html diffutils] package.
+
+Several tools on various platforms are based on the GNU diffutils engine and provide a graphical display of the same information. Some of them also have editing and merge capabilities. This list points out some of the [[free software|free]] tools in alphabetical order.
+
+* [http://home.catv.ne.jp/pp/ginoue/software/gtkdiff/index-e.html gtkdiff]
+* [http://meld.sourceforge.net Meld]
+* [http://kdiff3.sourceforge.net KDiff3]
+* [[kompare]]
+* [http://tkdiff.sourceforge.net tkdiff]
+* [http://winmerge.sourceforge.net WinMerge]
+* [http://xxdiff.sourceforge.net xxdiff]
+
+== See also ==
+* [[Longest-common subsequence problem]]
+* [[Patch (Unix)|Patch]]
+* [[Revision Control System]]
+* [[Source Code Control System]]
+
+== References ==
+* Hunt, James W. and McIlroy, M. Douglas, "An Algorithm for Differential File Comparison," 41, Computing Science Technical Report, Bell Laboratories, June 1976. [http://www.cs.dartmouth.edu/~doug/]
+
+* "Comparing and Merging Files with GNU Diff and Patch", by David MacKenzie, Paul Eggert, and Richard Stallman (ISBN 0954161750) [http://www.gnu.org/software/diffutils/manual/]
+
+* E. Myers, "An O(ND) Difference Algorithm and Its Variations," Algorithmica 1, 2 (1986), 251-266. [http://www.cs.arizona.edu/people/gene/PAPERS/diff.ps]
+
+* A generic implementation of the Myers SES/LCS algorithm with the Hirschberg linear space refinement [http://www.ioplex.com/~miallen/libmba/dl/src/diff.c]
+
+[[Category:Unix programs]]

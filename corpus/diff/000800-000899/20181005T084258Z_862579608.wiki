@@ -1,0 +1,20 @@
+---
+origin = "wikipedia"
+article_slug = "diff"
+language = "en"
+title = "Diff"
+revid = 862579608
+parentid = 862579095
+timestamp = "2018-10-05T08:42:58Z"
+user = "5.31.195.98"
+comment = "👍👍👍"
+size = 229
+minor = false
+---
+[[Category:1974 software]]
+[[Category:Free file comparison tools]]
+[[Category:Formal languages]]
+[[Category:Pattern matching]]
+[[Category:Data differencing]]
+[[Category:Standard Unix programs]]
+[[Category:Unix SUS2008 utilities]]
