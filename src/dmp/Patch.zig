@@ -1052,6 +1052,7 @@ const PatchManager = struct {
         if (start < tm.midpoint) {
             if (len < new_text.len) {
                 const extra = new_text.len - len;
+                tm.rebalance(extra, 0);
                 const new_pre = tm.pre - extra;
                 @memmove(
                     tm.text[new_pre..][0..start],
@@ -1072,11 +1073,16 @@ const PatchManager = struct {
         } else {
             if (len < new_text.len) {
                 const extra = new_text.len - len;
+                tm.rebalance(0, extra);
+                const t_r_start = tm.pre + start;
+                const t_r_end = t_r_start + len;
+                const t_text_end = tm.text.len - tm.post;
                 @memmove(
-                    tm.text[r_end + extra ..][0 .. text_end - r_end],
-                    tm.text[r_end..][0 .. text_end - r_end],
+                    tm.text[t_r_end + extra ..][0 .. t_text_end - t_r_end],
+                    tm.text[t_r_end..][0 .. t_text_end - t_r_end],
                 );
                 tm.post -= extra;
+                @memcpy(tm.text[t_r_start..][0..new_text.len], new_text);
             } else {
                 const removed = len - new_text.len;
                 @memmove(
@@ -1084,10 +1090,30 @@ const PatchManager = struct {
                     tm.text[r_end..][0 .. text_end - r_end],
                 );
                 tm.post += removed;
+                @memcpy(tm.text[r_start..][0..new_text.len], new_text);
             }
-
-            @memcpy(tm.text[r_start..][0..new_text.len], new_text);
         }
+    }
+
+    fn rebalance(tm: *PatchManager, need_pre: usize, need_post: usize) void {
+        if (tm.pre >= need_pre and tm.post >= need_post) return;
+
+        const total_slack = tm.pre + tm.post;
+        assert(total_slack >= need_pre + need_post);
+
+        const active_len = tm.text.len - total_slack;
+        const min_pre = need_pre;
+        const max_pre = total_slack - need_post;
+        const centered_pre = total_slack / 2;
+        const new_pre = std.math.clamp(centered_pre, min_pre, max_pre);
+        if (new_pre == tm.pre) return;
+
+        @memmove(
+            tm.text[new_pre..][0..active_len],
+            tm.text[tm.pre..][0..active_len],
+        );
+        tm.pre = new_pre;
+        tm.post = total_slack - new_pre;
     }
 
     fn insert(tm: *PatchManager, at: usize, new_text: []const u8) void {
