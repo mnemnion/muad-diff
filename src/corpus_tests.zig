@@ -1,6 +1,6 @@
 //! Offline corpus-backed tests for multilingual revision fixtures.
 
-const corpus_root = "testdata/corpus";
+const corpus_root = "corpus";
 
 const FixtureError = error{
     MissingOpeningFrontmatter,
@@ -141,10 +141,9 @@ fn parseFixture(
         return FixtureError.MissingBody;
     }
 
-    const group = std.fs.path.dirname(relative_path) orelse ".";
     var revision = RevisionFixture{
         .relative_path = try arena.dupe(u8, relative_path),
-        .group = try arena.dupe(u8, group),
+        .group = "",
         .language = "",
         .title = "",
         .timestamp = "",
@@ -165,6 +164,12 @@ fn parseFixture(
     if (revision.title.len == 0) return FixtureError.MissingTitle;
     if (revision.timestamp.len == 0) return FixtureError.MissingTimestamp;
     if (revision.revid == 0) return FixtureError.MissingRevisionId;
+
+    revision.group = try std.fmt.allocPrint(
+        arena,
+        "{s}/{s}/{s}",
+        .{ revision.origin, revision.language, revision.article_slug },
+    );
 
     return revision;
 }

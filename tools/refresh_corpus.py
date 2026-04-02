@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CORPUS_ROOT = REPO_ROOT / "testdata" / "corpus"
+CORPUS_ROOT = REPO_ROOT / "corpus"
 FETCH_SCRIPT = (
     Path.home()
     / "Dropbox"
@@ -96,7 +96,7 @@ def emit_wikipedia_fixtures(temp_dir: Path) -> None:
         payload_path = fetch_fixture(entry, temp_dir)
         payload = json.loads(payload_path.read_text(encoding="utf-8"))
         result = payload["results"][entry["language"]]
-        target_dir = CORPUS_ROOT / "wikipedia" / entry["language"] / entry["slug"]
+        target_dir = CORPUS_ROOT / "wiki" / entry["language"]
         for revision in reversed(result["revisions"]):
             write_revision_file(
                 target_dir,
@@ -109,7 +109,7 @@ def emit_wikipedia_fixtures(temp_dir: Path) -> None:
 
 
 def emit_emoji_fixture() -> None:
-    target_dir = CORPUS_ROOT / "synthetic" / "emoji-evolution"
+    target_dir = CORPUS_ROOT / "synth"
     revisions = [
         {
             "revid": 900001,

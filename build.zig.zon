@@ -19,7 +19,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
-        "testdata",
+        "corpus",
         "tools",
         "LICENSE",
         "README.md",
