@@ -2293,9 +2293,19 @@ pub fn writeDecoratedEdit(
 }
 
 fn flushWriter(writer: anytype) !void {
-    if (@hasDecl(@TypeOf(writer), "flush")) {
-        var w = writer;
-        try w.flush();
+    const Writer = @TypeOf(writer);
+    switch (@typeInfo(Writer)) {
+        .pointer => |pointer| {
+            if (@hasDecl(pointer.child, "flush")) {
+                try writer.flush();
+            }
+        },
+        else => {
+            if (@hasDecl(Writer, "flush")) {
+                var w = writer;
+                try w.flush();
+            }
+        },
     }
 }
 
