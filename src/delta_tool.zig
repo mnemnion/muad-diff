@@ -468,26 +468,18 @@ fn run(
             revision.relative_path,
         );
 
+        var delta_page = try zdelta_context.buildWholeDeltaPage(
+            allocator,
+            tm.view(),
+            revision.body,
+            std.fs.path.basename(revision.relative_path),
+            settings,
+        );
+        defer delta_page.deinit();
         if (stdout_supports_color) {
-            try zdelta_context.renderWholeDelta(
-                allocator,
-                stdout_writer,
-                tm.view(),
-                revision.body,
-                std.fs.path.basename(revision.relative_path),
-                .xterm_classic,
-                settings,
-            );
+            try renderPage(allocator, stdout_writer, delta_page, .xterm_classic);
         } else {
-            try zdelta_context.renderWholeDelta(
-                allocator,
-                stdout_writer,
-                tm.view(),
-                revision.body,
-                std.fs.path.basename(revision.relative_path),
-                plain_diff_decorations,
-                settings,
-            );
+            try renderPage(allocator, stdout_writer, delta_page, plain_diff_decorations);
         }
         try stdout_writer.flush();
 
@@ -526,30 +518,20 @@ fn run(
                             preview.op.state,
                         );
 
+                        var edit_page = try zdelta_context.buildEditPage(
+                            allocator,
+                            tm.view(),
+                            preview.text_index,
+                            preview.op.effective,
+                            tm.zdelta.?.insert_text,
+                            std.fs.path.basename(revision.relative_path),
+                            settings,
+                        );
+                        defer edit_page.deinit();
                         if (stdout_supports_color) {
-                            try zdelta_context.renderEdit(
-                                allocator,
-                                stdout_writer,
-                                tm.view(),
-                                preview.text_index,
-                                preview.op.effective,
-                                tm.zdelta.?.insert_text,
-                                std.fs.path.basename(revision.relative_path),
-                                .xterm_classic,
-                                settings,
-                            );
+                            try renderPage(allocator, stdout_writer, edit_page, .xterm_classic);
                         } else {
-                            try zdelta_context.renderEdit(
-                                allocator,
-                                stdout_writer,
-                                tm.view(),
-                                preview.text_index,
-                                preview.op.effective,
-                                tm.zdelta.?.insert_text,
-                                std.fs.path.basename(revision.relative_path),
-                                plain_diff_decorations,
-                                settings,
-                            );
+                            try renderPage(allocator, stdout_writer, edit_page, plain_diff_decorations);
                         }
                         try stdout_writer.flush();
 
@@ -923,6 +905,76 @@ fn skipRemainingDelta(tm: *PartialTextManager, counter: *usize) !void {
     }
 }
 
+fn renderPage(
+    allocator: Allocator,
+    writer: anytype,
+    page: zdelta_context.Page,
+    deco: dmp.DiffDecorations,
+) !void {
+    var line_start = true;
+    for (page.lines.items) |line| {
+        switch (line) {
+            .header => |text| {
+                if (!line_start) try writer.writeAll("\n");
+                try writer.print("{s}\n", .{text});
+                line_start = true;
+            },
+            .diff => |diff| {
+                if (line_start) {
+                    try writer.writeByte(' ');
+                    line_start = false;
+                }
+                _ = try dmp.writeDecoratedEdit(
+                    allocator,
+                    writer,
+                    deco,
+                    dmp.Edit.asBorrow(diff.operation, diff.text),
+                );
+                if (diff.text.len != 0 and diff.text[diff.text.len - 1] == '\n') {
+                    line_start = true;
+                }
+            },
+            .elision => |elision| {
+                if (!line_start) try writer.writeAll("\n");
+                try writer.writeAll(" ... ");
+                {
+                    var before_buf: [std.fmt.count("{d}", .{std.math.maxInt(u32)})]u8 = undefined;
+                    const before_text = try std.fmt.bufPrint(&before_buf, "{d}", .{elision.before});
+                    _ = try dmp.writeDecoratedEdit(
+                        allocator,
+                        writer,
+                        deco,
+                        dmp.Edit.asBorrow(.delete, before_text),
+                    );
+                }
+                try writer.writeByte(';');
+                {
+                    var after_buf: [std.fmt.count("{d}", .{std.math.maxInt(u32)})]u8 = undefined;
+                    const after_text = try std.fmt.bufPrint(&after_buf, "{d}", .{elision.after});
+                    _ = try dmp.writeDecoratedEdit(
+                        allocator,
+                        writer,
+                        deco,
+                        dmp.Edit.asBorrow(.insert, after_text),
+                    );
+                }
+                try writer.writeByte('\n');
+                line_start = true;
+            },
+            .eof_marker => {
+                if (!line_start) try writer.writeAll("\n");
+                try writer.writeAll(" ---[eof]---\n\n");
+                line_start = true;
+            },
+            .truncated => {
+                if (!line_start) try writer.writeAll("\n");
+                try writer.writeAll("... [truncated]\n");
+                line_start = true;
+            },
+        }
+    }
+}
+
 fn writeDeltaHeader(
     writer: *std.Io.Writer,
     current_revision: usize,
@@ -1147,6 +1199,56 @@ test "user quit is not duplicated in runs log" {
 
     try std.testing.expectEqual(@as(u8, 0), result.exit_code);
     try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nq", result.runs.?);
+}
+
+test "render page writes plain semantic lines" {
+    const allocator = std.testing.allocator;
+    var page = zdelta_context.Page.init(allocator);
+    defer page.deinit();
+
+    try page.lines.append(.{ .header = try allocator.dupe(u8, "diff -- sample") });
+    try page.lines.append(.{
+        .diff = .{
+            .operation = .equal,
+            .text = try allocator.dupe(u8, "same\n"),
+        },
+    });
+    try page.lines.append(.{ .elision = .{ .before = 4, .after = 9 } });
+    try page.lines.append(.{ .eof_marker = {} });
+
+    var out = ArrayList(u8).init(allocator);
+    defer out.deinit();
+    var out_writer = out.writer();
+    _ = &out_writer;
+    try renderPage(allocator, &out_writer, page, plain_diff_decorations);
+
+    try std.testing.expectEqualStrings(
+        "diff -- sample\n same\n ... [-4-];{+9+}\n ---[eof]---\n\n",
+        out.items,
+    );
+}
+
+test "render page leaves prompt-safe ansi state after truncated insert line" {
+    const allocator = std.testing.allocator;
+    var page = zdelta_context.Page.init(allocator);
+    defer page.deinit();
+
+    try page.lines.append(.{ .header = try allocator.dupe(u8, "diff -- sample") });
+    try page.lines.append(.{
+        .diff = .{
+            .operation = .insert,
+            .text = try allocator.dupe(u8, "green\n"),
+        },
+    });
+    try page.lines.append(.{ .truncated = {} });
+
+    var out = ArrayList(u8).init(allocator);
+    defer out.deinit();
+    var out_writer = out.writer();
+    _ = &out_writer;
+    try renderPage(allocator, &out_writer, page, .xterm_classic);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "\x1b[m... [truncated]\n"));
 }
 
 test "corpus replay ynq over revisions 8 to 12 succeeds" {
