@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const dmp = @import("dmp");
-const zdelta_context = @import("zdelta_context.zig");
+const zdelta_context = @import("zdelta/context.zig");
 
 const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
