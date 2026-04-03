@@ -1144,3 +1144,16 @@ test "user quit is not duplicated in runs log" {
     try std.testing.expectEqual(@as(u8, 0), result.exit_code);
     try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nq", result.runs.?);
 }
+
+test "corpus replay ynq over revisions 8 to 12 succeeds" {
+    const allocator = std.testing.allocator;
+    var result = try runForTesting(
+        allocator,
+        &.{ "delta-tool", "--replay", "ynq", "8", "12" },
+        "",
+        false,
+    );
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+}

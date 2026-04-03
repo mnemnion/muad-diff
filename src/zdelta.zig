@@ -659,12 +659,7 @@ pub fn TextManager(comptime tm_kind: TextManagerKind) type {
                         const kept = len - dropped;
                         if (kept != 0) try appendRewrittenOp(tm.allocator, &rebuilt, op.original, .{ .equal = kept }, null);
                     },
-                    .delete => |len| {
-                        const dropped = @min(len, pending);
-                        pending -= dropped;
-                        const kept = len - dropped;
-                        if (kept != 0) try appendRewrittenOp(tm.allocator, &rebuilt, op.original, .{ .delete = kept }, null);
-                    },
+                    .delete => try appendAnalyzedOp(tm.allocator, &rebuilt, op),
                 }
             }
 
@@ -762,11 +757,47 @@ pub fn TextManager(comptime tm_kind: TextManagerKind) type {
                             }
                             reached = true;
                             if (suffix != 0) {
-                                try rewriteAfterSkippedInsertSegment(tm.allocator, &rebuilt, op, suffix, &pending, skip_index);
+                                switch (op.effective) {
+                                    .equal => {
+                                        const remainder = HarmonizedDeltaOp{
+                                            .original = op.original,
+                                            .effective = .{ .equal = suffix },
+                                            .state = op.state,
+                                            .skip_index = op.skip_index,
+                                        };
+                                        try rewriteAfterSkippedInsertSegment(
+                                            tm.allocator,
+                                            &rebuilt,
+                                            remainder,
+                                            &pending,
+                                            skip_index,
+                                        );
+                                    },
+                                    .delete => {
+                                        try appendRewrittenOp(
+                                            tm.allocator,
+                                            &rebuilt,
+                                            op.original,
+                                            .{ .delete = suffix },
+                                            op.skip_index,
+                                        );
+                                    },
+                                    .insert => unreachable,
+                                }
                             }
                         } else if (reached or at == cursor) {
                             reached = true;
-                            try rewriteAfterSkippedInsertSegment(tm.allocator, &rebuilt, op, count, &pending, skip_index);
+                            switch (op.effective) {
+                                .equal => try rewriteAfterSkippedInsertSegment(
+                                    tm.allocator,
+                                    &rebuilt,
+                                    op,
+                                    &pending,
+                                    skip_index,
+                                ),
+                                .delete => try appendAnalyzedOp(tm.allocator, &rebuilt, op),
+                                .insert => unreachable,
+                            }
                         } else {
                             try appendAnalyzedOp(tm.allocator, &rebuilt, op);
                         }
@@ -1406,14 +1437,14 @@ fn rewriteAfterSkippedInsertSegment(
     allocator: Allocator,
     ops: *std.ArrayListUnmanaged(HarmonizedDeltaOp),
     op: HarmonizedDeltaOp,
-    count: u32,
     pending: *u32,
     skip_index: u32,
 ) !void {
-    const dropped = @min(count, pending.*);
+    const len = op.effective.equal;
+    const dropped = @min(len, pending.*);
     pending.* -= dropped;
-    const kept = count - dropped;
-    if (kept != 0) try appendRewrittenOp(allocator, ops, op.original, makeSameKind(op.effective, kept), skip_index);
+    const kept = len - dropped;
+    if (kept != 0) try appendRewrittenOp(allocator, ops, op.original, .{ .equal = kept }, skip_index);
 }
 
 fn makeSameKind(op: DeltaOp, len: u32) DeltaOp {
@@ -2170,6 +2201,21 @@ test "ZDelta TextManager skipNext skips insert and records text" {
     try expectManagerText("aYcd", &tm);
 }
 
+test "ZDelta TextManager skipNext preserves later delete lengths after skipped insert" {
+    const allocator = testing.allocator;
+    var tm = try testPartialTextManager(allocator, "abcd", "X", &.{
+        .{ .insert = .{ .offset = 0, .len = 1 } },
+        .{ .delete = 2 },
+        .{ .equal = 2 },
+    });
+    defer tm.deinit();
+
+    try testing.expectEqual(@as(?void, {}), try tm.skipNext());
+    try testing.expectEqual(@as(?void, {}), try tm.applyNext());
+    try testing.expectEqual(@as(?void, null), try tm.applyNext());
+    try expectManagerText("cd", &tm);
+}
+
 test "ZDelta TextManager skipNext skips delete and records text" {
     const allocator = testing.allocator;
     var tm = try testPartialTextManager(allocator, "abcd", "Y", &.{
@@ -2252,6 +2298,28 @@ test "ZDelta TextManager skip history survives later delta attachment" {
     try testing.expectEqualDeep(DeltaOp{ .equal = 5 }, tm.zdelta.?.ops[0].original);
     try testing.expectEqualDeep(DeltaOp{ .equal = 4 }, tm.zdelta.?.ops[0].effective);
     try testing.expectEqual(HarmonizedOpState.rewritten, tm.zdelta.?.ops[0].state);
+}
+
+test "ZDelta TextManager harmonizes skipped insert without shrinking later delete" {
+    const allocator = testing.allocator;
+    var tm = try testPartialTextManager(allocator, "abcd", "X", &.{
+        .{ .insert = .{ .offset = 0, .len = 1 } },
+        .{ .equal = 4 },
+    });
+    defer tm.deinit();
+
+    try testing.expectEqual(@as(?void, {}), try tm.skipNext());
+    try tm.applyAll();
+
+    const next = try testOwnedZDelta(allocator, "", &.{
+        .{ .equal = 1 },
+        .{ .delete = 2 },
+        .{ .equal = 2 },
+    });
+    try tm.addDelta(next);
+    try tm.applyAll();
+
+    try expectManagerText("cd", &tm);
 }
 
 test "ZDelta TextManager equivalentLen accounts for skipped history" {
