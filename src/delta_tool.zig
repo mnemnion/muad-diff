@@ -17,6 +17,43 @@ const plain_diff_decorations: dmp.DiffDecorations = .{
     .insert_end = "+}",
 };
 
+const OutputClient = struct {
+    allocator: Allocator,
+    line_ending: []const u8,
+
+    fn init(allocator: Allocator, raw_mode: bool) OutputClient {
+        return .{
+            .allocator = allocator,
+            .line_ending = if (raw_mode) "\r\n" else "\n",
+        };
+    }
+
+    fn writeLineEnding(self: OutputClient, writer: anytype) !void {
+        try writer.writeAll(self.line_ending);
+    }
+
+    fn writeText(self: OutputClient, writer: anytype, text: []const u8) !void {
+        if (self.line_ending.len == 1) {
+            try writer.writeAll(text);
+            return;
+        }
+
+        var start: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, text, start, '\n')) |idx| {
+            try writer.writeAll(text[start..idx]);
+            try writer.writeAll(self.line_ending);
+            start = idx + 1;
+        }
+        try writer.writeAll(text[start..]);
+    }
+
+    fn print(self: OutputClient, writer: anytype, comptime fmt: []const u8, args: anytype) !void {
+        const text = try std.fmt.allocPrint(self.allocator, fmt, args);
+        defer self.allocator.free(text);
+        try self.writeText(writer, text);
+    }
+};
+
 const RunResult = struct {
     stdout: []u8,
     stderr: []u8,
@@ -68,15 +105,112 @@ const EditPromptInput = struct {
     canonical: ?u8,
 };
 
+const ParsedDeltaPrompt = struct {
+    action: DeltaPromptAction,
+    canonical: u8,
+};
+
+const ParsedEditPrompt = struct {
+    action: EditPromptAction,
+    canonical: u8,
+};
+
+fn PromptParseResult(comptime Action: type) type {
+    return union(enum) {
+        accepted: if (Action == DeltaPromptAction) ParsedDeltaPrompt else ParsedEditPrompt,
+        invalid,
+        incomplete,
+    };
+}
+
+const DeltaPromptParser = struct {
+    fn feed(_: *DeltaPromptParser, byte: u8) PromptParseResult(DeltaPromptAction) {
+        return switch (byte) {
+            'y' => .{ .accepted = .{ .action = .apply, .canonical = 'y' } },
+            'n' => .{ .accepted = .{ .action = .skip, .canonical = 'n' } },
+            's' => .{ .accepted = .{ .action = .split, .canonical = 's' } },
+            'q' => .{ .accepted = .{ .action = .quit, .canonical = 'q' } },
+            '?' => .{ .accepted = .{ .action = .help, .canonical = '?' } },
+            else => .invalid,
+        };
+    }
+};
+
+const EditPromptParser = struct {
+    fn feed(_: *EditPromptParser, byte: u8) PromptParseResult(EditPromptAction) {
+        return switch (byte) {
+            'y' => .{ .accepted = .{ .action = .apply, .canonical = 'y' } },
+            'n' => .{ .accepted = .{ .action = .skip, .canonical = 'n' } },
+            'a' => .{ .accepted = .{ .action = .apply_rest, .canonical = 'a' } },
+            'd' => .{ .accepted = .{ .action = .skip_rest, .canonical = 'd' } },
+            'q' => .{ .accepted = .{ .action = .quit, .canonical = 'q' } },
+            '?' => .{ .accepted = .{ .action = .help, .canonical = '?' } },
+            else => .invalid,
+        };
+    }
+};
+
+const RawTerminalGuard = struct {
+    file: ?std.fs.File = null,
+    original_state: ?std.posix.termios = null,
+
+    fn init(stdin: StdinSource) !RawTerminalGuard {
+        const file = switch (stdin) {
+            .file => |file| file,
+            .bytes => return .{},
+        };
+        const original_state = std.posix.tcgetattr(file.handle) catch |err| switch (err) {
+            error.NotATerminal => return .{},
+            else => return err,
+        };
+
+        var raw = original_state;
+        raw.iflag.IGNBRK = false;
+        raw.iflag.BRKINT = false;
+        raw.iflag.PARMRK = false;
+        raw.iflag.ISTRIP = false;
+        raw.iflag.INLCR = false;
+        raw.iflag.IGNCR = false;
+        raw.iflag.ICRNL = false;
+        raw.iflag.IXON = false;
+
+        raw.oflag.OPOST = false;
+
+        raw.lflag.ECHO = false;
+        raw.lflag.ECHONL = false;
+        raw.lflag.ICANON = false;
+        raw.lflag.ISIG = false;
+        raw.lflag.IEXTEN = false;
+
+        raw.cflag.CSIZE = .CS8;
+        raw.cflag.PARENB = false;
+
+        raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
+        raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+        try std.posix.tcsetattr(file.handle, .DRAIN, raw);
+
+        return .{
+            .file = file,
+            .original_state = original_state,
+        };
+    }
+
+    fn deinit(self: *const RawTerminalGuard) void {
+        if (self.file) |file| {
+            std.posix.tcsetattr(file.handle, .DRAIN, self.original_state.?) catch {};
+        }
+    }
+
+    fn isActive(self: RawTerminalGuard) bool {
+        return self.file != null;
+    }
+};
+
 const PromptSource = struct {
-    allocator: Allocator,
     input: PromptInput,
     cursor: usize = 0,
 
-    fn readLiveLine(self: *PromptSource) !?[]u8 {
-        var line: std.Io.Writer.Allocating = .init(self.allocator);
-        errdefer line.deinit();
-
+    fn readLiveByte(self: *PromptSource) !?u8 {
         const stdin = switch (self.input) {
             .live => |stdin| stdin,
             .replay => unreachable,
@@ -85,32 +219,17 @@ const PromptSource = struct {
         switch (stdin) {
             .bytes => |bytes| {
                 if (self.cursor >= bytes.len) return null;
-                while (self.cursor < bytes.len) : (self.cursor += 1) {
-                    const byte = bytes[self.cursor];
-                    if (byte == '\n') {
-                        self.cursor += 1;
-                        break;
-                    }
-                    try line.writer.writeByte(byte);
-                }
+                const byte = bytes[self.cursor];
+                self.cursor += 1;
+                return byte;
             },
             .file => |file| {
                 var byte_buf: [1]u8 = undefined;
-                var saw_any = false;
-                while (true) {
-                    const read_len = try file.read(byte_buf[0..]);
-                    if (read_len == 0) {
-                        if (!saw_any) return null;
-                        break;
-                    }
-                    saw_any = true;
-                    if (byte_buf[0] == '\n') break;
-                    try line.writer.writeByte(byte_buf[0]);
-                }
+                const read_len = try file.read(byte_buf[0..]);
+                if (read_len == 0) return null;
+                return byte_buf[0];
             },
         }
-
-        return try line.toOwnedSlice();
     }
 
     fn readReplayCommand(self: *PromptSource) !u8 {
@@ -124,49 +243,71 @@ const PromptSource = struct {
         return command;
     }
 
-    fn readDeltaInput(self: *PromptSource) !?DeltaPromptInput {
+    fn readDeltaInput(self: *PromptSource, writer: anytype, output: OutputClient) !?DeltaPromptInput {
         switch (self.input) {
             .live => {
-                const line = (try self.readLiveLine()) orelse return null;
-                defer self.allocator.free(line);
-                const action = parseDeltaPromptAction(line);
-                return .{
-                    .action = action,
-                    .canonical = canonicalDeltaPromptAction(action),
-                };
+                var parser = DeltaPromptParser{};
+                while (true) {
+                    const byte = (try self.readLiveByte()) orelse return null;
+                    switch (parser.feed(byte)) {
+                        .accepted => |accepted| {
+                            try writer.writeByte(accepted.canonical);
+                            try output.writeLineEnding(writer);
+                            try writer.flush();
+                            return .{
+                                .action = accepted.action,
+                                .canonical = accepted.canonical,
+                            };
+                        },
+                        .invalid => {
+                            try writer.writeByte(7);
+                            try writer.flush();
+                        },
+                        .incomplete => {},
+                    }
+                }
             },
             .replay => {
                 const command = try self.readReplayCommand();
-                const action = parseReplayDeltaPromptAction(command) orelse {
-                    return error.InvalidReplayDeltaCommand;
-                };
+                const parsed = parseReplayDeltaPromptAction(command) orelse return error.InvalidReplayDeltaCommand;
                 return .{
-                    .action = action,
-                    .canonical = canonicalDeltaPromptAction(action),
+                    .action = parsed.action,
+                    .canonical = parsed.canonical,
                 };
             },
         }
     }
 
-    fn readEditInput(self: *PromptSource) !?EditPromptInput {
+    fn readEditInput(self: *PromptSource, writer: anytype, output: OutputClient) !?EditPromptInput {
         switch (self.input) {
             .live => {
-                const line = (try self.readLiveLine()) orelse return null;
-                defer self.allocator.free(line);
-                const action = parseEditPromptAction(line);
-                return .{
-                    .action = action,
-                    .canonical = canonicalEditPromptAction(action),
-                };
+                var parser = EditPromptParser{};
+                while (true) {
+                    const byte = (try self.readLiveByte()) orelse return null;
+                    switch (parser.feed(byte)) {
+                        .accepted => |accepted| {
+                            try writer.writeByte(accepted.canonical);
+                            try output.writeLineEnding(writer);
+                            try writer.flush();
+                            return .{
+                                .action = accepted.action,
+                                .canonical = accepted.canonical,
+                            };
+                        },
+                        .invalid => {
+                            try writer.writeByte(7);
+                            try writer.flush();
+                        },
+                        .incomplete => {},
+                    }
+                }
             },
             .replay => {
                 const command = try self.readReplayCommand();
-                const action = parseReplayEditPromptAction(command) orelse {
-                    return error.InvalidReplayEditCommand;
-                };
+                const parsed = parseReplayEditPromptAction(command) orelse return error.InvalidReplayEditCommand;
                 return .{
-                    .action = action,
-                    .canonical = canonicalEditPromptAction(action),
+                    .action = parsed.action,
+                    .canonical = parsed.canonical,
                 };
             },
         }
@@ -427,12 +568,17 @@ fn run(
 
     const settings: zdelta_context.RenderSettings = .{};
     var prompt = PromptSource{
-        .allocator = allocator,
         .input = if (parsed_args.replay_script) |script|
             .{ .replay = script }
         else
             .{ .live = stdin },
     };
+    const raw_guard = if (parsed_args.replay_script == null)
+        try RawTerminalGuard.init(stdin)
+    else
+        RawTerminalGuard{};
+    defer raw_guard.deinit();
+    const output = OutputClient.init(allocator, raw_guard.isActive());
 
     var tm = try DeltaManager.initText(allocator, selection.revisions[0].body);
     defer tm.deinit();
@@ -457,6 +603,7 @@ fn run(
         };
 
         try writeDeltaHeader(
+            output,
             stdout_writer,
             summary.processed_revision,
             revision.ordinal,
@@ -472,16 +619,16 @@ fn run(
         );
         defer delta_page.deinit();
         if (stdout_supports_color) {
-            try renderPage(allocator, stdout_writer, delta_page, .xterm_classic);
+            try renderPage(output, stdout_writer, delta_page, .xterm_classic);
         } else {
-            try renderPage(allocator, stdout_writer, delta_page, plain_diff_decorations);
+            try renderPage(output, stdout_writer, delta_page, plain_diff_decorations);
         }
         try stdout_writer.flush();
 
         while (true) {
-            try stdout_writer.writeAll("[y] apply  [n] skip  [s] split  [q] quit  [?] help > ");
+            try output.writeText(stdout_writer, "\n[y] apply  [n] skip  [s] split  [q] quit  [?] help > ");
             try stdout_writer.flush();
-            const input = (try prompt.readDeltaInput()) orelse {
+            const input = (try prompt.readDeltaInput(stdout_writer, output)) orelse {
                 summary.quit_early = true;
                 break :outer;
             };
@@ -506,6 +653,7 @@ fn run(
                     summary.partial_deltas += 1;
                     while (try tm.previewNext()) |preview| {
                         try writeEditHeader(
+                            output,
                             stdout_writer,
                             summary.processed_revision,
                             revision.ordinal,
@@ -524,16 +672,16 @@ fn run(
                         );
                         defer edit_page.deinit();
                         if (stdout_supports_color) {
-                            try renderPage(allocator, stdout_writer, edit_page, .xterm_classic);
+                            try renderPage(output, stdout_writer, edit_page, .xterm_classic);
                         } else {
-                            try renderPage(allocator, stdout_writer, edit_page, plain_diff_decorations);
+                            try renderPage(output, stdout_writer, edit_page, plain_diff_decorations);
                         }
                         try stdout_writer.flush();
 
                         while (true) {
-                            try stdout_writer.writeAll("[y] apply  [n] skip  [a] apply rest  [d] skip rest  [q] quit  [?] help > ");
+                            try output.writeText(stdout_writer, "\n[y] apply  [n] skip  [a] apply rest  [d] skip rest  [q] quit  [?] help > ");
                             try stdout_writer.flush();
-                            const edit_input = (try prompt.readEditInput()) orelse {
+                            const edit_input = (try prompt.readEditInput(stdout_writer, output)) orelse {
                                 summary.quit_early = true;
                                 break :outer;
                             };
@@ -567,13 +715,10 @@ fn run(
                                     break :outer;
                                 },
                                 .help => {
-                                    try writeEditHelp(stdout_writer);
+                                    try writeEditHelp(output, stdout_writer);
                                     try stdout_writer.flush();
                                 },
-                                .invalid => {
-                                    try stdout_writer.writeAll("Unrecognized choice. Type ? for help.\n");
-                                    try stdout_writer.flush();
-                                },
+                                .invalid => unreachable,
                             }
                         }
                     }
@@ -586,13 +731,10 @@ fn run(
                     break :outer;
                 },
                 .help => {
-                    try writeDeltaHelp(stdout_writer);
+                    try writeDeltaHelp(output, stdout_writer);
                     try stdout_writer.flush();
                 },
-                .invalid => {
-                    try stdout_writer.writeAll("Unrecognized choice. Type ? for help.\n");
-                    try stdout_writer.flush();
-                },
+                .invalid => unreachable,
             }
         }
     }
@@ -600,6 +742,7 @@ fn run(
     try writeExitReview(
         allocator,
         stdout_writer,
+        output,
         tm.view(),
         selection.revisions[selection.revisions.len - 1].body,
         stdout_supports_color,
@@ -607,6 +750,7 @@ fn run(
     );
 
     try writeSummary(
+        output,
         stdout_writer,
         start_revision,
         end_revision,
@@ -813,78 +957,19 @@ fn lessThanString(_: void, lhs: []const u8, rhs: []const u8) bool {
     return std.mem.order(u8, lhs, rhs) == .lt;
 }
 
-fn parseDeltaPromptAction(line: []const u8) DeltaPromptAction {
-    const trimmed = std.mem.trim(u8, line, " \t\r");
-    if (trimmed.len == 0) return .invalid;
-    if (isHelpArg(trimmed)) return .help;
-    return switch (std.ascii.toLower(trimmed[0])) {
-        'y' => .apply,
-        'n' => .skip,
-        's' => .split,
-        'q' => .quit,
-        '?' => .help,
-        else => .invalid,
+fn parseReplayDeltaPromptAction(command: u8) ?ParsedDeltaPrompt {
+    var parser = DeltaPromptParser{};
+    return switch (parser.feed(command)) {
+        .accepted => |accepted| accepted,
+        .invalid, .incomplete => null,
     };
 }
 
-fn parseEditPromptAction(line: []const u8) EditPromptAction {
-    const trimmed = std.mem.trim(u8, line, " \t\r");
-    if (trimmed.len == 0) return .invalid;
-    if (isHelpArg(trimmed)) return .help;
-    return switch (std.ascii.toLower(trimmed[0])) {
-        'y' => .apply,
-        'n' => .skip,
-        'a' => .apply_rest,
-        'd' => .skip_rest,
-        'q' => .quit,
-        '?' => .help,
-        else => .invalid,
-    };
-}
-
-fn canonicalDeltaPromptAction(action: DeltaPromptAction) ?u8 {
-    return switch (action) {
-        .apply => 'y',
-        .skip => 'n',
-        .split => 's',
-        .quit => 'q',
-        .help => '?',
-        .invalid => null,
-    };
-}
-
-fn canonicalEditPromptAction(action: EditPromptAction) ?u8 {
-    return switch (action) {
-        .apply => 'y',
-        .skip => 'n',
-        .apply_rest => 'a',
-        .skip_rest => 'd',
-        .quit => 'q',
-        .help => '?',
-        .invalid => null,
-    };
-}
-
-fn parseReplayDeltaPromptAction(command: u8) ?DeltaPromptAction {
-    return switch (std.ascii.toLower(command)) {
-        'y' => .apply,
-        'n' => .skip,
-        's' => .split,
-        'q' => .quit,
-        '?' => .help,
-        else => null,
-    };
-}
-
-fn parseReplayEditPromptAction(command: u8) ?EditPromptAction {
-    return switch (std.ascii.toLower(command)) {
-        'y' => .apply,
-        'n' => .skip,
-        'a' => .apply_rest,
-        'd' => .skip_rest,
-        'q' => .quit,
-        '?' => .help,
-        else => null,
+fn parseReplayEditPromptAction(command: u8) ?ParsedEditPrompt {
+    var parser = EditPromptParser{};
+    return switch (parser.feed(command)) {
+        .accepted => |accepted| accepted,
+        .invalid, .incomplete => null,
     };
 }
 
@@ -901,7 +986,7 @@ fn skipRemainingDelta(tm: *DeltaManager, counter: *usize) !void {
 }
 
 fn renderPage(
-    allocator: Allocator,
+    output: OutputClient,
     writer: anytype,
     page: zdelta_context.Page,
     deco: dmp.DiffDecorations,
@@ -910,8 +995,9 @@ fn renderPage(
     for (page.lines.items) |line| {
         switch (line) {
             .header => |text| {
-                if (!line_start) try writer.writeAll("\n");
-                try writer.print("{s}\n", .{text});
+                if (!line_start) try output.writeLineEnding(writer);
+                try output.writeText(writer, text);
+                try output.writeLineEnding(writer);
                 line_start = true;
             },
             .diff => |diff| {
@@ -919,24 +1005,29 @@ fn renderPage(
                     try writer.writeByte(' ');
                     line_start = false;
                 }
+                const normalized_text = if (output.line_ending.len == 1)
+                    diff.text
+                else
+                    try std.mem.replaceOwned(u8, output.allocator, diff.text, "\n", output.line_ending);
+                defer if (output.line_ending.len != 1) output.allocator.free(normalized_text);
                 _ = try dmp.writeDecoratedEdit(
-                    allocator,
+                    output.allocator,
                     writer,
                     deco,
-                    dmp.Edit.asBorrow(diff.operation, diff.text),
+                    dmp.Edit.asBorrow(diff.operation, normalized_text),
                 );
                 if (diff.text.len != 0 and diff.text[diff.text.len - 1] == '\n') {
                     line_start = true;
                 }
             },
             .elision => |elision| {
-                if (!line_start) try writer.writeAll("\n");
+                if (!line_start) try output.writeLineEnding(writer);
                 try writer.writeAll(" ... ");
                 {
                     var before_buf: [std.fmt.count("{d}", .{std.math.maxInt(u32)})]u8 = undefined;
                     const before_text = try std.fmt.bufPrint(&before_buf, "{d}", .{elision.before});
                     _ = try dmp.writeDecoratedEdit(
-                        allocator,
+                        output.allocator,
                         writer,
                         deco,
                         dmp.Edit.asBorrow(.delete, before_text),
@@ -947,23 +1038,23 @@ fn renderPage(
                     var after_buf: [std.fmt.count("{d}", .{std.math.maxInt(u32)})]u8 = undefined;
                     const after_text = try std.fmt.bufPrint(&after_buf, "{d}", .{elision.after});
                     _ = try dmp.writeDecoratedEdit(
-                        allocator,
+                        output.allocator,
                         writer,
                         deco,
                         dmp.Edit.asBorrow(.insert, after_text),
                     );
                 }
-                try writer.writeByte('\n');
+                try output.writeLineEnding(writer);
                 line_start = true;
             },
             .eof_marker => {
-                if (!line_start) try writer.writeAll("\n");
-                try writer.writeAll(" ---[eof]---\n\n");
+                if (!line_start) try output.writeLineEnding(writer);
+                try output.writeText(writer, " ---[eof]---\n\n");
                 line_start = true;
             },
             .truncated => {
-                if (!line_start) try writer.writeAll("\n");
-                try writer.writeAll("... [truncated]\n");
+                if (!line_start) try output.writeLineEnding(writer);
+                try output.writeText(writer, "... [truncated]\n");
                 line_start = true;
             },
         }
@@ -971,12 +1062,13 @@ fn renderPage(
 }
 
 fn writeDeltaHeader(
+    output: OutputClient,
     writer: *std.Io.Writer,
     current_revision: usize,
     target_revision: usize,
     relative_path: []const u8,
 ) !void {
-    try writer.print("\n=== revision {d} -> {d} ({s}) ===\n", .{
+    try output.print(writer, "\n=== revision {d} -> {d} ({s}) ===\n", .{
         current_revision,
         target_revision,
         relative_path,
@@ -984,13 +1076,14 @@ fn writeDeltaHeader(
 }
 
 fn writeEditHeader(
+    output: OutputClient,
     writer: *std.Io.Writer,
     current_revision: usize,
     target_revision: usize,
     delta_index: u32,
     state: dmp.HarmonizedOpState,
 ) !void {
-    try writer.print("\n--- revision {d} -> {d}, edit {d} [{s}] ---\n", .{
+    try output.print(writer, "\n--- revision {d} -> {d}, edit {d} [{s}] ---\n", .{
         current_revision,
         target_revision,
         delta_index,
@@ -998,8 +1091,8 @@ fn writeEditHeader(
     });
 }
 
-fn writeDeltaHelp(writer: *std.Io.Writer) !void {
-    try writer.writeAll(
+fn writeDeltaHelp(output: OutputClient, writer: *std.Io.Writer) !void {
+    try output.writeText(writer,
         "y: apply the whole delta\n" ++
             "n: skip the whole delta\n" ++
             "s: review one mutation at a time\n" ++
@@ -1007,8 +1100,8 @@ fn writeDeltaHelp(writer: *std.Io.Writer) !void {
     );
 }
 
-fn writeEditHelp(writer: *std.Io.Writer) !void {
-    try writer.writeAll(
+fn writeEditHelp(output: OutputClient, writer: *std.Io.Writer) !void {
+    try output.writeText(writer,
         "y: apply this mutation\n" ++
             "n: skip this mutation\n" ++
             "a: apply the rest of the current delta\n" ++
@@ -1018,6 +1111,7 @@ fn writeEditHelp(writer: *std.Io.Writer) !void {
 }
 
 fn writeSummary(
+    output: OutputClient,
     writer: *std.Io.Writer,
     start_revision: usize,
     end_revision: usize,
@@ -1025,7 +1119,8 @@ fn writeSummary(
     current_len: usize,
     skipped_history_len: usize,
 ) !void {
-    try writer.print(
+    try output.print(
+        writer,
         "\n=== zdelta summary ===\nrange: {d}..{d}\nprocessed through: {d}\nquit early: {any}\n" ++
             "applied deltas: {d}\nskipped deltas: {d}\npartial deltas: {d}\n" ++
             "applied edits: {d}\nskipped edits: {d}\ncurrent bytes: {d}\nskipped history: {d}\n",
@@ -1064,6 +1159,7 @@ fn formatUtcTimestamp(buffer: []u8, timestamp_secs: u64) ![]const u8 {
 fn writeExitReview(
     allocator: Allocator,
     stdout_writer: *std.Io.Writer,
+    _: OutputClient,
     final_text: []const u8,
     expected_text: []const u8,
     use_color: bool,
@@ -1126,22 +1222,24 @@ test "range validates 1-based revision ordinals" {
 
 test "whole delta application works" {
     const allocator = std.testing.allocator;
-    var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "y\n", false);
+    var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "y", false);
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u8, 0), result.exit_code);
     try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "=== revision 1 -> 2"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "[y] apply  [n] skip  [s] split  [q] quit  [?] help > y\n"));
     try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "applied deltas: 1"));
     try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "quit early: false"));
     try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nyq", result.runs.?);
 }
 
-test "interactive help words are accepted" {
+test "interactive help key is accepted" {
     const allocator = std.testing.allocator;
-    var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "help\nq\n", false);
+    var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "?q", false);
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "[y] apply  [n] skip  [s] split  [q] quit  [?] help > ?\n"));
     try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "y: apply the whole delta"));
     try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "quit early: true"));
     try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\n?q", result.runs.?);
@@ -1179,21 +1277,73 @@ test "replay script invalid commands fail immediately" {
 
 test "invalid live input is not logged" {
     const allocator = std.testing.allocator;
-    var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "bogus\nq\n", false);
+    var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "BOGUSq", false);
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u8, 0), result.exit_code);
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Unrecognized choice. Type ? for help."));
+    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "\x07"));
+    try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nq", result.runs.?);
+}
+
+test "uppercase live commands are invalid" {
+    const allocator = std.testing.allocator;
+    var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "Qq", false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "\x07"));
     try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nq", result.runs.?);
 }
 
 test "user quit is not duplicated in runs log" {
     const allocator = std.testing.allocator;
-    var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "q\n", false);
+    var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "q", false);
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u8, 0), result.exit_code);
     try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nq", result.runs.?);
+}
+
+test "delta prompt parser accepts lowercase commands only" {
+    var parser = DeltaPromptParser{};
+
+    try std.testing.expectEqualDeep(
+        PromptParseResult(DeltaPromptAction){ .accepted = .{ .action = .apply, .canonical = 'y' } },
+        parser.feed('y'),
+    );
+    try std.testing.expectEqualDeep(
+        PromptParseResult(DeltaPromptAction){ .accepted = .{ .action = .help, .canonical = '?' } },
+        parser.feed('?'),
+    );
+    try std.testing.expectEqualDeep(
+        PromptParseResult(DeltaPromptAction){ .invalid = {} },
+        parser.feed('Y'),
+    );
+    try std.testing.expectEqualDeep(
+        PromptParseResult(DeltaPromptAction){ .invalid = {} },
+        parser.feed('\n'),
+    );
+}
+
+test "edit prompt parser accepts lowercase commands only" {
+    var parser = EditPromptParser{};
+
+    try std.testing.expectEqualDeep(
+        PromptParseResult(EditPromptAction){ .accepted = .{ .action = .apply_rest, .canonical = 'a' } },
+        parser.feed('a'),
+    );
+    try std.testing.expectEqualDeep(
+        PromptParseResult(EditPromptAction){ .accepted = .{ .action = .help, .canonical = '?' } },
+        parser.feed('?'),
+    );
+    try std.testing.expectEqualDeep(
+        PromptParseResult(EditPromptAction){ .invalid = {} },
+        parser.feed('A'),
+    );
+    try std.testing.expectEqualDeep(
+        PromptParseResult(EditPromptAction){ .invalid = {} },
+        parser.feed('\n'),
+    );
 }
 
 test "render page writes plain semantic lines" {
@@ -1215,7 +1365,7 @@ test "render page writes plain semantic lines" {
     defer out.deinit();
     var out_writer = out.writer();
     _ = &out_writer;
-    try renderPage(allocator, &out_writer, page, plain_diff_decorations);
+    try renderPage(OutputClient.init(allocator, false), &out_writer, page, plain_diff_decorations);
 
     try std.testing.expectEqualStrings(
         "diff -- sample\n same\n ... [-4-];{+9+}\n ---[eof]---\n\n",
@@ -1241,7 +1391,7 @@ test "render page leaves prompt-safe ansi state after truncated insert line" {
     defer out.deinit();
     var out_writer = out.writer();
     _ = &out_writer;
-    try renderPage(allocator, &out_writer, page, .xterm_classic);
+    try renderPage(OutputClient.init(allocator, false), &out_writer, page, .xterm_classic);
 
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "\x1b[m... [truncated]\n"));
 }

@@ -1,4 +1,5 @@
 // Ignore build artifacts
 .zig-cache/
 zig-out/
+corpus/diff/delta_tool.runs
 *.out
