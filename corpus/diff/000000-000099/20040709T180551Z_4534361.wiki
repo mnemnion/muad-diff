@@ -15,7 +15,8 @@ In [[computing]], <code>'''diff'''</code> is a [[Unix]] utility that outputs the
 
   $ diff firstone.txt secondone.txt
 
-The first editions of the program were designed for line comparisons in text files.  By the 1980s, support for binary files was necessary resulting in a shift in the application's design.
+The first editions of the program were designed for line comparisons in text files.
+By the 1980s, support for binary files was necessary resulting in a shift in the application's design.
 
 In ''unified format'', each line that occurs only in the left file is preceded by a minus sign, each line that occurs only in the right file is preceded by a plus sign, and common lines are preceded by a space.
 

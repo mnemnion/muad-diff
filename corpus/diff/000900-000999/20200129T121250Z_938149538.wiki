@@ -45,8 +45,7 @@ McIlroy's work was preceded and influenced by [[Stephen C. Johnson|Steve Johnson
 
 In the context of Unix, the use of the [[ed (Unix)|{{Mono|ed}}]] line editor provided {{Mono|diff}} with the natural ability to create machine-usable "edit scripts". These edit scripts, when saved to a file, can, along with the original file, be reconstituted by {{Mono|ed}} into the modified file in its entirety. This greatly reduced the [[secondary storage]] necessary to maintain multiple versions of a file. McIlroy considered writing a post-processor for {{Mono|diff}} where a variety of output formats could be designed and implemented, but he found it more frugal and simpler to have {{Mono|diff}} be responsible for generating the syntax and reverse-order input accepted by the {{Mono|ed}} command.
 
-Late in 1984 [[Larry Wall]] created a separate utility, [[patch (Unix)|patch]],
-releasing its source code on the ''mod.sources'' and ''net.sources'' newsgroups.<ref>{{cite newsgroup
+Late in 1984 [[Larry Wall]] created a separate utility, [[patch (Unix)|patch]], releasing its source code on the ''mod.sources'' and ''net.sources'' newsgroups.<ref>{{cite newsgroup
  | title = A patch applier--YOU WANT THIS!!!
  | author = Larry Wall
  | date = November 9, 1984
@@ -75,7 +74,9 @@ This program generalized and extended the ability to modify files with output fr
 
 Modes in [[Emacs]] also allow for converting the format of patches and even editing patches interactively.
 
-In {{Mono|diff}}'s early years, common uses included comparing changes in the source of software code and markup for technical documents, verifying program debugging output, comparing filesystem listings and analyzing computer assembly code.  The output targeted for {{Mono|ed}} was motivated to provide compression for a sequence of modifications made to a file.  The [[Source Code Control System]] (SCCS) and its ability to archive revisions emerged in the late 1970s as a consequence of storing edit scripts from {{Mono|diff}}.
+In {{Mono|diff}}'s early years, common uses included comparing changes in the source of software code and markup for technical documents, verifying program debugging output, comparing filesystem listings and analyzing computer assembly code.
+The output targeted for {{Mono|ed}} was motivated to provide compression for a sequence of modifications made to a file.
+The [[Source Code Control System]] (SCCS) and its ability to archive revisions emerged in the late 1970s as a consequence of storing edit scripts from {{Mono|diff}}.
 
 == Algorithm ==
 The operation of {{Mono|diff}} is based on solving the [[longest common subsequence problem]].<ref name="diff paper" />
@@ -242,9 +243,7 @@ Wikipedia is not a collection of links and should not be used for advertising.
 
  See [[Wikipedia:External links]] & [[Wikipedia:Spam]] for details.
 
-If there are already suitable links, propose additions or replacements on
-the article's talk page, or submit your link to the relevant category at 
-the Open Directory Project (dmoz.org) and link there using {{Dmoz}}.
+If there are already suitable links, propose additions or replacements on the article's talk page, or submit your link to the relevant category at  the Open Directory Project (dmoz.org) and link there using {{Dmoz}}.
 
 -->
 *{{man|cu|diff|SUS|compare two files}}

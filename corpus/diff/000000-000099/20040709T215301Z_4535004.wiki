@@ -15,7 +15,8 @@ In [[computing]], <code>'''diff'''</code> is a [[Unix]] utility that outputs the
 
   $ diff firstone.txt secondone.txt
 
-The first editions of the program were designed for line comparisons in text files.  By the 1980s, support for binary files was necessary resulting in a shift in the application's design.
+The first editions of the program were designed for line comparisons in text files.
+By the 1980s, support for binary files was necessary resulting in a shift in the application's design.
 
 In ''unified format'', each line that occurs only in the first file is preceded by a minus sign, each line that occurs only in the second file is preceded by a plus sign, and common lines are preceded by a space.
 
@@ -24,54 +25,29 @@ Lines beginning with three plus signs indicate the number of lines in each ''hun
 
 == History ==
 
-The '''diff''' program was developed in the early 1970s
-on the [[Unix]] operating system which was emerging from
-[[ATT|AT&T]] [[Bell Labs]] in Murray Hill, New Jersey.  The final
-version was written completely by [[Douglas McIlroy]].  This
-research was published in a 1976 paper which he co-wrote with James
-W. Hunt who wrote one of the initial prototypes of diff.
+The '''diff''' program was developed in the early 1970s on the [[Unix]] operating system which was emerging from [[ATT|AT&T]] [[Bell Labs]] in Murray Hill, New Jersey.
+The final version was written completely by [[Douglas McIlroy]].
+This research was published in a 1976 paper which he co-wrote with James W. Hunt who wrote one of the initial prototypes of diff.
 
-McIlroy's work was preceded and influenced by [[Steve Johnson]]'s
-comparison program on [[GECOS]] and [[Mike Lesk]]'s '''proof'''
-program developed on Unix.  '''Proof''' produced line-by-line
-differential comparisons like diff and even used angle-brackets (">"
-and "<") for presenting line insertions and deletions in the program's output.  The
-[[heuristic]]s they used were deemed unreliable, and the usefulness of
-diff invoked McIlroy to research and design a more robust tool that
-could be used in a variety of tasks but perform well given the
-processing and space limitations of the [[PDP-11]]'s hardware.
+McIlroy's work was preceded and influenced by [[Steve Johnson]]'s comparison program on [[GECOS]] and [[Mike Lesk]]'s '''proof''' program developed on Unix.
+'''Proof''' produced line-by-line differential comparisons like diff and even used angle-brackets (">" and "<") for presenting line insertions and deletions in the program's output.
+The [[heuristic]]s they used were deemed unreliable, and the usefulness of diff invoked McIlroy to research and design a more robust tool that could be used in a variety of tasks but perform well given the processing and space limitations of the [[PDP-11]]'s hardware.
 
-In the context of Unix, the use of [[ed]] provided diff with the
-natural ability to create machine-usable "edit scripts".  These edit
-scripts could then be saved to a file which with the original file '''ed''' can produce the modified
-file in its entirety.  This greatly reduced the space necessary to maintain multiple
-versions of a file.  McIlroy considered writing a post-processor for
-diff where a variety of output formats could be designed and implemented,
-but he found it more frugal and simpler to have diff generate the syntax and
-reverse-order input targeted for '''ed'''.
+In the context of Unix, the use of [[ed]] provided diff with the natural ability to create machine-usable "edit scripts".
+These edit scripts could then be saved to a file which with the original file '''ed''' can produce the modified file in its entirety.
+This greatly reduced the space necessary to maintain multiple versions of a file.
+McIlroy considered writing a post-processor for diff where a variety of output formats could be designed and implemented, but he found it more frugal and simpler to have diff generate the syntax and reverse-order input targeted for '''ed'''.
 
-Most all diff implementations remain outwardly unchanged ever since
-1975 with many improving the core algorithm, adding useful features and designing new output formats.  Postprocessors sdiff and diffmk provided
-side-by-side diff listings and applying change marks to printed
-documents, respectively, and were developed elsewhere in Bell Labs in
-or before 1981.  The [[BSD|Berkeley distribution of Unix]] made a
-point of adding the context format (-C) and recursion on filesystem
-directory structures (-r).  The GNU System's diff application includes
-the unified context format and is combined in a package with other diff
-and [[patch]] related utilities.
+Most all diff implementations remain outwardly unchanged ever since 1975 with many improving the core algorithm, adding useful features and designing new output formats.
+Postprocessors sdiff and diffmk provided side-by-side diff listings and applying change marks to printed documents, respectively, and were developed elsewhere in Bell Labs in or before 1981.
+The [[BSD|Berkeley distribution of Unix]] made a point of adding the context format (-C) and recursion on filesystem directory structures (-r).
+The GNU System's diff application includes the unified context format and is combined in a package with other diff and [[patch]] related utilities.
 
-At the time of diff's origin, the main uses were for making comparisons in computer language
-source code, the source to technical documents, program debugging
-output, filesystem listings and computer assembly code.  The output
-targeted for '''ed''' was purposely added to allow compression of a
-sequence of modifications to a file.  [[SCCS|The Source Code Control System]]
-(SCCS) which emerged in the late 1970s, was a direct consequence of
-this development.  The context format of diff introduced at Berkeley
-helped in distributing patches to code that possibly may have been
-modified.  Paul Jensen, faced with consolidating changes from two
-branches of a program's source code tree proposed diff3, which
-persists for most as a curiosity, but is still useful to those finding
-themselves in Jensen's situation.
+At the time of diff's origin, the main uses were for making comparisons in computer language source code, the source to technical documents, program debugging output, filesystem listings and computer assembly code.
+The output targeted for '''ed''' was purposely added to allow compression of a sequence of modifications to a file.
+[[SCCS|The Source Code Control System]] (SCCS) which emerged in the late 1970s, was a direct consequence of this development.
+The context format of diff introduced at Berkeley helped in distributing patches to code that possibly may have been modified.
+Paul Jensen, faced with consolidating changes from two branches of a program's source code tree proposed diff3, which persists for most as a curiosity, but is still useful to those finding themselves in Jensen's situation.
 
 == Free Software Implementations ==
 

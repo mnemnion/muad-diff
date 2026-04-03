@@ -11,7 +11,8 @@ comment = "Added links to gnu diffutils and sf.net winmerge"
 size = 997
 minor = false
 ---
-'''diff''' is a [[Unix]] utility that outputs the difference between two text files.  It is invoked from the command line with the name of two files:
+'''diff''' is a [[Unix]] utility that outputs the difference between two text files.
+It is invoked from the command line with the name of two files:
 
   $ diff firstone.txt secondone.txt
 

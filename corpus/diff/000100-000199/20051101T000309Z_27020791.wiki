@@ -44,27 +44,42 @@ In ''unified format'', each line that occurs only in the first file is preceded 
 
 Lines beginning with three plus signs indicate the number of lines in each ''hunk'', the file names, and where in the files to find them. Diff output is often used as input to the [[patch (Unix)|patch]] program.
 
-The first editions of the diff program were designed for line comparisons of text files expecting the [[newline]] character to delimit lines.  By the 1980s, necessary support for binary files resulted in a shift in the application's design and implementation.
+The first editions of the diff program were designed for line comparisons of text files expecting the [[newline]] character to delimit lines.
+By the 1980s, necessary support for binary files resulted in a shift in the application's design and implementation.
 
 == History ==
 
-The '''diff''' program was developed in the early 1970s on the [[Unix]] operating system which was emerging from [[AT&T]] [[Bell Labs]] in Murray Hill, New Jersey.  The final version, first shipped with the 5th Edition of Unix in 1974, was entirely written by [[Douglas McIlroy]].  This research was published in a 1976 paper co-written with [[James W. Hunt]] who developed an initial prototype of diff.
+The '''diff''' program was developed in the early 1970s on the [[Unix]] operating system which was emerging from [[AT&T]] [[Bell Labs]] in Murray Hill, New Jersey.
+The final version, first shipped with the 5th Edition of Unix in 1974, was entirely written by [[Douglas McIlroy]].
+This research was published in a 1976 paper co-written with [[James W. Hunt]] who developed an initial prototype of diff.
 
-McIlroy's work was preceded and influenced by [[Stephen C. Johnson|Steve Johnson]]'s comparison program on [[GECOS]] and [[Mike Lesk]]'s '''proof''' program.  '''Proof''' originated on Unix and produced line-by-line changes like diff and even used angle-brackets (">" and "<") for presenting line insertions and deletions in the program's output.  The [[heuristic]]s used in these early applications were deemed unreliable though.  The potential usefulness of a diff tool provoked McIlroy into researching and designing a more robust tool that could be used in a variety of tasks but perform well in the processing and space limitations of the [[PDP-11]]'s hardware.  His approach resulted from collaboration also with individuals at Bell Labs including [[Alfred Aho]], [[Elliot Pinson]], [[Jeffrey Ullman]], and [[Harold S. Stone]].
+McIlroy's work was preceded and influenced by [[Stephen C. Johnson|Steve Johnson]]'s comparison program on [[GECOS]] and [[Mike Lesk]]'s '''proof''' program.
+'''Proof''' originated on Unix and produced line-by-line changes like diff and even used angle-brackets (">" and "<") for presenting line insertions and deletions in the program's output.
+The [[heuristic]]s used in these early applications were deemed unreliable though.
+The potential usefulness of a diff tool provoked McIlroy into researching and designing a more robust tool that could be used in a variety of tasks but perform well in the processing and space limitations of the [[PDP-11]]'s hardware.
+His approach resulted from collaboration also with individuals at Bell Labs including [[Alfred Aho]], [[Elliot Pinson]], [[Jeffrey Ullman]], and [[Harold S. Stone]].
 
-In the context of Unix, the use of the [[ed]] line editor provided diff with the natural ability to create machine-usable "edit scripts".  These edit scripts, when saved to a file, can, along with the original file, be reconstituted by '''ed''' into the modified file in its entirety.  This greatly reduced the space necessary to maintain multiple versions of a file.  McIlroy considered writing a post-processor for diff where a variety of output formats could be designed and implemented, but he found it more frugal and simpler to have diff be responsible for generating the syntax and reverse-order input accepted by the '''ed''' command.
-In 1985, [[Larry Wall]] composed a separate utility, [[patch (Unix) | patch]], that generalized and extended the ability to modify files with diff output.
+In the context of Unix, the use of the [[ed]] line editor provided diff with the natural ability to create machine-usable "edit scripts".
+These edit scripts, when saved to a file, can, along with the original file, be reconstituted by '''ed''' into the modified file in its entirety.
+This greatly reduced the space necessary to maintain multiple versions of a file.
+McIlroy considered writing a post-processor for diff where a variety of output formats could be designed and implemented, but he found it more frugal and simpler to have diff be responsible for generating the syntax and reverse-order input accepted by the '''ed''' command. In 1985, [[Larry Wall]] composed a separate utility, [[patch (Unix) | patch]], that generalized and extended the ability to modify files with diff output.
 
-In diff's early years, common uses included comparing changes in programming language source code, source to technical documents, verifying program debugging output, comparing filesystem listings and analyzing computer assembly code.  The output targeted for '''ed''' was motivated to provide compression for a sequence of modifications made to a file.  The [[SCCS|Source Code Control System]] (SCCS) emerged in the late 1970s as a direct consequence of this development.
+In diff's early years, common uses included comparing changes in programming language source code, source to technical documents, verifying program debugging output, comparing filesystem listings and analyzing computer assembly code.
+The output targeted for '''ed''' was motivated to provide compression for a sequence of modifications made to a file.
+The [[SCCS|Source Code Control System]] (SCCS) emerged in the late 1970s as a direct consequence of this development.
 
-A conceptual predecessor of diff includes [[Project Xanadu]], a hypertext project established in 1960 that had envisioned a version tracking system necessary for its "transpointing windows" feature.  As part of this feature, file differences were subsumed in the expansive term "[[transclusion]]", when a document has included in it parts of other documents or revisions.
+A conceptual predecessor of diff includes [[Project Xanadu]], a hypertext project established in 1960 that had envisioned a version tracking system necessary for its "transpointing windows" feature.
+As part of this feature, file differences were subsumed in the expansive term "[[transclusion]]", when a document has included in it parts of other documents or revisions.
 
 In the digital realm of the humanities, computer comparison systems were understood to have been created for working on literary works published as large volumes.
 
 ===Variations===
-Most diff implementations remain outwardly unchanged since 1975.  The modifications include improvements to the core algorithm, the addition of useful features to the command, and the design of new output formats. The basic algorithm is described in the papers ''An O(ND) Difference Algorithm and its Variations'' by Eugene W. Myers and in ''A File Comparison Program'' by Webb Miller and Myers.  The algorithm was independently discovered as described in ''Algorithms for Approximate String Matching'', [[E. Ukkonen]].
+Most diff implementations remain outwardly unchanged since 1975.
+The modifications include improvements to the core algorithm, the addition of useful features to the command, and the design of new output formats. The basic algorithm is described in the papers ''An O(ND) Difference Algorithm and its Variations'' by Eugene W. Myers and in ''A File Comparison Program'' by Webb Miller and Myers.
+The algorithm was independently discovered as described in ''Algorithms for Approximate String Matching'', [[E. Ukkonen]].
 
-Postprocessors '''sdiff''' and '''diffmk''' render side-by-side diff listings and applied change marks to printed documents, respectively.  Both were developed elsewhere in Bell Labs in or before 1981.
+Postprocessors '''sdiff''' and '''diffmk''' render side-by-side diff listings and applied change marks to printed documents, respectively.
+Both were developed elsewhere in Bell Labs in or before 1981.
 
 The [[BSD|Berkeley distribution of Unix]] made a point of adding the context format (-C) and the ability to recurse on filesystem directory structures (-r), adding those features in 2.8 BSD, released in July 1981.
 
@@ -72,7 +87,9 @@ The context format of diff introduced at Berkeley helped with distributing patch
 
 [[Paul Jensen]], faced with consolidating changes from two branches of a program's source code tree proposed [[diff3]], which persists for most as a curiosity, but is still useful to those finding themselves in Jensen's situation.
 
-Unified context diffs were originally developed by [[Wayne Davison]] in August 1990 (in '''unidiff''' which appeared in Volume 14 of comp.sources.misc).  [[Richard Stallman]] added unified diff support to [[GNU|GNU Project]]'s diff utility one month later, and the feature debuted in '''GNU diff''' 1.15, released in January 1991. GNU diff has since generalized the context format to allow arbitrary formatting of diffs.  GNU diff is included in the diffutils package with other diff and [[Patch (Unix)|patch]] related utilities.
+Unified context diffs were originally developed by [[Wayne Davison]] in August 1990 (in '''unidiff''' which appeared in Volume 14 of comp.sources.misc).
+[[Richard Stallman]] added unified diff support to [[GNU|GNU Project]]'s diff utility one month later, and the feature debuted in '''GNU diff''' 1.15, released in January 1991. GNU diff has since generalized the context format to allow arbitrary formatting of diffs.
+GNU diff is included in the diffutils package with other diff and [[Patch (Unix)|patch]] related utilities.
 
 ===Related proprietary software===
 
@@ -82,9 +99,12 @@ Unified context diffs were originally developed by [[Wayne Davison]] in August 1
  ***** NEW.TXT
  inserted lines
  *****
-Note that '''fc''' capitalizes the filename of the second file. This format is not useful as input for other computer programs.  Line notations are missing, but more problematic for an algorithm is the output of filenames by '''fc''' which is indistinguishable from an inserted or deleted line beginning with five asterisks and a space. Such a line may occur in a file that was produced by or discusses '''fc''' itself.
+Note that '''fc''' capitalizes the filename of the second file. This format is not useful as input for other computer programs.
+Line notations are missing, but more problematic for an algorithm is the output of filenames by '''fc''' which is indistinguishable from an inserted or deleted line beginning with five asterisks and a space. Such a line may occur in a file that was produced by or discusses '''fc''' itself.
 
-[[Mac OS X]] includes the graphical '''FileMerge''' program from Apple in the developer tools package.  This program offers automatic file merging, but is most useful as a simple but powerful manual merge tool for text based files.  '''FileMerge''' expects Unix style [[newline]]s.
+[[Mac OS X]] includes the graphical '''FileMerge''' program from Apple in the developer tools package.
+This program offers automatic file merging, but is most useful as a simple but powerful manual merge tool for text based files.
+'''FileMerge''' expects Unix style [[newline]]s.
 
 == Free software implementations ==
 
@@ -145,6 +165,4 @@ Other [[proprietary software|proprietary]] file comparison utilities include:
 [[Category:Unix software]]
 [[Category:File comparison tools]]
 
-[[ang:Diff]]
-[[de:Diff]]
-[[fr:Diff]]
+[[ang:Diff]] [[de:Diff]] [[fr:Diff]]

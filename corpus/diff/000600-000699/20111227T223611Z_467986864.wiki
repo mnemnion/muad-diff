@@ -11,7 +11,4 @@ comment = "[[WP:AES|←]]Replaced content with 'Diff is anything and everything;
 size = 170
 minor = false
 ---
-Diff is anything and everything; An example is:"What did you diff today?"
-"Go diff your self"
-"Would you care yo take this diff?"
-Diff is every word type, Verb, Noun ect.
+Diff is anything and everything; An example is:"What did you diff today?" "Go diff your self" "Would you care yo take this diff?" Diff is every word type, Verb, Noun ect.

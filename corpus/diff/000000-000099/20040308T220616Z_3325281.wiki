@@ -11,7 +11,8 @@ comment = ""
 size = 1177
 minor = true
 ---
-In [[computing]], <code>'''diff'''</code> is a [[Unix]] utility that outputs the difference between two text files.  It is invoked from the command line with the name of two files:
+In [[computing]], <code>'''diff'''</code> is a [[Unix]] utility that outputs the difference between two text files.
+It is invoked from the command line with the name of two files:
 
   $ diff firstone.txt secondone.txt
 
