@@ -38,63 +38,46 @@ pub fn build(b: *std.Build) void {
 
     const run_corpus_unit_tests = b.addRunArtifact(corpus_unit_tests);
 
-    // const exe_unit_tests = b.addTest(.{
-    //     .root_source_file = b.path("src/main.zig"),
-    //     .target = target,
-    //     .optimize = optimize,
-    //     .filters = test_filters,
-    // });
-    //
-    // const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
-
     const test_step = b.step("test", "Run unit tests");
 
     test_step.dependOn(&run_module_unit_tests.step);
 
-    const exe_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+    const muaddiff_mod = b.createModule(.{
+        .root_source_file = b.path("src/muad_diff.zig"),
         .target = target,
         .optimize = optimize,
     });
+    muaddiff_mod.addImport("dmp", dmp_module);
 
-    const cli_test_module = b.createModule(.{
-        .root_source_file = b.path("src/cli.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    cli_test_module.addImport("dmp", dmp_module);
-
-    const delta_tool_module = b.createModule(.{
+    const delta_tool_mod = b.createModule(.{
         .root_source_file = b.path("src/delta_tool.zig"),
         .target = target,
         .optimize = optimize,
     });
-    delta_tool_module.addImport("dmp", dmp_module);
+    delta_tool_mod.addImport("dmp", dmp_module);
 
-    const delta_maker_module = b.createModule(.{
+    const delta_maker_mod = b.createModule(.{
         .root_source_file = b.path("tools/delta_maker.zig"),
         .target = target,
         .optimize = optimize,
     });
-    delta_maker_module.addImport("dmp", dmp_module);
+    delta_maker_mod.addImport("dmp", dmp_module);
 
     if (b.lazyDependency("clap", .{
         .target = target,
         .optimize = optimize,
     })) |clap_dep| {
-        exe_module.addImport("dmp", dmp_module);
-        exe_module.addImport("clap", clap_dep.module("clap"));
-        cli_test_module.addImport("clap", clap_dep.module("clap"));
+        muaddiff_mod.addImport("clap", clap_dep.module("clap"));
     }
 
-    const exe = b.addExecutable(.{
+    const muad_diff = b.addExecutable(.{
         .name = "muad-diff",
-        .root_module = exe_module,
+        .root_module = muaddiff_mod,
     });
 
-    b.installArtifact(exe);
+    b.installArtifact(muad_diff);
 
-    const run_cmd = b.addRunArtifact(exe);
+    const run_cmd = b.addRunArtifact(muad_diff);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_cmd.addArgs(args);
@@ -105,7 +88,7 @@ pub fn build(b: *std.Build) void {
 
     const delta_tool = b.addExecutable(.{
         .name = "delta-tool",
-        .root_module = delta_tool_module,
+        .root_module = delta_tool_mod,
     });
 
     b.installArtifact(delta_tool);
@@ -121,7 +104,7 @@ pub fn build(b: *std.Build) void {
 
     const delta_maker = b.addExecutable(.{
         .name = "delta-maker",
-        .root_module = delta_maker_module,
+        .root_module = delta_maker_mod,
     });
 
     const run_delta_maker = b.addRunArtifact(delta_maker);
@@ -135,16 +118,16 @@ pub fn build(b: *std.Build) void {
     );
     delta_maker_step.dependOn(&run_delta_maker.step);
 
-    const cli_unit_tests = b.addTest(.{
-        .root_module = cli_test_module,
+    const mdiff_unit_tests = b.addTest(.{
+        .root_module = muaddiff_mod,
         .filters = test_filters,
     });
 
-    const run_cli_unit_tests = b.addRunArtifact(cli_unit_tests);
-    test_step.dependOn(&run_cli_unit_tests.step);
+    const run_mdiff_unit_tests = b.addRunArtifact(mdiff_unit_tests);
+    test_step.dependOn(&run_mdiff_unit_tests.step);
 
     const delta_tool_unit_tests = b.addTest(.{
-        .root_module = delta_tool_module,
+        .root_module = delta_tool_mod,
         .filters = test_filters,
     });
 
@@ -152,7 +135,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_delta_tool_unit_tests.step);
 
     const delta_maker_unit_tests = b.addTest(.{
-        .root_module = delta_maker_module,
+        .root_module = delta_maker_mod,
         .filters = test_filters,
     });
 
@@ -182,7 +165,6 @@ pub fn build(b: *std.Build) void {
     run_kcov.addPrefixedDirectoryArg("--include-pattern=", b.path("src"));
     const coverage_output = run_kcov.addOutputDirectoryArg(".");
 
-    // Pick your coverage entry point here:
     run_kcov.addArtifactArg(module_unit_tests);
 
     run_kcov.enableTestRunnerMode();
