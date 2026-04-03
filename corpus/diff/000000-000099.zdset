@@ -1,22 +1,22 @@
 # baseline 000000-000099/20020902T173227Z_1666970.wiki
 # 000000-000099/20031103T095824Z_1884644.wiki
-zΔ⚡b|=49|+text |=6|+%0D%0AIt is invoked from the command line with the name|=1|+of two files:%0D%0A%0D%0A  $ diff firstone.txt secondone.txt%0D%0A%0D%0A|=d3|+%0D%0A%0D%0A|=c1|
+zΔ⚡b|=49|+text |=6|+%0AIt|=1|+is invoked from the command line with the name of two files:%0A%0A  $ diff firstone.txt secondone.txt%0A%0A|=d3|+%0A%0A|=c1|
 # 000000-000099/20031206T093557Z_1884648.wiki
-zΔ⚡b|=258|+%0D%0A%0D%0AThe [http://www.gnu.org GNU Project] has an implementation of diff (and diff3), in the [http://www.gnu.org/software/diffutils/diffutils.html diffutils] package.%0D%0A%0D%0AThe Windows utility [http://sourceforge.net/projects/winmerge WinMerge] is based on the GNU diffutils engine, as a way to provide a graphical display of the same information. There are other such utilities, for various platforms.|
+zΔ⚡b|=251|+%0A%0AThe [http://www.gnu.org GNU Project] has an implementation of diff (and diff3), in the [http://www.gnu.org/software/diffutils/diffutils.html diffutils] package.%0A%0AThe Windows utility [http://sourceforge.net/projects/winmerge WinMerge] is based on the GNU diffutils engine, as a way to provide a graphical display of the same information. There are other such utilities, for various platforms.|
 # 000000-000099/20031206T093714Z_1884649.wiki
-zΔ⚡b|=261|-13|=3|-8|+]|=166|
+zΔ⚡b|=258|-13|=3|-8|+]|=164|
 # 000000-000099/20031206T093734Z_2371827.wiki
-zΔ⚡b|=261|+[|=5|+ Project|=165|
+zΔ⚡b|=258|+[|=5|+ Project|=163|
 # 000000-000099/20040212T184414Z_2679979.wiki
-zΔ⚡b|=24d|+ (computing)%7Cpatch|=187|
+zΔ⚡b|=246|+ (computing)%7Cpatch|=183|
 # 000000-000099/20040308T154510Z_2684270.wiki
-zΔ⚡b|=3e6|+%0D%0A%0D%0A%3D%3DReferences%3D%3D%0D%0A* "Comparing and Merging Files with GNU Diff and Patch", by David MacKenzie, Paul Eggert, and Richard Stallman (ISBN 0954161750)|
+zΔ⚡b|=3db|+%0A%0A%3D%3DReferences%3D%3D%0A* "Comparing and Merging Files with GNU Diff and Patch", by David MacKenzie, Paul Eggert, and Richard Stallman (ISBN 0954161750)|
 # 000000-000099/20040308T220616Z_3325281.wiki
-zΔ⚡b|+In [[computing]], <code>|=a|+</code>|=470|
+zΔ⚡b|+In [[computing]], <code>|=a|+</code>|=462|
 # 000000-000099/20040424T221307Z_3788981.wiki
-zΔ⚡b|=73|-2|+ The output of this program is also called a ''diff''. |=40|-1|+%0D %0D|=26|+%0D|=2|-1|+%0D |=d4|-1|=1|-1|+ %0D%0D |=d4|-1|=1|-1|+ %0D%0D |=90|-1|=1|-1|+ %0D%0D |=179|
+zΔ⚡b|=73|-1|+ The output of this program is also called a ''diff''. |=3f|-1|+ |=25|-1|+ |=d3|-2|+  |=d3|-2|+  |=8f|-2|+  |=176|
 # 000000-000099/20040530T205805Z_3789006.wiki
-zΔ⚡b|=e9|-5|+%0A%0A%0A|=24|-2|=1|-3|+%0A%0A%0A|=d3|-6|+%0A%0A%0A%0A|=d3|-6|+%0A%0A%0A%0A|=8f|-6|+%0A%0A%0A%0A|=e5|-1|+%0A%0AThe [[patch (unix)%7Cpatch]] program was written to convert an old version of a file into the new version  by applying the output of diff.|=1|-1|=f|-1|=81|
+zΔ⚡b|=e9|-1|+%0A%0A%0A|=25|-1|+%0A%0A%0A|=d3|-2|+%0A%0A%0A%0A|=d3|-2|+%0A%0A%0A%0A|=8f|-2|+%0A%0A%0A%0A|=e4|+.%0A%0AThe [[patch (unix)%7Cpatch]] program was written to convert an old version of a file into the new version  by applying the output of diff|=92|
 # 000000-000099/20040530T205911Z_3789039.wiki
 zΔ⚡b|=2a3|-6|+Un|=1|-2|+x|=2a9|
 # 000000-000099/20040530T210023Z_3790606.wiki
