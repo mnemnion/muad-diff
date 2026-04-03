@@ -289,11 +289,6 @@ const EditPromptAction = enum {
 };
 
 pub fn main() !void {
-    const code = try runMain();
-    std.process.exit(code);
-}
-
-fn runMain() !u8 {
     var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
@@ -322,12 +317,12 @@ fn runMain() !u8 {
     ) catch |err| {
         try stderr_writer.interface.print("error: {s}\n", .{@errorName(err)});
         try stderr_writer.interface.flush();
-        return 1;
+        std.process.exit(1);
     };
 
     try stdout_writer.interface.flush();
     try stderr_writer.interface.flush();
-    return exit_code;
+    if (exit_code == 0) std.process.cleanExit() else std.process.exit(exit_code);
 }
 
 fn runForTesting(

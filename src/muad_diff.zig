@@ -160,7 +160,7 @@ const InputResolver = struct {
     }
 };
 
-pub fn main() !u8 {
+pub fn main() !void {
     var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
@@ -184,7 +184,10 @@ pub fn main() !u8 {
 
     try std.fs.File.stdout().writeAll(result.stdout);
     try std.fs.File.stderr().writeAll(result.stderr);
-    return result.exit_code;
+    if (result.exit_code == 0)
+        std.process.cleanExit()
+    else
+        std.process.exit(result.exit_code);
 }
 
 fn runForTesting(
