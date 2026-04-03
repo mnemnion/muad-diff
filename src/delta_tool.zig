@@ -412,14 +412,18 @@ fn run(
     if (start_revision < 1) return error.RevisionOrdinalTooSmall;
     if (end_revision <= start_revision) return error.RevisionRangeOutOfOrder;
 
+    const should_record_runs = parsed_args.replay_script == null;
+
     var recorder: ?RunRecorder = null;
-    if (options.runs_path) |runs_path| {
-        recorder = try RunRecorder.init(
-            runs_path,
-            options.timestamp_secs orelse @as(u64, @intCast(std.time.timestamp())),
-            start_revision,
-            end_revision,
-        );
+    if (should_record_runs) {
+        if (options.runs_path) |runs_path| {
+            recorder = try RunRecorder.init(
+                runs_path,
+                options.timestamp_secs orelse @as(u64, @intCast(std.time.timestamp())),
+                start_revision,
+                end_revision,
+            );
+        }
     }
     defer if (recorder) |*owned| owned.deinit();
 
@@ -1103,7 +1107,7 @@ test "replay script drives the session" {
 
     try std.testing.expectEqual(@as(u8, 0), result.exit_code);
     try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "applied deltas: 1"));
-    try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nyq", result.runs.?);
+    try std.testing.expectEqual(@as(?[]u8, null), result.runs);
 }
 
 test "replay script exhaustion is reported" {
@@ -1113,7 +1117,7 @@ test "replay script exhaustion is reported" {
 
     try std.testing.expectEqual(@as(u8, 1), result.exit_code);
     try std.testing.expect(std.mem.containsAtLeast(u8, result.stderr, 1, "ReplayScriptExhausted"));
-    try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\n", result.runs.?);
+    try std.testing.expectEqual(@as(?[]u8, null), result.runs);
 }
 
 test "replay script invalid commands fail immediately" {
@@ -1123,7 +1127,7 @@ test "replay script invalid commands fail immediately" {
 
     try std.testing.expectEqual(@as(u8, 1), result.exit_code);
     try std.testing.expect(std.mem.containsAtLeast(u8, result.stderr, 1, "InvalidReplayDeltaCommand"));
-    try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\n", result.runs.?);
+    try std.testing.expectEqual(@as(?[]u8, null), result.runs);
 }
 
 test "invalid live input is not logged" {
