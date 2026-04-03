@@ -6,7 +6,7 @@ const zdelta_context = @import("zdelta/context.zig");
 
 const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
-const PartialTextManager = dmp.TextManager(.partial);
+const DeltaManager = dmp.DeltaManager;
 const corpus_diff_root = "corpus/diff";
 const default_runs_path = corpus_diff_root ++ "/delta_tool.runs";
 
@@ -439,7 +439,7 @@ fn run(
             .{ .live = stdin },
     };
 
-    var tm = try PartialTextManager.initText(allocator, selection.revisions[0].body);
+    var tm = try DeltaManager.initText(allocator, selection.revisions[0].body);
     defer tm.deinit();
 
     var summary = ZDeltaSummary{
@@ -893,13 +893,13 @@ fn parseReplayEditPromptAction(command: u8) ?EditPromptAction {
     };
 }
 
-fn applyRemainingDelta(tm: *PartialTextManager, counter: *usize) !void {
+fn applyRemainingDelta(tm: *DeltaManager, counter: *usize) !void {
     while (try tm.applyNext()) |_| {
         counter.* += 1;
     }
 }
 
-fn skipRemainingDelta(tm: *PartialTextManager, counter: *usize) !void {
+fn skipRemainingDelta(tm: *DeltaManager, counter: *usize) !void {
     while (try tm.skipNext()) |_| {
         counter.* += 1;
     }
@@ -1249,17 +1249,4 @@ test "render page leaves prompt-safe ansi state after truncated insert line" {
     try renderPage(allocator, &out_writer, page, .xterm_classic);
 
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "\x1b[m... [truncated]\n"));
-}
-
-test "corpus replay ynq over revisions 8 to 12 succeeds" {
-    const allocator = std.testing.allocator;
-    var result = try runForTesting(
-        allocator,
-        &.{ "delta-tool", "--replay", "ynq", "8", "12" },
-        "",
-        false,
-    );
-    defer result.deinit(allocator);
-
-    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
 }

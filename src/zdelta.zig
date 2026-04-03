@@ -34,9 +34,8 @@ pub const HarmonizedOpState = common_apply.HarmonizedOpState;
 pub const HarmonizedDeltaOp = common_apply.HarmonizedDeltaOp;
 pub const PreviewDeltaOp = common_apply.PreviewDeltaOp;
 pub const SkippedDeltaOp = common_apply.SkippedDeltaOp;
-pub const WholeTextManager = whole_apply_mod.WholeTextManager;
-pub const PartialTextManager = apply_manager_mod.PartialTextManager;
-pub const TextManager = apply_manager_mod.TextManager;
+pub const DeltaApplicator = whole_apply_mod.DeltaApplicator;
+pub const DeltaManager = apply_manager_mod.DeltaManager;
 
 pub const ZDelta = struct {
     version: ZDeltaVersion,
@@ -164,13 +163,6 @@ pub const ZDelta = struct {
 
     // TODO: format: debug-style printers, and std.fmt.alt-s which
     // render it as a zDelta a or b (etc?) string.
-};
-
-pub const TextManagerKind = enum {
-    /// Specialized for whole-delta application only
-    whole,
-    /// Specialized for partial, selectable delta application
-    partial,
 };
 
 /// Write a Diff in a zdelta format.  Currently supported are
