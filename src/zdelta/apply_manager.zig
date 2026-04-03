@@ -1,57 +1,16 @@
-pub const DeltaSpan = struct {
-    offset: u32,
-    len: u32,
-};
+// TODO: split this all up.
+// ---
+// It will not remain useful for there to be a comptime specialization between these two
+// tasks.  One of them is already finished and unlikely to change, and we've written maybe
+// 10% of the other.
+// ---
+// We will go so far as to make separate files.  We'll need common structs to live in
+// zdelta/common.zig.  More notes found in the rest of this file.
 
-pub const DeltaOp = union(enum) {
-    insert: DeltaSpan,
-    delete: u32,
-    equal: u32,
-};
-
-pub const HarmonizedOpState = enum {
-    unchanged,
-    rewritten,
-    blocked,
-};
-
-pub const HarmonizedDeltaOp = struct {
-    original: DeltaOp,
-    effective: DeltaOp,
-    state: HarmonizedOpState,
-    skip_index: ?u32,
-
-    pub fn fromRaw(op: DeltaOp) HarmonizedDeltaOp {
-        return .{
-            .original = op,
-            .effective = op,
-            .state = .unchanged,
-            .skip_index = null,
-        };
-    }
-};
-
-pub const PreviewDeltaOp = struct {
-    text_index: u32,
-    delta_index: u32,
-    op: HarmonizedDeltaOp,
-};
-
-pub const SkippedDeltaOp = struct {
-    at: u32,
-    z_idx: u32,
-    op: DeltaOp,
-    text: []u8,
-    accounted_for_current_delta: bool,
-
-    fn deinit(skipped: *SkippedDeltaOp, allocator: Allocator) void {
-        allocator.free(skipped.text);
-        skipped.* = undefined;
-    }
-};
+pub const DeltaManager = TextManager(.partial);
+pub const PartialTextManager = DeltaManager;
 
 const WholeTextManager = TextManager(.whole);
-const PartialTextManager = TextManager(.partial);
 
 /// A TextManager handles a text through at least one ZDelta application.
 /// This is intended to be suitable both for rapid application of a single
@@ -820,6 +779,12 @@ fn expectManagerText(
     try testing.expectEqualStrings(expected, tm.view());
 }
 
+// TODO: We still want the two new types to have a common interface, and
+// for what's now PartialTextManager to pass every test which is also
+// passed by what's now WholeTextManager. Probably this means we keep
+// the tests in the new home of no-longer-PartialTextManager, and do
+// the same inline for thing we're doing right here.
+
 test "ZDelta TextManager rejects wrong text length" {
     const allocator = testing.allocator;
     inline for (.{ WholeTextManager, PartialTextManager }) |TManager| {
@@ -1575,6 +1540,7 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
+const common_apply = @import("common.zig");
 const zdelta_mod = @import("../zdelta.zig");
 const ZDelta = zdelta_mod.ZDelta;
 const TextManagerKind = zdelta_mod.TextManagerKind;
@@ -1584,3 +1550,9 @@ const testZDelta = zdelta_mod.testZDelta;
 const common = @import("../dmp/common.zig");
 const dbgassert = common.dbgassert;
 const cast = common.cast;
+const DeltaSpan = common_apply.DeltaSpan;
+const DeltaOp = common_apply.DeltaOp;
+const HarmonizedOpState = common_apply.HarmonizedOpState;
+const HarmonizedDeltaOp = common_apply.HarmonizedDeltaOp;
+const PreviewDeltaOp = common_apply.PreviewDeltaOp;
+const SkippedDeltaOp = common_apply.SkippedDeltaOp;

@@ -28,13 +28,15 @@ pub const ZDeltaError = Allocator.Error || error{
     InvalidZDeltaText,
 };
 
-pub const DeltaSpan = apply_mod.DeltaSpan;
-pub const DeltaOp = apply_mod.DeltaOp;
-pub const HarmonizedOpState = apply_mod.HarmonizedOpState;
-pub const HarmonizedDeltaOp = apply_mod.HarmonizedDeltaOp;
-pub const PreviewDeltaOp = apply_mod.PreviewDeltaOp;
-pub const SkippedDeltaOp = apply_mod.SkippedDeltaOp;
-pub const TextManager = apply_mod.TextManager;
+pub const DeltaSpan = common_apply.DeltaSpan;
+pub const DeltaOp = common_apply.DeltaOp;
+pub const HarmonizedOpState = common_apply.HarmonizedOpState;
+pub const HarmonizedDeltaOp = common_apply.HarmonizedDeltaOp;
+pub const PreviewDeltaOp = common_apply.PreviewDeltaOp;
+pub const SkippedDeltaOp = common_apply.SkippedDeltaOp;
+pub const WholeTextManager = whole_apply_mod.WholeTextManager;
+pub const PartialTextManager = apply_manager_mod.PartialTextManager;
+pub const TextManager = apply_manager_mod.TextManager;
 
 pub const ZDelta = struct {
     version: ZDeltaVersion,
@@ -1166,7 +1168,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
 const testing = std.testing;
-const apply_mod = @import("zdelta/apply.zig");
+const common_apply = @import("zdelta/common.zig");
+const whole_apply_mod = @import("zdelta/whole_apply.zig");
+const apply_manager_mod = @import("zdelta/apply_manager.zig");
 const dmp = @import("dmp.zig");
 const Edit = dmp.Edit;
 const common = @import("dmp/common.zig");
