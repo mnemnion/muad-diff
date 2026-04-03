@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const clap = @import("clap");
-const dmp = @import("dmp");
+const dmp = @import("dmp.zig");
 
 const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;

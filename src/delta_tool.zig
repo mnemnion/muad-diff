@@ -1,7 +1,7 @@
 //! Specialized interactive zdelta corpus tool.
 
 const std = @import("std");
-const dmp = @import("dmp");
+const dmp = @import("dmp.zig");
 const zdelta_context = @import("zdelta/context.zig");
 
 const Allocator = std.mem.Allocator;

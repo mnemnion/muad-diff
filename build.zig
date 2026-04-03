@@ -63,11 +63,24 @@ pub fn build(b: *std.Build) void {
     });
     delta_maker_mod.addImport("dmp", dmp_module);
 
+    const all_tests_mod = b.createModule(.{
+        .root_source_file = b.path("all_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const ztap_dep = b.dependency("ztap", .{
+        .target = b.graph.host,
+        .optimize = optimize,
+        .timed = true,
+    });
+
     if (b.lazyDependency("clap", .{
         .target = target,
         .optimize = optimize,
     })) |clap_dep| {
         muaddiff_mod.addImport("clap", clap_dep.module("clap"));
+        all_tests_mod.addImport("clap", clap_dep.module("clap"));
     }
 
     const muad_diff = b.addExecutable(.{
@@ -145,6 +158,18 @@ pub fn build(b: *std.Build) void {
     const corpus_step = b.step("corpus", "Run offline corpus-backed tests");
     corpus_step.dependOn(&run_corpus_unit_tests.step);
     test_step.dependOn(&run_corpus_unit_tests.step);
+
+    const ztap_unit_tests = b.addTest(.{
+        .name = "ztap-all",
+        .root_module = all_tests_mod,
+        .filters = test_filters,
+        .test_runner = .{ .path = ztap_dep.namedLazyPath("runner"), .mode = .simple },
+    });
+    ztap_unit_tests.root_module.addImport("ztap", ztap_dep.module("ztap"));
+    const run_ztap_unit_tests = b.addRunArtifact(ztap_unit_tests);
+
+    const ztap_step = b.step("ztap", "Run tests with ZTAP");
+    ztap_step.dependOn(&run_ztap_unit_tests.step);
 
     const refresh_corpus = b.addSystemCommand(&.{
         "/Users/atman/Dropbox/deck/m/skills/.venv/bin/python",

@@ -439,11 +439,10 @@ const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
 
 const dmp = @import("dmp.zig");
-const diff_mod = @import("dmp/diff.zig");
 const Diff = dmp.Diff;
 const Edit = dmp.Edit;
 const DiffConfig = dmp.DiffConfig;
-const DiffList = diff_mod.DiffList;
 const Patch = dmp.Patch;
 const PatchConfig = Patch.PatchConfig;
 const PatchList = Patch.PatchList;
+const DiffList = std.ArrayList(Edit);

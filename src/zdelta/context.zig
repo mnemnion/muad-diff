@@ -1,7 +1,7 @@
 //! Screen-bounded contextualization helpers for interactive zdelta inspection.
 
 const std = @import("std");
-const dmp = @import("dmp");
+const dmp = @import("../dmp.zig");
 
 const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
