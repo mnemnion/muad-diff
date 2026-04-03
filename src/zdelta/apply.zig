@@ -21,7 +21,7 @@ pub const HarmonizedDeltaOp = struct {
     state: HarmonizedOpState,
     skip_index: ?u32,
 
-    fn fromRaw(op: DeltaOp) HarmonizedDeltaOp {
+    pub fn fromRaw(op: DeltaOp) HarmonizedDeltaOp {
         return .{
             .original = op,
             .effective = op,
@@ -1570,3 +1570,17 @@ test "ZDelta TextManager applyNext" {
         try expectManagerText("XabYd", &tm);
     }
 }
+
+const std = @import("std");
+
+const Allocator = std.mem.Allocator;
+const testing = std.testing;
+const zdelta_mod = @import("../zdelta.zig");
+const ZDelta = zdelta_mod.ZDelta;
+const TextManagerKind = zdelta_mod.TextManagerKind;
+const addU32 = zdelta_mod.addU32;
+const checkedU32 = zdelta_mod.checkedU32;
+const testZDelta = zdelta_mod.testZDelta;
+const common = @import("../dmp/common.zig");
+const dbgassert = common.dbgassert;
+const cast = common.cast;

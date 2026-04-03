@@ -28,6 +28,14 @@ pub const ZDeltaError = Allocator.Error || error{
     InvalidZDeltaText,
 };
 
+pub const DeltaSpan = apply_mod.DeltaSpan;
+pub const DeltaOp = apply_mod.DeltaOp;
+pub const HarmonizedOpState = apply_mod.HarmonizedOpState;
+pub const HarmonizedDeltaOp = apply_mod.HarmonizedDeltaOp;
+pub const PreviewDeltaOp = apply_mod.PreviewDeltaOp;
+pub const SkippedDeltaOp = apply_mod.SkippedDeltaOp;
+pub const TextManager = apply_mod.TextManager;
+
 pub const ZDelta = struct {
     version: ZDeltaVersion,
     insert_text: []u8,
@@ -53,7 +61,7 @@ pub const ZDelta = struct {
         return len;
     }
 
-    fn originalBeforeLength(delta: *const ZDelta) u32 {
+    pub fn originalBeforeLength(delta: *const ZDelta) u32 {
         var len: u32 = 0;
         for (delta.ops) |op| {
             switch (op.original) {
@@ -119,7 +127,7 @@ pub const ZDelta = struct {
         };
     }
 
-    fn textNumbers(delta: *const ZDelta) struct { u32, u32, u32 } {
+    pub fn textNumbers(delta: *const ZDelta) struct { u32, u32, u32 } {
         const before_len = delta.beforeLength();
         const pre_padding, const post_padding = delta.padding();
         return .{
@@ -129,7 +137,7 @@ pub const ZDelta = struct {
         };
     }
 
-    fn totalChange(delta: *const ZDelta) i33 {
+    pub fn totalChange(delta: *const ZDelta) i33 {
         var change: i33 = 0;
         for (delta.ops) |op| {
             switch (op.effective) {
@@ -693,11 +701,11 @@ fn appendInsertSpan(
     try ops.append(.{ .insert = span });
 }
 
-fn checkedU32(value: usize) !u32 {
+pub fn checkedU32(value: usize) !u32 {
     return std.math.cast(u32, value) orelse error.BadZDeltaNumber;
 }
 
-fn addU32(a: u32, b: u32) !u32 {
+pub fn addU32(a: u32, b: u32) !u32 {
     return std.math.add(u32, a, b) catch error.BadZDeltaNumber;
 }
 
@@ -848,7 +856,7 @@ fn testBadDecodeReifiedCase(
     try testing.expectError(expected, decode(allocator, zdelta));
 }
 
-fn testZDelta(
+pub fn testZDelta(
     allocator: Allocator,
     insert_text: []const u8,
     ops: []const DeltaOp,
@@ -1158,6 +1166,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
 const testing = std.testing;
+const apply_mod = @import("zdelta/apply.zig");
 const dmp = @import("dmp.zig");
 const Edit = dmp.Edit;
 const common = @import("dmp/common.zig");
