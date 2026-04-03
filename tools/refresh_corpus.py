@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/Users/atman/Dropbox/deck/m/skills/.venv/bin/python
 """Refresh checked-in corpus fixtures from Wikipedia JSON snapshots."""
 
 from __future__ import annotations
@@ -6,13 +6,13 @@ from __future__ import annotations
 import argparse
 import shutil
 import subprocess
-import sys
 import tempfile
 import importlib.util
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CORPUS_ROOT = REPO_ROOT / "corpus"
+SKILLS_VENV_PYTHON = Path("/Users/atman/Dropbox/deck/m/skills/.venv/bin/python")
 FETCH_SCRIPT = (
     Path.home()
     / "Dropbox"
@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
 def fetch_fixture(entry: dict, temp_dir: Path) -> Path:
     output_path = temp_dir / f"{entry['slug']}.json"
     cmd = [
-        sys.executable,
+        str(SKILLS_VENV_PYTHON),
         str(FETCH_SCRIPT),
         "--title",
         entry["title"],
@@ -93,7 +93,7 @@ def emit_wikipedia_fixtures(temp_dir: Path, corpus_root: Path) -> None:
         payload_path = fetch_fixture(entry, temp_dir)
         target_dir = corpus_root / "wiki" / entry["language"]
         cmd = [
-            sys.executable,
+            str(SKILLS_VENV_PYTHON),
             str(CONVERT_SCRIPT),
             "--input",
             str(payload_path),

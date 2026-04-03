@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/Users/atman/Dropbox/deck/m/skills/.venv/bin/python
 """Fetch every revision of English Wikipedia's Diff article into batched fixtures."""
 
 from __future__ import annotations
