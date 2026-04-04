@@ -706,7 +706,10 @@ test "delta interaction state exposes prompt facts and multiple sections" {
             .target_revision = 9,
             .relative_path = "corpus/diff/sample.wiki",
         },
-        .{},
+        .{
+            .whole_delta_context_lines = 2,
+            .edit_context_lines = 2,
+        },
     );
     defer state.deinit();
 
@@ -745,7 +748,10 @@ test "edit interaction state exposes focused provenance" {
             .relative_path = "corpus/diff/sample.wiki",
         },
         preview,
-        .{},
+        .{
+            .whole_delta_context_lines = 2,
+            .edit_context_lines = 2,
+        },
     );
     defer state.deinit();
 
@@ -792,7 +798,10 @@ test "controller boundaries are semantic markers, not embedded strings" {
             .target_revision = 2,
             .relative_path = "corpus/diff/sample.wiki",
         },
-        .{},
+        .{
+            .whole_delta_context_lines = 2,
+            .edit_context_lines = 2,
+        },
     );
     defer state.deinit();
 

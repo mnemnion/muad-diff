@@ -749,15 +749,17 @@ fn run(
         }
     }
 
-    try writeExitReview(
-        allocator,
-        stdout_writer,
-        output,
-        tm.view(),
-        selection.revisions[selection.revisions.len - 1].body,
-        stdout_supports_color,
-        options.use_pager,
-    );
+    if (!summary.quit_early) {
+        try writeExitReview(
+            allocator,
+            stdout_writer,
+            output,
+            tm.view(),
+            selection.revisions[selection.revisions.len - 1].body,
+            stdout_supports_color,
+            options.use_pager,
+        );
+    }
 
     try writeSummary(
         output,
@@ -1001,6 +1003,8 @@ fn renderInteractionState(
     state: zdelta_context.InteractionState,
     use_color: bool,
 ) !void {
+    const show_focus = state.prompt_kind == .edit;
+
     try output.print(writer, "\n=== revision {d} -> {d} ({s}) ===\n", .{
         state.session.current_revision,
         state.session.target_revision,
@@ -1015,19 +1019,22 @@ fn renderInteractionState(
             state.facts.skipped_history_len,
         },
     );
-    if (state.focus) |focus| {
-        try output.print(
-            writer,
-            "focus: edit {d} [{s}] @ {d}\n",
-            .{
-                focus.delta_index + 1,
-                @tagName(focus.state),
-                focus.text_index,
-            },
-        );
+    if (show_focus) {
+        if (state.focus) |focus| {
+            try output.print(
+                writer,
+                "focus: edit {d} [{s}] @ {d}\n",
+                .{
+                    focus.delta_index + 1,
+                    @tagName(focus.state),
+                    focus.text_index,
+                },
+            );
+        }
     }
 
     for (state.sections.items) |section| {
+        if (!show_focus and section.kind == .focused_edit) continue;
         try output.writeLineEnding(writer);
         try output.print(writer, "--- {s} ---\n", .{section.label});
         if (use_color) {
@@ -1056,15 +1063,13 @@ fn renderDocumentAnsi(
     defer xprint.deinit();
 
     var boundary_index: usize = 0;
-    for (document.line_starts, 0..) |_, line_index| {
-        try writeBoundaries(output, writer, document.boundaries, &boundary_index, @intCast(line_index));
-        _ = try xprint.next();
-        try output.writeLineEnding(writer);
-    }
-    try writeBoundaries(output, writer, document.boundaries, &boundary_index, @intCast(document.lineCount()));
+    var line_index: u32 = 0;
     while (try xprint.next()) |_| {
+        try writeBoundaries(output, writer, document.boundaries, &boundary_index, line_index);
         try output.writeLineEnding(writer);
+        line_index += 1;
     }
+    try writeBoundaries(output, writer, document.boundaries, &boundary_index, line_index);
 }
 
 fn renderDocumentPlain(
@@ -1521,6 +1526,82 @@ test "render interaction state writes plain controller sections" {
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, " same\n"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, " ... 4;9\n"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, " ---[eof]---\n"));
+}
+
+test "render interaction state hides focused data at delta prompt" {
+    const allocator = std.testing.allocator;
+    var document = zdelta_context.DocumentModel{
+        .text = try allocator.dupe(u8, "line\n"),
+        .line_starts = try allocator.dupe(u32, &.{0}),
+        .annotations = try allocator.dupe(zdelta_context.Annotation, &.{}),
+        .boundaries = try allocator.dupe(zdelta_context.BoundaryMarker, &.{}),
+    };
+    defer document.deinit(allocator);
+
+    var sections = ArrayList(zdelta_context.Section).init(allocator);
+    defer {
+        for (sections.items) |*section| section.deinit(allocator);
+        sections.deinit();
+    }
+    try sections.append(.{
+        .kind = .overview,
+        .label = try allocator.dupe(u8, "target revision"),
+        .provenance = .target_revision,
+        .document = .{
+            .text = try allocator.dupe(u8, document.text),
+            .line_starts = try allocator.dupe(u32, document.line_starts),
+            .annotations = try allocator.dupe(zdelta_context.Annotation, document.annotations),
+            .boundaries = try allocator.dupe(zdelta_context.BoundaryMarker, document.boundaries),
+        },
+    });
+    try sections.append(.{
+        .kind = .focused_edit,
+        .label = try allocator.dupe(u8, "next mutation"),
+        .provenance = .target_revision,
+        .document = .{
+            .text = try allocator.dupe(u8, document.text),
+            .line_starts = try allocator.dupe(u32, document.line_starts),
+            .annotations = try allocator.dupe(zdelta_context.Annotation, document.annotations),
+            .boundaries = try allocator.dupe(zdelta_context.BoundaryMarker, document.boundaries),
+        },
+    });
+
+    var state = zdelta_context.InteractionState{
+        .prompt_kind = .delta,
+        .actions = &.{ .apply, .skip },
+        .session = .{
+            .current_revision = 1,
+            .target_revision = 2,
+            .relative_path = try allocator.dupe(u8, "corpus/diff/sample.wiki"),
+            .document_name = try allocator.dupe(u8, "sample.wiki"),
+        },
+        .facts = .{
+            .current_bytes = 5,
+            .target_bytes = 5,
+            .skipped_history_len = 0,
+        },
+        .focus = .{
+            .text_index = 0,
+            .delta_index = 0,
+            .effective = .{ .insert = .{ .offset = 0, .len = 1 } },
+            .state = .unchanged,
+        },
+        .sections = sections,
+    };
+    defer {
+        state.sections = .init(allocator);
+        state.session.deinit(allocator);
+    }
+
+    var out = ArrayList(u8).init(allocator);
+    defer out.deinit();
+    var out_writer = out.writer();
+    _ = &out_writer;
+    try renderInteractionState(OutputClient.init(allocator, false), &out_writer, state, false);
+
+    try std.testing.expect(!std.mem.containsAtLeast(u8, out.items, 1, "focus: edit"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, out.items, 1, "--- next mutation ---"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "--- target revision ---"));
 }
 
 test "render document ansi uses obelizmo for annotated lines" {
