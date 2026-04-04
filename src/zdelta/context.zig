@@ -19,8 +19,8 @@ const DeltaManager = dmp.DeltaManager;
 const PreviewDeltaOp = dmp.PreviewDeltaOp;
 
 pub const ContextSettings = struct {
-    whole_delta_context_lines: usize = 2,
-    edit_context_lines: usize = 2,
+    whole_delta_context_lines: usize,
+    edit_context_lines: usize,
 };
 
 pub const RevisionInfo = struct {

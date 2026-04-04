@@ -72,11 +72,13 @@ pub const DeltaManager = struct {
         tm.zdelta = zdelta;
         tm.z_idx = 0;
         tm.t_idx = 0;
+        const original_before_len = zdelta.originalBeforeLength();
 
         for (tm.skipped.items) |*skipped| skipped.accounted_for_current_delta = false;
         try tm.harmonizeCurrentDelta();
-        if (tm.equivalentLen() != zdelta.originalBeforeLength()) return error.ZDeltaTextLengthMismatch;
+        if (tm.equivalentLen() != original_before_len) return error.ZDeltaTextLengthMismatch;
         const before_len, const head_room, const tail_room = zdelta.textNumbers();
+        if (tm.textLen() != before_len) return error.ZDeltaTextLengthMismatch;
 
         const total_change = zdelta.totalChange();
         if (total_change > 0) {
@@ -383,12 +385,24 @@ pub const DeltaManager = struct {
                         const prefix = at - cursor;
                         const suffix = count - prefix;
                         if (prefix != 0) {
-                            try appendRewrittenOp(tm.allocator, &rebuilt, op.original, makeSameKind(op.effective, prefix), op.skip_index);
+                            try appendRewrittenOp(
+                                tm.allocator,
+                                &rebuilt,
+                                resizeOp(op.original, prefix),
+                                makeSameKind(op.effective, prefix),
+                                op.skip_index,
+                            );
                         }
                         try appendBlockedOrRewrittenEqual(tm.allocator, &rebuilt, len, skip_index);
                         inserted = true;
                         if (suffix != 0) {
-                            try appendRewrittenOp(tm.allocator, &rebuilt, op.original, makeSameKind(op.effective, suffix), op.skip_index);
+                            try appendRewrittenOp(
+                                tm.allocator,
+                                &rebuilt,
+                                resizeOp(op.original, suffix),
+                                makeSameKind(op.effective, suffix),
+                                op.skip_index,
+                            );
                         }
                     } else {
                         try appendAnalyzedOp(tm.allocator, &rebuilt, op);
@@ -427,14 +441,20 @@ pub const DeltaManager = struct {
                         const prefix = at - cursor;
                         const suffix = count - prefix;
                         if (prefix != 0) {
-                            try appendRewrittenOp(tm.allocator, &rebuilt, op.original, makeSameKind(op.effective, prefix), op.skip_index);
+                            try appendRewrittenOp(
+                                tm.allocator,
+                                &rebuilt,
+                                resizeOp(op.original, prefix),
+                                makeSameKind(op.effective, prefix),
+                                op.skip_index,
+                            );
                         }
                         reached = true;
                         if (suffix != 0) {
                             switch (op.effective) {
                                 .equal => {
                                     const remainder = HarmonizedDeltaOp{
-                                        .original = op.original,
+                                        .original = resizeOp(op.original, suffix),
                                         .effective = .{ .equal = suffix },
                                         .state = op.state,
                                         .skip_index = op.skip_index,
@@ -451,7 +471,7 @@ pub const DeltaManager = struct {
                                     try appendRewrittenOp(
                                         tm.allocator,
                                         &rebuilt,
-                                        op.original,
+                                        resizeOp(op.original, suffix),
                                         .{ .delete = suffix },
                                         op.skip_index,
                                     );
@@ -602,6 +622,17 @@ fn makeSameKind(op: DeltaOp, len: u32) DeltaOp {
         .equal => .{ .equal = len },
         .delete => .{ .delete = len },
         .insert => unreachable,
+    };
+}
+
+fn resizeOp(op: DeltaOp, len: u32) DeltaOp {
+    return switch (op) {
+        .equal => .{ .equal = len },
+        .delete => .{ .delete = len },
+        .insert => |span| .{ .insert = .{
+            .offset = span.offset,
+            .len = len,
+        } },
     };
 }
 

@@ -1,17 +1,5 @@
 //! Specialized interactive zdelta corpus tool.
 
-const std = @import("std");
-const dmp = @import("dmp.zig");
-const obelizmo = @import("obelizmo");
-const zdelta_context = @import("zdelta/context.zig");
-
-const Allocator = std.mem.Allocator;
-const ArrayList = std.array_list.Managed;
-const DeltaManager = dmp.DeltaManager;
-const MarkedDocument = obelizmo.MarkedString(ViewMark);
-const corpus_diff_root = "corpus/diff";
-const default_runs_path = corpus_diff_root ++ "/delta_tool.runs";
-
 const plain_diff_decorations: dmp.DiffDecorations = .{
     .delete_start = "[-",
     .delete_end = "-]",
@@ -588,7 +576,10 @@ fn run(
     var selection = try loadCorpusSelection(allocator, start_revision, end_revision);
     defer selection.deinit(allocator);
 
-    const settings: zdelta_context.ContextSettings = .{};
+    const settings: zdelta_context.ContextSettings = .{
+        .whole_delta_context_lines = 2,
+        .edit_context_lines = 2,
+    };
     var prompt = PromptSource{
         .input = if (parsed_args.replay_script) |script|
             .{ .replay = script }
@@ -616,12 +607,27 @@ fn run(
             allocator.destroy(owned_delta);
             return err;
         };
+        const raw_before_len = owned_delta.originalBeforeLength();
         tm.addDelta(owned_delta) catch |err| {
             if (tm.zdelta == owned_delta) {
                 tm.zdelta = null;
             }
             owned_delta.destroy(allocator);
-            return err;
+            switch (err) {
+                error.ZDeltaTextLengthMismatch => {
+                    try writeLengthMismatchDiagnosis(
+                        stderr_writer,
+                        summary.processed_revision,
+                        revision.ordinal,
+                        tm.view().len,
+                        tm.skippedItems().len,
+                        raw_before_len,
+                        revision.body.len,
+                    );
+                    continue :outer;
+                },
+                else => return err,
+            }
         };
 
         var delta_state = try zdelta_context.InteractionState.buildDelta(
@@ -1163,7 +1169,8 @@ fn annotationToMark(annotation: zdelta_context.Annotation) ?ViewMark {
 }
 
 fn writeDeltaHelp(output: OutputClient, writer: *std.Io.Writer) !void {
-    try output.writeText(writer,
+    try output.writeText(
+        writer,
         "y: apply the whole delta\n" ++
             "n: skip the whole delta\n" ++
             "s: review one mutation at a time\n" ++
@@ -1172,7 +1179,8 @@ fn writeDeltaHelp(output: OutputClient, writer: *std.Io.Writer) !void {
 }
 
 fn writeEditHelp(output: OutputClient, writer: *std.Io.Writer) !void {
-    try output.writeText(writer,
+    try output.writeText(
+        writer,
         "y: apply this mutation\n" ++
             "n: skip this mutation\n" ++
             "a: apply the rest of the current delta\n" ++
@@ -1268,6 +1276,33 @@ fn writeExitReview(
     pager.stdin = null;
 
     _ = try pager.wait();
+}
+
+fn writeLengthMismatchDiagnosis(
+    writer: *std.Io.Writer,
+    current_revision: usize,
+    target_revision: usize,
+    current_len: usize,
+    skipped_history_len: usize,
+    delta_before_len: u32,
+    target_len: usize,
+) !void {
+    try writer.print(
+        "delta-tool diagnosis: length mismatch while attaching revision {d} -> {d}\n" ++
+            "current bytes: {d}\n" ++
+            "skipped history: {d}\n" ++
+            "incoming delta expects before-length: {d}\n" ++
+            "target revision bytes: {d}\n" ++
+            "This usually means delta-application bookkeeping drifted from the corpus baseline.\n",
+        .{
+            current_revision,
+            target_revision,
+            current_len,
+            skipped_history_len,
+            delta_before_len,
+            target_len,
+        },
+    );
 }
 
 test "command line help is sane" {
@@ -1520,3 +1555,15 @@ test "render document ansi uses obelizmo for annotated lines" {
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "\x1b["));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "green"));
 }
+
+const std = @import("std");
+const dmp = @import("dmp.zig");
+const obelizmo = @import("obelizmo");
+const zdelta_context = @import("zdelta/context.zig");
+
+const Allocator = std.mem.Allocator;
+const ArrayList = std.array_list.Managed;
+const DeltaManager = dmp.DeltaManager;
+const MarkedDocument = obelizmo.MarkedString(ViewMark);
+const corpus_diff_root = "corpus/diff";
+const default_runs_path = corpus_diff_root ++ "/delta_tool.runs";
