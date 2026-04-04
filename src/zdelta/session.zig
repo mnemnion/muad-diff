@@ -220,10 +220,11 @@ pub const ReviewSession = struct {
         };
         const step = session.currentStep();
         const focus = try session.driver.peekChange();
+        const active_skipped = session.driver.activeSkippedItems();
         var skipped: []SkippedChange = &.{};
-        if (session.driver.skippedItems().len != 0) {
-            skipped = try session.allocator.alloc(SkippedChange, session.driver.skippedItems().len);
-            for (session.driver.skippedItems(), 0..) |item, idx| {
+        if (active_skipped.len != 0) {
+            skipped = try session.allocator.alloc(SkippedChange, active_skipped.len);
+            for (active_skipped, 0..) |item, idx| {
                 skipped[idx] = .{
                     .number = idx + 1,
                     .at = item.at,
@@ -429,6 +430,17 @@ const ReviewDriver = struct {
 
     fn skippedItems(driver: *const ReviewDriver) []const zdelta_mod.SkippedDeltaOp {
         return driver.tm.skippedItems();
+    }
+
+    fn activeSkippedItems(driver: *const ReviewDriver) []const zdelta_mod.SkippedDeltaOp {
+        const skipped = driver.tm.skippedItems();
+        var start: usize = skipped.len;
+        while (start > 0) {
+            const item = skipped[start - 1];
+            if (item.accounted_for_current_delta) break;
+            start -= 1;
+        }
+        return skipped[start..];
     }
 
     fn peekChange(driver: *const ReviewDriver) !?FocusChange {

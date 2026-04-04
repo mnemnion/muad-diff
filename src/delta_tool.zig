@@ -1,150 +1,9 @@
 //! Specialized interactive zdelta corpus tool.
 
-const plain_diff_decorations: dmp.DiffDecorations = .{
-    .delete_start = "[-",
-    .delete_end = "-]",
-    .insert_start = "{+",
-    .insert_end = "+}",
-};
-
 const ESC = "\x1b";
 const CSI = ESC ++ "[";
-const CURSOR_SAVE = CSI ++ "s";
-const CURSOR_RESTORE = CSI ++ "u";
 const CURSOR_POSITION_REQUEST = CSI ++ "6n";
 const TERMINAL_SIZE_REQUEST = CSI ++ "18t";
-const ERASE_TO_SCREEN_END = CSI ++ "0J";
-const SYNC_ON = CSI ++ "?2026h";
-const SYNC_SEND = CSI ++ "?2026l";
-
-const ViewMark = enum {
-    target_delete,
-    target_insert,
-    skipped_delete,
-    skipped_insert,
-    focus,
-    blocked,
-    rewritten,
-};
-
-const xterm_marks = MarkedDocument.MarkupColorArray.init(.{
-    .target_delete = colors.fgBasic(.red),
-    .target_insert = colors.fgBasic(.green),
-    .skipped_delete = colors.fgBasic(.yellow),
-    .skipped_insert = colors.fgBasic(.cyan),
-    .focus = colors.inverse(),
-    .blocked = colors.ulBasic(.curly, .red),
-    .rewritten = colors.ulBasic(.single, .yellow),
-});
-
-const OutputClient = struct {
-    allocator: Allocator,
-    line_ending: []const u8,
-    raw_mode: bool,
-
-    fn init(allocator: Allocator, raw_mode: bool) OutputClient {
-        return .{
-            .allocator = allocator,
-            .line_ending = if (raw_mode) "\r\n" else "\n",
-            .raw_mode = raw_mode,
-        };
-    }
-
-    fn writeLineEnding(self: OutputClient, writer: anytype) !void {
-        try writer.writeAll(self.line_ending);
-    }
-
-    fn writeText(self: OutputClient, writer: anytype, text: []const u8) !void {
-        if (self.line_ending.len == 1) {
-            try writer.writeAll(text);
-            return;
-        }
-
-        var start: usize = 0;
-        while (std.mem.indexOfScalarPos(u8, text, start, '\n')) |idx| {
-            try writer.writeAll(text[start..idx]);
-            try writer.writeAll(self.line_ending);
-            start = idx + 1;
-        }
-        try writer.writeAll(text[start..]);
-    }
-
-    fn print(self: OutputClient, writer: anytype, comptime fmt: []const u8, args: anytype) !void {
-        const text = try std.fmt.allocPrint(self.allocator, fmt, args);
-        defer self.allocator.free(text);
-        try self.writeText(writer, text);
-    }
-
-    fn writeControl(self: OutputClient, writer: anytype, sequence: []const u8) !void {
-        if (!self.raw_mode) return;
-        try writer.writeAll(sequence);
-    }
-
-    fn supportsInPlaceRepaint(self: OutputClient) bool {
-        return self.raw_mode;
-    }
-};
-
-const CursorAnchor = struct {
-    row: u16,
-    col: u16,
-};
-
-const TerminalSize = struct {
-    rows: u16,
-    cols: u16,
-};
-
-const LiveRenderController = struct {
-    anchor: ?CursorAnchor = null,
-
-    // Raw interactive output is redrawn as one synchronized frame because the
-    // terminal transport owns repaint policy, while replay/plain output keeps
-    // its append-only transcript shape for tests and captured logs.
-    fn renderPromptFrame(
-        controller: *LiveRenderController,
-        output: OutputClient,
-        writer: anytype,
-        prompt: *PromptSource,
-        state: zdelta_context.InteractionState,
-        use_color: bool,
-    ) !void {
-        if (!output.supportsInPlaceRepaint()) {
-            try renderPromptContents(output, writer, state, use_color);
-            return;
-        }
-
-        if (controller.anchor == null) {
-            const start = try prompt.readCursorAnchor(writer);
-            const size = try prompt.readTerminalSize(writer);
-
-            var frame_buffer: std.Io.Writer.Allocating = .init(output.allocator);
-            defer frame_buffer.deinit();
-            try renderPromptContents(output, &frame_buffer.writer, state, use_color);
-            const frame = frame_buffer.written();
-            const frame_rows = countRenderedRows(frame, size.cols);
-            const final_row = @as(u32, start.row) + frame_rows - 1;
-            const scroll_rows = final_row -| size.rows;
-            controller.anchor = .{
-                .row = @intCast(@max(1, @as(i32, start.row) - @as(i32, @intCast(scroll_rows)))),
-                .col = 1,
-            };
-            try writer.writeAll(frame);
-            return;
-        }
-
-        const anchor = controller.anchor orelse return error.LiveRenderAnchorMissing;
-        // Modern terminals handle a full erase-and-repaint cheaply, and
-        // synchronized updates avoid visible churn better than trying to
-        // diff the screen locally.
-        try output.writeControl(writer, SYNC_ON);
-        defer output.writeControl(writer, SYNC_SEND) catch {};
-        try writeCursorMove(writer, anchor);
-        try output.writeControl(writer, ERASE_TO_SCREEN_END);
-
-        try renderPromptContents(output, writer, state, use_color);
-    }
-};
 
 const RunResult = struct {
     stdout: []u8,
@@ -192,11 +51,6 @@ const PromptCommand = struct {
     canonical: ?u8,
 };
 
-const PromptReadResult = union(enum) {
-    command: PromptCommand,
-    demo_recolor,
-};
-
 const ParsedPrompt = struct {
     intent: zdelta_session.SessionIntent,
     canonical: u8,
@@ -204,7 +58,6 @@ const ParsedPrompt = struct {
 
 const PromptParseResult = union(enum) {
     accepted: ParsedPrompt,
-    demo_recolor,
     invalid,
     interrupt,
 };
@@ -302,7 +155,7 @@ const PromptSource = struct {
         return command;
     }
 
-    fn readCursorAnchor(self: *PromptSource, writer: *std.Io.Writer) !CursorAnchor {
+    fn readCursorAnchor(self: *PromptSource, writer: *std.Io.Writer) !paint_mod.CursorAnchor {
         switch (self.input) {
             .live => {},
             .replay => return error.CursorAnchorUnavailable,
@@ -331,7 +184,7 @@ const PromptSource = struct {
         return .{ .row = row, .col = col };
     }
 
-    fn readTerminalSize(self: *PromptSource, writer: *std.Io.Writer) !TerminalSize {
+    fn readTerminalSize(self: *PromptSource, writer: *std.Io.Writer) !paint_mod.TerminalSize {
         switch (self.input) {
             .live => {},
             .replay => return error.TerminalSizeUnavailable,
@@ -374,25 +227,24 @@ const PromptSource = struct {
         self: *PromptSource,
         prompt_kind: zdelta_session.SessionPrompt,
         writer: anytype,
-        output: OutputClient,
-    ) !?PromptReadResult {
+        echo_live: bool,
+    ) !?PromptCommand {
         switch (self.input) {
             .live => {
                 while (true) {
                     const byte = (try self.readLiveByte()) orelse return null;
                     switch (parsePromptByte(prompt_kind, byte)) {
                         .accepted => |accepted| {
-                            if (!output.supportsInPlaceRepaint()) {
+                            if (echo_live) {
                                 try writer.writeByte(accepted.canonical);
-                                try output.writeLineEnding(writer);
+                                try writer.writeAll("\n");
                                 try writer.flush();
                             }
-                            return .{ .command = .{
+                            return .{
                                 .intent = accepted.intent,
                                 .canonical = accepted.canonical,
-                            } };
+                            };
                         },
-                        .demo_recolor => return .demo_recolor,
                         .invalid => {
                             try writer.writeByte(7);
                             try writer.flush();
@@ -407,10 +259,10 @@ const PromptSource = struct {
                     .delta => return error.InvalidReplayDeltaCommand,
                     .edit => return error.InvalidReplayEditCommand,
                 };
-                return .{ .command = .{
+                return .{
                     .intent = parsed.intent,
                     .canonical = parsed.canonical,
-                } };
+                };
             },
         }
     }
@@ -477,6 +329,30 @@ const RunRecorder = struct {
         try recorder.recordCommand('q');
     }
 };
+
+fn makeTerminalProbe(prompt: *PromptSource) paint_mod.TerminalProbe {
+    return .{
+        .context = @ptrCast(prompt),
+        .read_cursor_anchor = promptReadCursorAnchor,
+        .read_terminal_size = promptReadTerminalSize,
+    };
+}
+
+fn promptReadCursorAnchor(
+    context: *anyopaque,
+    writer: *std.Io.Writer,
+) anyerror!paint_mod.CursorAnchor {
+    const prompt: *PromptSource = @ptrCast(@alignCast(context));
+    return prompt.readCursorAnchor(writer);
+}
+
+fn promptReadTerminalSize(
+    context: *anyopaque,
+    writer: *std.Io.Writer,
+) anyerror!paint_mod.TerminalSize {
+    const prompt: *PromptSource = @ptrCast(@alignCast(context));
+    return prompt.readTerminalSize(writer);
+}
 
 const OwnedSessionSeed = struct {
     steps: []zdelta_session.SessionStep,
@@ -599,12 +475,17 @@ fn run(
     stdout_writer: *std.Io.Writer,
     stderr_writer: *std.Io.Writer,
 ) !u8 {
+    var painter = paint_mod.Painter.init(allocator, stdout_writer, stderr_writer, .{
+        .raw_mode = false,
+        .stdout_supports_color = stdout_supports_color,
+        .use_pager = options.use_pager,
+    });
     if (args.len == 1 and isHelpArg(args[0])) {
-        try writeHelp(stdout_writer, exe_name);
+        try painter.writeHelp(exe_name);
         return 0;
     }
     const parsed_args = parseCliArgs(args) orelse {
-        try writeUsage(stderr_writer, exe_name);
+        try painter.writeUsage(exe_name);
         return 1;
     };
 
@@ -648,8 +529,11 @@ fn run(
     else
         RawTerminalGuard{};
     defer raw_guard.deinit();
-    const output = OutputClient.init(allocator, raw_guard.isActive());
-    var render_controller = LiveRenderController{};
+    painter.setRawMode(raw_guard.isActive());
+    const terminal_probe: ?paint_mod.TerminalProbe = if (painter.supportsInPlaceRepaint())
+        makeTerminalProbe(&prompt)
+    else
+        null;
 
     var session = try zdelta_session.ReviewSession.init(allocator, .{
         .baseline = .{
@@ -663,7 +547,7 @@ fn run(
 
     var opened = try session.open();
     defer opened.deinit(allocator);
-    try writeDiagnostics(stderr_writer, opened.diagnostics);
+    try painter.writeDiagnostics(opened.diagnostics);
 
     outer: while (session.status() == .in_progress) {
         var snapshot = try session.snapshot();
@@ -671,66 +555,43 @@ fn run(
 
         var interaction_state = try zdelta_context.InteractionState.build(allocator, snapshot, settings);
         defer interaction_state.deinit();
-        try render_controller.renderPromptFrame(output, stdout_writer, &prompt, interaction_state, stdout_supports_color);
-        try stdout_writer.flush();
+        try painter.renderPromptFrame(terminal_probe, interaction_state);
 
         while (true) {
-            const input = (try prompt.readInput(snapshot.prompt_kind, stdout_writer, output)) orelse {
+            const input = (try prompt.readInput(snapshot.prompt_kind, stdout_writer, painter.echoesAcceptedCommands())) orelse {
                 session.quitEarly();
                 break :outer;
             };
-            switch (input) {
-                .demo_recolor => {
-                    recolorFirstVisibleEdit(&interaction_state);
-                    try render_controller.renderPromptFrame(output, stdout_writer, &prompt, interaction_state, stdout_supports_color);
-                    try stdout_writer.flush();
-                    continue;
-                },
-                .command => |command| {
-                    if (command.canonical) |byte| {
-                        if (recorder) |*owned| try owned.recordCommand(byte);
-                    }
-
-                    var outcome = try session.dispatch(command.intent);
-                    defer outcome.deinit(allocator);
-                    try writeDiagnostics(stderr_writer, outcome.diagnostics);
-                    if (outcome.help_prompt) |prompt_kind| {
-                        switch (prompt_kind) {
-                            .delta => try writeDeltaHelp(output, stdout_writer),
-                            .edit => try writeEditHelp(output, stdout_writer),
-                        }
-                        try output.writeText(stdout_writer, promptText(snapshot.prompt_kind));
-                        try stdout_writer.flush();
-                        continue;
-                    }
-                    break;
-                }
+            if (painter.supportsInPlaceRepaint() and painter.previewIntent(&interaction_state, input.intent)) {
+                try painter.renderPromptFrame(terminal_probe, interaction_state);
             }
+            if (input.canonical) |byte| {
+                if (recorder) |*owned| try owned.recordCommand(byte);
+            }
+
+            var outcome = try session.dispatch(input.intent);
+            defer outcome.deinit(allocator);
+            try painter.writeDiagnostics(outcome.diagnostics);
+            if (outcome.help_prompt) |prompt_kind| {
+                try painter.writePromptHelp(prompt_kind);
+                continue;
+            }
+            break;
         }
     }
 
     const summary = session.summary();
     if (!summary.quit_early and session.status() == .complete) {
-        try writeExitReview(
-            allocator,
-            stdout_writer,
-            session.currentText(),
-            session.expectedFinalText(),
-            stdout_supports_color,
-            options.use_pager,
-        );
+        try painter.writeExitReview(session.currentText(), session.expectedFinalText());
     }
 
-    try writeSummary(
-        output,
-        stdout_writer,
+    try painter.writeSummary(
         start_revision,
         end_revision,
         summary,
         session.currentText().len,
         session.skippedHistoryLen(),
     );
-    try stdout_writer.flush();
     if (recorder) |*owned| try owned.ensureSuccessQuit();
     return 0;
 }
@@ -769,23 +630,6 @@ fn parseCliArgs(args: []const []const u8) ?ParsedArgs {
     };
 }
 
-fn writeUsage(writer: *std.Io.Writer, exe_name: []const u8) !void {
-    try writer.print("Usage: {s} [--replay <script>] <first-revision> <last-revision>\n", .{exe_name});
-    try writer.writeAll("Try --help for more information.\n");
-}
-
-fn writeHelp(writer: *std.Io.Writer, exe_name: []const u8) !void {
-    try writer.print("Usage: {s} [--replay <script>] <first-revision> <last-revision>\n\n", .{exe_name});
-    try writer.writeAll(
-        "Interactive zdelta inspector for the checked-in corpus.\n\n" ++
-            "Arguments:\n" ++
-            "  --replay <script>  Replay a one-line command script of single-character actions.\n" ++
-            "  <first-revision>  1-based starting revision ordinal.\n" ++
-            "  <last-revision>   1-based ending revision ordinal, greater than the first.\n\n" ++
-            "Revision 0 is the implicit pre-history baseline and is not passed on the command line.\n",
-    );
-}
-
 fn parseRevisionOrdinal(text: []const u8) !usize {
     return std.fmt.parseUnsigned(usize, text, 10);
 }
@@ -810,62 +654,15 @@ fn makeSessionSeed(
     return .{ .steps = steps };
 }
 
-fn writeDiagnostics(
-    writer: *std.Io.Writer,
-    diagnostics: []const zdelta_session.AttachDiagnostic,
-) !void {
-    for (diagnostics) |diagnostic| {
-        try writeLengthMismatchDiagnosis(
-            writer,
-            diagnostic.current_revision,
-            diagnostic.target_revision,
-            diagnostic.current_bytes,
-            diagnostic.skipped_history_len,
-            diagnostic.delta_before_len,
-            diagnostic.target_bytes,
-        );
-    }
-    if (diagnostics.len != 0) try writer.flush();
-}
-
-fn promptText(prompt_kind: zdelta_session.SessionPrompt) []const u8 {
-    return switch (prompt_kind) {
-        .delta => "[y] apply  [n] skip  [s] split  [q] quit  [?] help > ",
-        .edit => "[y] apply  [n] skip  [a] apply rest  [d] skip rest  [q] quit  [?] help > ",
-    };
-}
-
 fn parsePromptByte(
     prompt_kind: zdelta_session.SessionPrompt,
     byte: u8,
 ) PromptParseResult {
     if (byte == 3) return .interrupt;
-    if (byte == 'x') return .demo_recolor;
     return if (parseReplayPrompt(prompt_kind, byte)) |parsed|
         .{ .accepted = parsed }
     else
         .invalid;
-}
-
-// This is a deliberately local UI-only mutation: the render path already knows
-// how to color skipped edits from annotation provenance, so the demo command
-// only flips the first currently visible target annotation and lets normal
-// repaint/render do the rest.
-fn recolorFirstVisibleEdit(state: *zdelta_context.InteractionState) void {
-    const show_focus = state.prompt_kind == .edit;
-    for (state.sections.items) |*section| {
-        if (!show_focus and section.kind == .focused_edit) continue;
-        for (section.document.annotations) |*annotation| {
-            if (annotation.provenance != .target_revision) continue;
-            switch (annotation.kind) {
-                .insert, .delete => {
-                    annotation.provenance = .skipped_history;
-                    return;
-                },
-                .focus, .blocked, .rewritten => {},
-            }
-        }
-    }
 }
 
 fn parseReplayPrompt(
@@ -893,291 +690,6 @@ fn parseReplayPrompt(
     };
 }
 
-fn writeCursorMove(writer: *std.Io.Writer, anchor: CursorAnchor) !void {
-    var buf: [32]u8 = undefined;
-    const sequence = try std.fmt.bufPrint(&buf, "{s}{d};{d}H", .{
-        CSI,
-        anchor.row,
-        anchor.col,
-    });
-    try writer.writeAll(sequence);
-}
-
-fn countRenderedRows(text: []const u8, terminal_cols: u16) u32 {
-    if (terminal_cols == 0) return 1;
-
-    var rows: u32 = 1;
-    var line_width: u16 = 0;
-    var idx: usize = 0;
-    while (idx < text.len) {
-        const byte = text[idx];
-        if (byte == 0x1b and idx + 1 < text.len and text[idx + 1] == '[') {
-            idx += 2;
-            while (idx < text.len) : (idx += 1) {
-                const tail = text[idx];
-                if (tail >= 0x40 and tail <= 0x7e) {
-                    idx += 1;
-                    break;
-                }
-            }
-            continue;
-        }
-        if (byte == '\r') {
-            idx += 1;
-            continue;
-        }
-        if (byte == '\n') {
-            rows += 1;
-            line_width = 0;
-            idx += 1;
-            continue;
-        }
-        if (line_width == terminal_cols) {
-            rows += 1;
-            line_width = 0;
-        }
-        line_width += 1;
-        idx += 1;
-    }
-    return rows;
-}
-
-fn renderInteractionState(
-    output: OutputClient,
-    writer: anytype,
-    state: zdelta_context.InteractionState,
-    use_color: bool,
-) !void {
-    const show_focus = state.prompt_kind == .edit;
-
-    try output.print(writer, "\n=== revision {d} -> {d} ({s}) ===\n", .{
-        state.session.current_revision,
-        state.session.target_revision,
-        state.session.relative_path,
-    });
-    try output.print(
-        writer,
-        "current bytes: {d}  target bytes: {d}  skipped history: {d}\n",
-        .{
-            state.facts.current_bytes,
-            state.facts.target_bytes,
-            state.facts.skipped_history_len,
-        },
-    );
-    if (show_focus) {
-        if (state.focus) |focus| {
-            try output.print(
-                writer,
-                "focus: change {d} @ {d}\n",
-                .{
-                    focus.change_number,
-                    focus.text_index,
-                },
-            );
-        }
-    }
-
-    for (state.sections.items) |section| {
-        if (!show_focus and section.kind == .focused_edit) continue;
-        try output.writeLineEnding(writer);
-        try output.print(writer, "--- {s} ---\n", .{section.label});
-        if (use_color) {
-            try renderDocumentAnsi(output, writer, section.document);
-        } else {
-            try renderDocumentPlain(output, writer, section.document);
-        }
-    }
-}
-
-fn renderPromptContents(
-    output: OutputClient,
-    writer: anytype,
-    state: zdelta_context.InteractionState,
-    use_color: bool,
-) !void {
-    try renderInteractionState(output, writer, state, use_color);
-    try output.writeText(writer, promptText(state.prompt_kind));
-}
-
-fn renderDocumentAnsi(
-    output: OutputClient,
-    writer: anytype,
-    document: zdelta_context.DocumentModel,
-) !void {
-    var marker = MarkedDocument.init(output.allocator, document.text);
-    defer marker.deinit();
-
-    for (document.annotations) |annotation| {
-        if (annotation.len == 0) continue;
-        const mark_kind = annotationToMark(annotation) orelse continue;
-        try marker.markFrom(mark_kind, annotation.start, annotation.len);
-    }
-
-    var xprint = MarkedDocument.XtermLineWriter(@TypeOf(writer)).init(&marker, xterm_marks, writer);
-    defer xprint.deinit();
-
-    var boundary_index: usize = 0;
-    var line_index: u32 = 0;
-    while (try xprint.next()) |_| {
-        try writeBoundaries(output, writer, document.boundaries, &boundary_index, line_index);
-        try output.writeLineEnding(writer);
-        line_index += 1;
-    }
-    try writeBoundaries(output, writer, document.boundaries, &boundary_index, line_index);
-}
-
-fn renderDocumentPlain(
-    output: OutputClient,
-    writer: anytype,
-    document: zdelta_context.DocumentModel,
-) !void {
-    var boundary_index: usize = 0;
-    for (document.line_starts, 0..) |line_start, line_index| {
-        try writeBoundaries(output, writer, document.boundaries, &boundary_index, @intCast(line_index));
-        const line = lineSlice(document, @intCast(line_index), line_start);
-        try writer.writeByte(' ');
-        try writePlainAnnotatedLine(output, writer, document, @intCast(line_index), line);
-        try output.writeLineEnding(writer);
-    }
-    try writeBoundaries(output, writer, document.boundaries, &boundary_index, @intCast(document.lineCount()));
-}
-
-fn writeBoundaries(
-    output: OutputClient,
-    writer: anytype,
-    boundaries: []const zdelta_context.BoundaryMarker,
-    boundary_index: *usize,
-    line_index: u32,
-) !void {
-    while (boundary_index.* < boundaries.len and boundaries[boundary_index.*].line_index == line_index) {
-        const boundary = boundaries[boundary_index.*];
-        switch (boundary.kind) {
-            .elision => {
-                try output.print(writer, " ... {d};{d}\n", .{
-                    boundary.before_line,
-                    boundary.after_line,
-                });
-            },
-            .eof => try output.writeText(writer, " ---[eof]---\n"),
-        }
-        boundary_index.* += 1;
-    }
-}
-
-fn lineSlice(
-    document: zdelta_context.DocumentModel,
-    line_index: u32,
-    line_start: u32,
-) []const u8 {
-    const start: usize = @intCast(line_start);
-    const next_index: usize = @intCast(line_index + 1);
-    const end: usize = if (next_index < document.line_starts.len)
-        document.line_starts[next_index]
-    else
-        document.text.len;
-    return document.text[start..end];
-}
-
-fn writePlainAnnotatedLine(
-    output: OutputClient,
-    writer: anytype,
-    document: zdelta_context.DocumentModel,
-    line_index: u32,
-    line: []const u8,
-) !void {
-    const start = document.line_starts[line_index];
-    const end = start + line.len;
-    const display_line = std.mem.trimRight(u8, line, "\n");
-    var primary: ?zdelta_context.Annotation = null;
-    for (document.annotations) |annotation| {
-        if (annotation.start == start and annotation.start + annotation.len == end) {
-            switch (annotation.kind) {
-                .insert, .delete => {
-                    if (primary == null) primary = annotation;
-                },
-                .focus, .blocked, .rewritten => {},
-            }
-        }
-    }
-
-    if (primary) |annotation| {
-        switch (annotation.kind) {
-            .insert => try output.print(writer, "{{+{s}+}}", .{display_line}),
-            .delete => try output.print(writer, "[-{s}-]", .{display_line}),
-            .focus, .blocked, .rewritten => unreachable,
-        }
-    } else {
-        try output.writeText(writer, display_line);
-    }
-}
-
-fn annotationToMark(annotation: zdelta_context.Annotation) ?ViewMark {
-    return switch (annotation.kind) {
-        .insert => switch (annotation.provenance) {
-            .target_revision => .target_insert,
-            .skipped_history => .skipped_insert,
-        },
-        .delete => switch (annotation.provenance) {
-            .target_revision => .target_delete,
-            .skipped_history => .skipped_delete,
-        },
-        .focus => .focus,
-        .blocked => .blocked,
-        .rewritten => .rewritten,
-    };
-}
-
-fn writeDeltaHelp(output: OutputClient, writer: *std.Io.Writer) !void {
-    try output.writeText(
-        writer,
-        "y: apply the whole delta\n" ++
-            "n: skip the whole delta\n" ++
-            "s: review one mutation at a time\n" ++
-            "q: stop the session\n",
-    );
-}
-
-fn writeEditHelp(output: OutputClient, writer: *std.Io.Writer) !void {
-    try output.writeText(
-        writer,
-        "y: apply this mutation\n" ++
-            "n: skip this mutation\n" ++
-            "a: apply the rest of the current delta\n" ++
-            "d: skip the rest of the current delta\n" ++
-            "q: stop the session\n",
-    );
-}
-
-fn writeSummary(
-    output: OutputClient,
-    writer: *std.Io.Writer,
-    start_revision: usize,
-    end_revision: usize,
-    summary: zdelta_session.SessionSummary,
-    current_len: usize,
-    skipped_history_len: usize,
-) !void {
-    try output.print(
-        writer,
-        "\n=== zdelta summary ===\nrange: {d}..{d}\nprocessed through: {d}\nquit early: {any}\n" ++
-            "applied deltas: {d}\nskipped deltas: {d}\npartial deltas: {d}\n" ++
-            "applied edits: {d}\nskipped edits: {d}\ncurrent bytes: {d}\nskipped history: {d}\n",
-        .{
-            start_revision,
-            end_revision,
-            summary.processed_revision,
-            summary.quit_early,
-            summary.applied_deltas,
-            summary.skipped_deltas,
-            summary.partial_deltas,
-            summary.applied_edits,
-            summary.skipped_edits,
-            current_len,
-            skipped_history_len,
-        },
-    );
-}
-
 fn formatUtcTimestamp(buffer: []u8, timestamp_secs: u64) ![]const u8 {
     const epoch_seconds: std.time.epoch.EpochSeconds = .{ .secs = timestamp_secs };
     const year_day = epoch_seconds.getEpochDay().calculateYearDay();
@@ -1192,96 +704,6 @@ fn formatUtcTimestamp(buffer: []u8, timestamp_secs: u64) ![]const u8 {
         day_seconds.getMinutesIntoHour(),
         day_seconds.getSecondsIntoMinute(),
     });
-}
-
-fn writeExitReview(
-    allocator: Allocator,
-    stdout_writer: *std.Io.Writer,
-    final_text: []const u8,
-    expected_text: []const u8,
-    use_color: bool,
-    use_pager: bool,
-) !void {
-    if (!use_pager or std.mem.eql(u8, final_text, expected_text)) return;
-
-    var diff: dmp.Diff = .default;
-    defer diff.deinit(allocator);
-    _ = try diff.diff(allocator, final_text, expected_text);
-    _ = try diff.cleanupSemantic(allocator);
-
-    if (use_pager and tryWriteExitReviewPager(allocator, &diff, use_color)) return;
-
-    _ = if (use_color)
-        try diff.writePrettyFormat(allocator, stdout_writer, .xterm_classic)
-    else
-        try diff.writePrettyFormat(allocator, stdout_writer, plain_diff_decorations);
-}
-
-fn tryWriteExitReviewPager(
-    allocator: Allocator,
-    diff: *const dmp.Diff,
-    use_color: bool,
-) bool {
-    var stdout = std.fs.File.stdout();
-    stdout.lock(.exclusive) catch return false;
-    defer stdout.unlock();
-
-    var pager = std.process.Child.init(
-        if (use_color) &.{ "less", "-R" } else &.{"less"},
-        allocator,
-    );
-    pager.stdin_behavior = .Pipe;
-    pager.stdout_behavior = .Inherit;
-    pager.stderr_behavior = .Inherit;
-    pager.spawn() catch return false;
-    errdefer {
-        if (pager.stdin) |stdin| stdin.close();
-        _ = pager.wait() catch {};
-    }
-
-    const pager_stdin = pager.stdin orelse return false;
-    {
-        var pager_buf: [4096]u8 = undefined;
-        var pager_writer = pager_stdin.writer(&pager_buf);
-        const written = if (use_color)
-            diff.writePrettyFormat(allocator, &pager_writer.interface, .xterm_classic)
-        else
-            diff.writePrettyFormat(allocator, &pager_writer.interface, plain_diff_decorations);
-        _ = written catch return false;
-        pager_writer.interface.flush() catch return false;
-    }
-
-    pager_stdin.close();
-    pager.stdin = null;
-    _ = pager.wait() catch return false;
-    return true;
-}
-
-fn writeLengthMismatchDiagnosis(
-    writer: *std.Io.Writer,
-    current_revision: usize,
-    target_revision: usize,
-    current_len: usize,
-    skipped_history_len: usize,
-    delta_before_len: u32,
-    target_len: usize,
-) !void {
-    try writer.print(
-        "delta-tool diagnosis: length mismatch while attaching revision {d} -> {d}\n" ++
-            "current bytes: {d}\n" ++
-            "skipped history: {d}\n" ++
-            "incoming delta expects before-length: {d}\n" ++
-            "target revision bytes: {d}\n" ++
-            "This usually means delta-application bookkeeping drifted from the corpus baseline.\n",
-        .{
-            current_revision,
-            target_revision,
-            current_len,
-            skipped_history_len,
-            delta_before_len,
-            target_len,
-        },
-    );
 }
 
 test "command line help is sane" {
@@ -1437,268 +859,11 @@ test "edit prompt parser accepts lowercase canonical commands only" {
     );
 }
 
-test "render interaction state writes plain review sections" {
-    const allocator = std.testing.allocator;
-    var document = zdelta_context.DocumentModel{
-        .text = try allocator.dupe(u8, "same\n"),
-        .line_starts = try allocator.dupe(u32, &.{0}),
-        .annotations = try allocator.dupe(zdelta_context.Annotation, &.{}),
-        .boundaries = try allocator.dupe(zdelta_context.BoundaryMarker, &.{
-            .{
-                .line_index = 1,
-                .kind = .elision,
-                .before_line = 4,
-                .after_line = 9,
-            },
-            .{
-                .line_index = 1,
-                .kind = .eof,
-            },
-        }),
-    };
-    defer document.deinit(allocator);
-    var sections = ArrayList(zdelta_context.Section).init(allocator);
-    defer {
-        for (sections.items) |*section| section.deinit(allocator);
-        sections.deinit();
-    }
-    try sections.append(.{
-        .kind = .overview,
-        .label = try allocator.dupe(u8, "target revision"),
-        .provenance = .target_revision,
-        .document = .{
-            .text = try allocator.dupe(u8, document.text),
-            .line_starts = try allocator.dupe(u32, document.line_starts),
-            .annotations = try allocator.dupe(zdelta_context.Annotation, document.annotations),
-            .boundaries = try allocator.dupe(zdelta_context.BoundaryMarker, document.boundaries),
-        },
-    });
-
-    var state = zdelta_context.InteractionState{
-        .prompt_kind = .delta,
-        .session = .{
-            .current_revision = 1,
-            .target_revision = 2,
-            .relative_path = try allocator.dupe(u8, "corpus/diff/sample.wiki"),
-        },
-        .facts = .{
-            .current_bytes = 5,
-            .target_bytes = 7,
-            .skipped_history_len = 0,
-        },
-        .focus = null,
-        .sections = sections,
-    };
-    defer {
-        state.sections = .init(allocator);
-        state.session.deinit(allocator);
-    }
-
-    var out = ArrayList(u8).init(allocator);
-    defer out.deinit();
-    var out_writer = out.writer();
-    _ = &out_writer;
-    try renderInteractionState(OutputClient.init(allocator, false), &out_writer, state, false);
-
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "--- target revision ---"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, " same\n"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, " ... 4;9\n"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, " ---[eof]---\n"));
-}
-
-test "render interaction state hides focused data at delta prompt" {
-    const allocator = std.testing.allocator;
-    var document = zdelta_context.DocumentModel{
-        .text = try allocator.dupe(u8, "line\n"),
-        .line_starts = try allocator.dupe(u32, &.{0}),
-        .annotations = try allocator.dupe(zdelta_context.Annotation, &.{}),
-        .boundaries = try allocator.dupe(zdelta_context.BoundaryMarker, &.{}),
-    };
-    defer document.deinit(allocator);
-
-    var sections = ArrayList(zdelta_context.Section).init(allocator);
-    defer {
-        for (sections.items) |*section| section.deinit(allocator);
-        sections.deinit();
-    }
-    try sections.append(.{
-        .kind = .overview,
-        .label = try allocator.dupe(u8, "target revision"),
-        .provenance = .target_revision,
-        .document = .{
-            .text = try allocator.dupe(u8, document.text),
-            .line_starts = try allocator.dupe(u32, document.line_starts),
-            .annotations = try allocator.dupe(zdelta_context.Annotation, document.annotations),
-            .boundaries = try allocator.dupe(zdelta_context.BoundaryMarker, document.boundaries),
-        },
-    });
-    try sections.append(.{
-        .kind = .focused_edit,
-        .label = try allocator.dupe(u8, "next change"),
-        .provenance = .target_revision,
-        .document = .{
-            .text = try allocator.dupe(u8, document.text),
-            .line_starts = try allocator.dupe(u32, document.line_starts),
-            .annotations = try allocator.dupe(zdelta_context.Annotation, document.annotations),
-            .boundaries = try allocator.dupe(zdelta_context.BoundaryMarker, document.boundaries),
-        },
-    });
-
-    var state = zdelta_context.InteractionState{
-        .prompt_kind = .delta,
-        .session = .{
-            .current_revision = 1,
-            .target_revision = 2,
-            .relative_path = try allocator.dupe(u8, "corpus/diff/sample.wiki"),
-        },
-        .facts = .{
-            .current_bytes = 5,
-            .target_bytes = 5,
-            .skipped_history_len = 0,
-        },
-        .focus = .{
-            .text_index = 0,
-            .change_number = 1,
-            .effect = .{ .insert = "x" },
-            .state = .unchanged,
-        },
-        .sections = sections,
-    };
-    defer {
-        state.sections = .init(allocator);
-        state.session.deinit(allocator);
-    }
-
-    var out = ArrayList(u8).init(allocator);
-    defer out.deinit();
-    var out_writer = out.writer();
-    _ = &out_writer;
-    try renderInteractionState(OutputClient.init(allocator, false), &out_writer, state, false);
-
-    try std.testing.expect(!std.mem.containsAtLeast(u8, out.items, 1, "focus: edit"));
-    try std.testing.expect(!std.mem.containsAtLeast(u8, out.items, 1, "--- next change ---"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "--- target revision ---"));
-}
-
-test "raw repaint frame uses synchronized updates" {
-    const allocator = std.testing.allocator;
-    var document = zdelta_context.DocumentModel{
-        .text = try allocator.dupe(u8, "line\n"),
-        .line_starts = try allocator.dupe(u32, &.{0}),
-        .annotations = try allocator.dupe(zdelta_context.Annotation, &.{
-            .{
-                .start = 0,
-                .len = 5,
-                .kind = .insert,
-                .provenance = .skipped_history,
-                .skip_index = 0,
-            },
-        }),
-        .boundaries = try allocator.dupe(zdelta_context.BoundaryMarker, &.{}),
-    };
-    defer document.deinit(allocator);
-
-    var sections = ArrayList(zdelta_context.Section).init(allocator);
-    defer {
-        for (sections.items) |*section| section.deinit(allocator);
-        sections.deinit();
-    }
-    try sections.append(.{
-        .kind = .overview,
-        .label = try allocator.dupe(u8, "target revision"),
-        .provenance = .target_revision,
-        .document = .{
-            .text = try allocator.dupe(u8, document.text),
-            .line_starts = try allocator.dupe(u32, document.line_starts),
-            .annotations = try allocator.dupe(zdelta_context.Annotation, document.annotations),
-            .boundaries = try allocator.dupe(zdelta_context.BoundaryMarker, document.boundaries),
-        },
-    });
-
-    var state = zdelta_context.InteractionState{
-        .prompt_kind = .delta,
-        .session = .{
-            .current_revision = 1,
-            .target_revision = 2,
-            .relative_path = try allocator.dupe(u8, "corpus/diff/sample.wiki"),
-        },
-        .facts = .{
-            .current_bytes = 4,
-            .target_bytes = 5,
-            .skipped_history_len = 1,
-        },
-        .focus = null,
-        .sections = sections,
-    };
-    defer {
-        state.sections = .init(allocator);
-        state.session.deinit(allocator);
-    }
-
-    var controller = LiveRenderController{};
-
-    var first = ArrayList(u8).init(allocator);
-    defer first.deinit();
-    var first_writer = first.writer();
-    _ = &first_writer;
-    try controller.renderPromptFrame(OutputClient.init(allocator, true), &first_writer, state, false);
-
-    var second = ArrayList(u8).init(allocator);
-    defer second.deinit();
-    var second_writer = second.writer();
-    _ = &second_writer;
-    try controller.renderPromptFrame(OutputClient.init(allocator, true), &second_writer, state, false);
-
-    try std.testing.expect(std.mem.containsAtLeast(u8, first.items, 1, CURSOR_SAVE));
-    try std.testing.expect(!std.mem.containsAtLeast(u8, first.items, 1, SYNC_ON));
-    try std.testing.expect(std.mem.startsWith(u8, second.items, SYNC_ON));
-    try std.testing.expect(std.mem.containsAtLeast(u8, second.items, 1, CURSOR_RESTORE));
-    try std.testing.expect(std.mem.containsAtLeast(u8, second.items, 1, ERASE_TO_SCREEN_END));
-    try std.testing.expect(std.mem.containsAtLeast(u8, second.items, 1, "--- target revision ---"));
-    try std.testing.expect(!std.mem.containsAtLeast(u8, second.items, 1, "--- skipped 1 [insert] ---"));
-}
-
-test "render document ansi uses obelizmo for annotated lines" {
-    const allocator = std.testing.allocator;
-    var document = zdelta_context.DocumentModel{
-        .text = try allocator.dupe(u8, "green\n"),
-        .line_starts = try allocator.dupe(u32, &.{0}),
-        .annotations = try allocator.dupe(zdelta_context.Annotation, &.{
-            .{
-                .start = 0,
-                .len = 6,
-                .kind = .insert,
-                .provenance = .target_revision,
-            },
-            .{
-                .start = 0,
-                .len = 6,
-                .kind = .focus,
-                .provenance = .target_revision,
-            },
-        }),
-        .boundaries = try allocator.dupe(zdelta_context.BoundaryMarker, &.{}),
-    };
-    defer document.deinit(allocator);
-
-    var out = ArrayList(u8).init(allocator);
-    defer out.deinit();
-    var out_writer = out.writer();
-    _ = &out_writer;
-    try renderDocumentAnsi(OutputClient.init(allocator, false), &out_writer, document);
-
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "\x1b["));
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "green"));
-}
-
 const std = @import("std");
 const dmp = @import("dmp.zig");
-const obelizmo = @import("obelizmo");
 const corpus_contract = @import("corpus_contract");
+const paint_mod = @import("dtool/paint.zig");
 const zdelta_context = @import("zdelta/context.zig");
 const zdelta_session = @import("zdelta/session.zig");
 
 const Allocator = std.mem.Allocator;
-const ArrayList = std.array_list.Managed;
-const MarkedDocument = obelizmo.MarkedString(ViewMark);
-const colors = obelizmo.colors;
