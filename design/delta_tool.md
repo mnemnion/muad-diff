@@ -1,6 +1,6 @@
 # delta_tool design note
 
-Created: `2026-04-04T16:36:10Z`  
+Created: `2026-04-04T16:36:10Z`
 Git HEAD: `3609f9247176f0f215fc7e0a507811d4cda381f8`
 
 This is a Memento note for the current `delta_tool` system. It describes the
@@ -201,6 +201,11 @@ In the partial path, skipped edits are not just UI notes. They materially alter
 the relation between the current text and the corpus baseline. That is why
 later deltas must be harmonized against skipped history, and why the system
 tracks blocked and rewritten states.
+
+The system which represents skip history is recognized as both buggy,
+and inadequate to carry this part of the `muad_diff` project to
+completion.  The work summarized in this document has reduced interface
+bugs enough that model bugs can surface.
 
 ## Current execution flow
 

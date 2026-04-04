@@ -193,8 +193,7 @@ pub const DeltaApplicator = struct {
     fn currentDeltaOp(tm: *const DeltaApplicator) !?DeltaOp {
         const zdelta = tm.zdelta orelse return error.MissingZDelta;
         dbgassert(tm.z_idx < zdelta.ops.len);
-        dbgassert(zdelta.ops[tm.z_idx].state != .blocked);
-        return zdelta.ops[tm.z_idx].effective;
+        return zdelta.ops[tm.z_idx];
     }
 
     fn advanceToMutation(tm: *DeltaApplicator) !?DeltaOp {

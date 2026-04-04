@@ -30,17 +30,26 @@ pub const ZDeltaError = Allocator.Error || error{
 
 pub const DeltaSpan = common_apply.DeltaSpan;
 pub const DeltaOp = common_apply.DeltaOp;
-pub const HarmonizedOpState = common_apply.HarmonizedOpState;
-pub const HarmonizedDeltaOp = common_apply.HarmonizedDeltaOp;
-pub const PreviewDeltaOp = common_apply.PreviewDeltaOp;
-pub const SkippedDeltaOp = common_apply.SkippedDeltaOp;
+pub const EffectiveTextSpan = effective_mod.EffectiveTextSpan;
+pub const EffectiveInsert = effective_mod.EffectiveInsert;
+pub const EffectiveOp = effective_mod.EffectiveOp;
+pub const EffectiveOpState = effective_mod.EffectiveOpState;
+pub const EffectiveDeltaOp = effective_mod.EffectiveDeltaOp;
+pub const EffectivePreviewOp = effective_mod.EffectivePreviewOp;
+pub const EffectiveSkippedChange = effective_mod.EffectiveSkippedChange;
+pub const EffectiveSkippedOp = effective_mod.EffectiveSkippedOp;
+pub const EffectiveZDelta = effective_mod.EffectiveZDelta;
+pub const HarmonizedOpState = EffectiveOpState;
+pub const HarmonizedDeltaOp = EffectiveDeltaOp;
+pub const PreviewDeltaOp = EffectivePreviewOp;
+pub const SkippedDeltaOp = EffectiveSkippedOp;
 pub const DeltaApplicator = whole_apply_mod.DeltaApplicator;
 pub const DeltaManager = apply_manager_mod.DeltaManager;
 
 pub const ZDelta = struct {
     version: ZDeltaVersion,
     insert_text: []u8,
-    ops: []HarmonizedDeltaOp,
+    ops: []DeltaOp,
 
     /// TODO: Given a delta which has been through a TextManager, return
     /// a delta which, when applied to the text at the state it was in
@@ -53,7 +62,7 @@ pub const ZDelta = struct {
     fn beforeLength(delta: *const ZDelta) u32 {
         var len: u32 = 0;
         for (delta.ops) |op| {
-            switch (op.effective) {
+            switch (op) {
                 .delete => |count| len += count,
                 .equal => |count| len += count,
                 .insert => {},
@@ -63,15 +72,7 @@ pub const ZDelta = struct {
     }
 
     pub fn originalBeforeLength(delta: *const ZDelta) u32 {
-        var len: u32 = 0;
-        for (delta.ops) |op| {
-            switch (op.original) {
-                .delete => |count| len += count,
-                .equal => |count| len += count,
-                .insert => {},
-            }
-        }
-        return len;
+        return delta.beforeLength();
     }
 
     fn midpoint(delta: *const ZDelta) u32 {
@@ -81,7 +82,7 @@ pub const ZDelta = struct {
     fn afterLength(delta: *const ZDelta) u32 {
         var len: u32 = @intCast(delta.insert_text.len);
         for (delta.ops) |op| {
-            switch (op.effective) {
+            switch (op) {
                 .equal => |count| len += count,
                 .insert, .delete => {},
             }
@@ -98,7 +99,7 @@ pub const ZDelta = struct {
         var tail_max: i64 = 0;
 
         for (delta.ops) |op| {
-            switch (op.effective) {
+            switch (op) {
                 .equal => |len| {
                     t_idx += len;
                 },
@@ -141,7 +142,7 @@ pub const ZDelta = struct {
     pub fn totalChange(delta: *const ZDelta) i33 {
         var change: i33 = 0;
         for (delta.ops) |op| {
-            switch (op.effective) {
+            switch (op) {
                 .insert => |span| change += cast(i33, span.len),
                 .delete => |len| change -= cast(i33, len),
                 .equal => {},
@@ -454,10 +455,7 @@ fn decodeA(
 
     const owned_insert_text = try insert_text.toOwnedSlice();
     errdefer allocator.free(owned_insert_text);
-    const raw_ops = try ops.toOwnedSlice();
-    defer allocator.free(raw_ops);
-    const owned_ops = try allocator.alloc(HarmonizedDeltaOp, raw_ops.len);
-    for (raw_ops, 0..) |op, idx| owned_ops[idx] = .fromRaw(op);
+    const owned_ops = try ops.toOwnedSlice();
     return .{
         .version = .a,
         .insert_text = owned_insert_text,
@@ -518,10 +516,7 @@ fn decodeB(
 
     const owned_insert_text = try insert_text.toOwnedSlice();
     errdefer allocator.free(owned_insert_text);
-    const raw_ops = try ops.toOwnedSlice();
-    defer allocator.free(raw_ops);
-    const owned_ops = try allocator.alloc(HarmonizedDeltaOp, raw_ops.len);
-    for (raw_ops, 0..) |op, idx| owned_ops[idx] = .fromRaw(op);
+    const owned_ops = try ops.toOwnedSlice();
     return .{
         .version = .b,
         .insert_text = owned_insert_text,
@@ -821,13 +816,7 @@ fn expectEqualReified(
 ) !void {
     try testing.expectEqual(expected_version, actual.version);
     try testing.expectEqualStrings(expected_insert_text, actual.insert_text);
-    try testing.expectEqual(expected_ops.len, actual.ops.len);
-    for (expected_ops, actual.ops) |expected, analyzed| {
-        try testing.expectEqualDeep(expected, analyzed.original);
-        try testing.expectEqualDeep(expected, analyzed.effective);
-        try testing.expectEqual(HarmonizedOpState.unchanged, analyzed.state);
-        try testing.expectEqual(@as(?u32, null), analyzed.skip_index);
-    }
+    try testing.expectEqualDeep(expected_ops, actual.ops);
 }
 
 fn testDecodeCase(
@@ -855,13 +844,12 @@ pub fn testZDelta(
     insert_text: []const u8,
     ops: []const DeltaOp,
 ) !ZDelta {
-    const analyzed_ops = try allocator.alloc(HarmonizedDeltaOp, ops.len);
-    errdefer allocator.free(analyzed_ops);
-    for (ops, 0..) |op, idx| analyzed_ops[idx] = .fromRaw(op);
+    const raw_ops = try allocator.dupe(DeltaOp, ops);
+    errdefer allocator.free(raw_ops);
     return .{
         .version = .b,
         .insert_text = try allocator.dupe(u8, insert_text),
-        .ops = analyzed_ops,
+        .ops = raw_ops,
     };
 }
 
@@ -1161,6 +1149,7 @@ const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
 const testing = std.testing;
 const common_apply = @import("zdelta/common.zig");
+const effective_mod = @import("zdelta/effective.zig");
 const whole_apply_mod = @import("zdelta/whole_apply.zig");
 const apply_manager_mod = @import("zdelta/apply_manager.zig");
 const dmp = @import("dmp.zig");

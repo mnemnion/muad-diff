@@ -8,13 +8,12 @@
 
 pub const DeltaManager = struct {
     allocator: Allocator,
-    zdelta: ?*ZDelta,
+    effective: ?*EffectiveZDelta,
     buffer: []u8,
     start: u32,
     end: u32,
     pivot: u32,
     budget: u32,
-    t_idx: u32,
     z_idx: u32,
     // Skip history is not just a transcript artifact. It is the materialized
     // divergence between the reviewed text and the corpus baseline, and later
@@ -24,8 +23,19 @@ pub const DeltaManager = struct {
     pub const growth_fudge: u32 = 16;
 
     pub fn init(allocator: Allocator, before: []const u8, zdelta: *ZDelta) !DeltaManager {
-        errdefer zdelta.destroy(allocator);
-        const before_len, const head_room, const tail_room = zdelta.textNumbers();
+        var raw_owned = true;
+        errdefer if (raw_owned) zdelta.destroy(allocator);
+        const effective = effective: {
+            const owned = try allocator.create(EffectiveZDelta);
+            errdefer allocator.destroy(owned);
+            owned.* = try effective_mod.fromZDelta(allocator, zdelta);
+            break :effective owned;
+        };
+        errdefer effective.destroy(allocator);
+        zdelta.destroy(allocator);
+        raw_owned = false;
+
+        const before_len, const head_room, const tail_room = effective.textNumbers();
         if (before.len != before_len) return error.ZDeltaTextLengthMismatch;
         const midpoint = before_len / 2;
         const total_len: usize = before.len + head_room + tail_room;
@@ -33,13 +43,12 @@ pub const DeltaManager = struct {
         @memcpy(text[head_room..][0..before.len], before);
         return .{
             .allocator = allocator,
+            .effective = effective,
             .buffer = text,
             .start = head_room,
             .end = head_room + before_len,
             .pivot = midpoint,
             .budget = head_room + tail_room,
-            .zdelta = zdelta,
-            .t_idx = 0,
             .z_idx = 0,
             .skipped = .empty,
         };
@@ -54,35 +63,48 @@ pub const DeltaManager = struct {
         @memcpy(buffer[head_room..][0..text.len], text);
         return .{
             .allocator = allocator,
-            .zdelta = null,
+            .effective = null,
             .buffer = buffer,
             .start = try checkedU32(head_room),
             .end = try addU32(try checkedU32(head_room), text_len),
             .pivot = text_len / 2,
             .budget = try checkedU32(extra_slack),
-            .t_idx = 0,
             .z_idx = 0,
             .skipped = .empty,
         };
     }
 
     pub fn addDelta(tm: *DeltaManager, zdelta: *ZDelta) !void {
-        if (tm.zdelta) |old_zdelta| {
-            if (tm.z_idx < old_zdelta.ops.len) return error.NewDeltaRefusedOldDeltaNotFullyApplied;
-            old_zdelta.destroy(tm.allocator);
+        const old_effective = tm.effective;
+        if (old_effective) |owned| {
+            if (tm.z_idx < owned.ops.len) return error.NewDeltaRefusedOldDeltaNotFullyApplied;
         }
-        tm.zdelta = zdelta;
+        var raw_owned = true;
+        defer if (raw_owned) zdelta.destroy(tm.allocator);
+        const effective = effective: {
+            const owned = try tm.allocator.create(EffectiveZDelta);
+            errdefer tm.allocator.destroy(owned);
+            owned.* = try effective_mod.fromZDelta(tm.allocator, zdelta);
+            break :effective owned;
+        };
+        zdelta.destroy(tm.allocator);
+        raw_owned = false;
+
+        tm.effective = effective;
+        errdefer {
+            if (tm.effective == effective) tm.effective = old_effective;
+            effective.destroy(tm.allocator);
+        }
         tm.z_idx = 0;
-        tm.t_idx = 0;
-        const original_before_len = zdelta.originalBeforeLength();
+        const original_before_len = effective.originalBeforeLength();
 
         for (tm.skipped.items) |*skipped| skipped.accounted_for_current_delta = false;
         try tm.harmonizeCurrentDelta();
         if (tm.equivalentLen() != original_before_len) return error.ZDeltaTextLengthMismatch;
-        const before_len, const head_room, const tail_room = zdelta.textNumbers();
+        const before_len, const head_room, const tail_room = effective.textNumbers();
         if (tm.textLen() != before_len) return error.ZDeltaTextLengthMismatch;
 
-        const total_change = zdelta.totalChange();
+        const total_change = effective.totalChange();
         if (total_change > 0) {
             const growth_need: u32 = @intCast(total_change);
             try tm.growForNeed(growth_need);
@@ -91,14 +113,15 @@ pub const DeltaManager = struct {
         try tm.ensureTailRoom(tail_room);
 
         tm.pivot = before_len / 2;
-        dbgassert(tm.t_idx == 0);
         dbgassert(tm.z_idx == 0);
+
+        if (old_effective) |owned| owned.destroy(tm.allocator);
     }
 
     pub fn deinit(tm: *DeltaManager) void {
         for (tm.skipped.items) |*skipped| skipped.deinit(tm.allocator);
         tm.skipped.deinit(tm.allocator);
-        if (tm.zdelta) |zdelta| zdelta.destroy(tm.allocator);
+        if (tm.effective) |effective| effective.destroy(tm.allocator);
         tm.allocator.free(tm.buffer);
         tm.* = undefined;
     }
@@ -112,34 +135,32 @@ pub const DeltaManager = struct {
     }
 
     pub fn previewNext(tm: *const DeltaManager) !?PreviewDeltaOp {
-        const zdelta = tm.zdelta orelse return error.MissingZDelta;
-        var t_idx = tm.t_idx;
+        const effective = tm.effective orelse return error.MissingZDelta;
         var z_idx = tm.z_idx;
-        while (z_idx < zdelta.ops.len) {
-            const op = zdelta.ops[z_idx];
-            if (op.state == .blocked or op.effective != .equal) {
+        while (z_idx < effective.ops.len) {
+            const op = effective.ops[z_idx];
+            if (op.state == .blocked or op.current != .equal) {
                 return .{
-                    .text_index = t_idx,
+                    .text_index = op.current.start(),
                     .delta_index = z_idx,
                     .op = op,
                 };
             }
-            t_idx += op.effective.equal;
             z_idx += 1;
         }
         return null;
     }
 
     pub fn move(tm: *DeltaManager) ![]u8 {
-        if (tm.zdelta) |zdelta| {
-            if (tm.z_idx < zdelta.ops.len) return error.UnfinishedZDelta;
+        if (tm.effective) |effective| {
+            if (tm.z_idx < effective.ops.len) return error.UnfinishedZDelta;
         }
         const text_len = tm.end - tm.start;
         @memmove(tm.buffer[0..text_len], tm.buffer[tm.start..][0..text_len]);
         const text = try tm.allocator.realloc(tm.buffer, text_len);
         tm.buffer = &.{};
-        if (tm.zdelta) |zdelta| zdelta.destroy(tm.allocator);
-        tm.zdelta = null;
+        if (tm.effective) |effective| effective.destroy(tm.allocator);
+        tm.effective = null;
         return text;
     }
 
@@ -148,17 +169,16 @@ pub const DeltaManager = struct {
     }
 
     pub fn applyNext(tm: *DeltaManager) !?void {
-        const analyzed = (try tm.advanceToHarmonizedMutation()) orelse return null;
+        const analyzed = (try tm.advanceToEffectiveMutation()) orelse return null;
         if (analyzed.state == .blocked) return error.UnresolvedZDeltaOp;
-        switch (analyzed.effective) {
-            .delete => |len| {
-                tm.delete(tm.t_idx, len);
+        switch (analyzed.current) {
+            .delete => |span| {
+                tm.delete(span.start, span.len());
                 tm.z_idx += 1;
                 return;
             },
-            .insert => |span| {
-                try tm.insert(tm.t_idx, try tm.deltaInsertText(span));
-                tm.t_idx += span.len;
+            .insert => |ins| {
+                try tm.insert(ins.at, try tm.deltaInsertText(ins.text));
                 tm.z_idx += 1;
                 return;
             },
@@ -167,15 +187,15 @@ pub const DeltaManager = struct {
     }
 
     pub fn skipNext(tm: *DeltaManager) !?void {
-        const analyzed = (try tm.advanceToHarmonizedMutation()) orelse return null;
+        const analyzed = (try tm.advanceToEffectiveMutation()) orelse return null;
         if (analyzed.state == .blocked) return error.UnresolvedZDeltaOp;
-        var skipped = try tm.captureSkippedOp(analyzed.effective);
+        var skipped = try tm.captureSkippedOp(analyzed.current);
         errdefer skipped.deinit(tm.allocator);
         try tm.skipped.append(tm.allocator, skipped);
 
-        switch (analyzed.effective) {
-            .insert => |span| try tm.rewriteTailAfterSkippedInsert(span.len),
-            .delete => |len| try tm.rewriteTailAfterSkippedDelete(len),
+        switch (analyzed.current) {
+            .insert => |ins| try tm.rewriteTailAfterSkippedInsert(ins.len()),
+            .delete => |span| try tm.rewriteTailAfterSkippedDelete(span.len()),
             .equal => unreachable,
         }
     }
@@ -246,22 +266,19 @@ pub const DeltaManager = struct {
         tm.budget +|= len;
     }
 
-    fn currentHarmonizedDeltaOp(tm: *const DeltaManager) !?HarmonizedDeltaOp {
-        const zdelta = tm.zdelta orelse return error.MissingZDelta;
-        dbgassert(tm.z_idx < zdelta.ops.len);
-        return zdelta.ops[tm.z_idx];
+    fn currentEffectiveDeltaOp(tm: *const DeltaManager) !?EffectiveDeltaOp {
+        const effective = tm.effective orelse return error.MissingZDelta;
+        dbgassert(tm.z_idx < effective.ops.len);
+        return effective.ops[tm.z_idx];
     }
 
-    fn advanceToHarmonizedMutation(tm: *DeltaManager) !?HarmonizedDeltaOp {
-        const zdelta = tm.zdelta orelse return error.MissingZDelta;
-        while (tm.z_idx < zdelta.ops.len) {
-            const op = (try tm.currentHarmonizedDeltaOp()).?;
+    fn advanceToEffectiveMutation(tm: *DeltaManager) !?EffectiveDeltaOp {
+        const effective = tm.effective orelse return error.MissingZDelta;
+        while (tm.z_idx < effective.ops.len) {
+            const op = (try tm.currentEffectiveDeltaOp()).?;
             if (op.state == .blocked) return op;
-            switch (op.effective) {
-                .equal => |len| {
-                    tm.t_idx += len;
-                    tm.z_idx += 1;
-                },
+            switch (op.current) {
+                .equal => tm.z_idx += 1,
                 .insert, .delete => return op,
             }
         }
@@ -269,65 +286,80 @@ pub const DeltaManager = struct {
     }
 
     fn deltaInsertText(tm: *const DeltaManager, span: DeltaSpan) ![]const u8 {
-        const zdelta = tm.zdelta.?;
+        const effective = tm.effective.?;
         const offset: usize = span.offset;
         const len: usize = span.len;
-        return zdelta.insert_text[offset..][0..len];
+        return effective.insert_text[offset..][0..len];
     }
 
-    fn captureSkippedOp(tm: *const DeltaManager, op: DeltaOp) !SkippedDeltaOp {
+    fn captureSkippedOp(tm: *const DeltaManager, op: EffectiveOp) !SkippedDeltaOp {
         const text = switch (op) {
-            .insert => |span| try tm.allocator.dupe(u8, try tm.deltaInsertText(span)),
-            .delete => |len| try tm.allocator.dupe(u8, tm.view()[tm.t_idx..][0..len]),
+            .insert => |ins| try tm.allocator.dupe(u8, try tm.deltaInsertText(ins.text)),
+            .delete => |span| try tm.allocator.dupe(u8, tm.view()[span.start..span.end]),
             .equal => unreachable,
         };
         return .{
-            .at = tm.t_idx,
+            .at = op.start(),
             .z_idx = tm.z_idx,
-            .op = op,
+            .op = switch (op) {
+                .insert => |ins| .{ .insert = ins },
+                .delete => |span| .{ .delete = span },
+                .equal => unreachable,
+            },
             .text = text,
             .accounted_for_current_delta = false,
         };
     }
 
     fn rewriteTailAfterSkippedDelete(tm: *DeltaManager, len: u32) !void {
-        const zdelta = tm.zdelta.?;
-        var rebuilt = std.ArrayListUnmanaged(HarmonizedDeltaOp).empty;
+        const effective = tm.effective.?;
+        const relative = try effective.toOwnedRelativeOps(tm.allocator);
+        defer tm.allocator.free(relative);
+
+        var rebuilt = std.ArrayListUnmanaged(RelativeDeltaOp).empty;
         defer rebuilt.deinit(tm.allocator);
-        try rebuilt.ensureTotalCapacity(tm.allocator, zdelta.ops.len);
-        rebuilt.appendSliceAssumeCapacity(zdelta.ops[0..tm.z_idx]);
-        try appendRewrittenOp(tm.allocator, &rebuilt, .{ .equal = len }, .{ .equal = len }, null);
-        for (zdelta.ops[tm.z_idx + 1 ..]) |op| {
+        try rebuilt.ensureTotalCapacity(tm.allocator, relative.len);
+        rebuilt.appendSliceAssumeCapacity(relative[0..tm.z_idx]);
+        try appendRewrittenOp(tm.allocator, &rebuilt, .{ .equal = len }, .{ .equal = len }, null, 0);
+        for (relative[tm.z_idx + 1 ..]) |op| {
             try appendAnalyzedOp(tm.allocator, &rebuilt, op);
         }
 
-        tm.allocator.free(zdelta.ops);
-        zdelta.ops = try rebuilt.toOwnedSlice(tm.allocator);
+        try effective.replaceFromRelativeOps(tm.allocator, rebuilt.items);
     }
 
     fn rewriteTailAfterSkippedInsert(tm: *DeltaManager, skipped_len: u32) !void {
-        const zdelta = tm.zdelta.?;
-        var rebuilt = std.ArrayListUnmanaged(HarmonizedDeltaOp).empty;
+        const effective = tm.effective.?;
+        const relative = try effective.toOwnedRelativeOps(tm.allocator);
+        defer tm.allocator.free(relative);
+
+        var rebuilt = std.ArrayListUnmanaged(RelativeDeltaOp).empty;
         defer rebuilt.deinit(tm.allocator);
-        try rebuilt.ensureTotalCapacity(tm.allocator, zdelta.ops.len);
-        rebuilt.appendSliceAssumeCapacity(zdelta.ops[0..tm.z_idx]);
+        try rebuilt.ensureTotalCapacity(tm.allocator, relative.len);
+        rebuilt.appendSliceAssumeCapacity(relative[0..tm.z_idx]);
 
         var pending = skipped_len;
-        for (zdelta.ops[tm.z_idx + 1 ..]) |op| {
-            switch (op.effective) {
+        for (relative[tm.z_idx + 1 ..]) |op| {
+            switch (op.current) {
                 .insert => try appendAnalyzedOp(tm.allocator, &rebuilt, op),
                 .equal => |len| {
                     const dropped = @min(len, pending);
                     pending -= dropped;
                     const kept = len - dropped;
-                    if (kept != 0) try appendRewrittenOp(tm.allocator, &rebuilt, op.original, .{ .equal = kept }, null);
+                    if (kept != 0) try appendRewrittenOp(
+                        tm.allocator,
+                        &rebuilt,
+                        op.original,
+                        .{ .equal = kept },
+                        null,
+                        op.source_op_index,
+                    );
                 },
                 .delete => try appendAnalyzedOp(tm.allocator, &rebuilt, op),
             }
         }
 
-        tm.allocator.free(zdelta.ops);
-        zdelta.ops = try rebuilt.toOwnedSlice(tm.allocator);
+        try effective.replaceFromRelativeOps(tm.allocator, rebuilt.items);
     }
 
     fn harmonizeCurrentDelta(tm: *DeltaManager) !void {
@@ -339,26 +371,28 @@ pub const DeltaManager = struct {
 
     fn applySkipHistoryEntry(tm: *DeltaManager, skipped: *SkippedDeltaOp, skip_index: u32) !void {
         switch (skipped.op) {
-            .delete => |len| try tm.harmonizeSkippedDelete(skipped.at, len, skip_index),
-            .insert => |span| try tm.harmonizeSkippedInsert(skipped.at, span.len, skip_index),
-            .equal => unreachable,
+            .delete => |span| try tm.harmonizeSkippedDelete(skipped.at, span.len(), skip_index),
+            .insert => |ins| try tm.harmonizeSkippedInsert(skipped.at, ins.len(), skip_index),
         }
         skipped.accounted_for_current_delta = true;
     }
 
     fn harmonizeSkippedDelete(tm: *DeltaManager, at: u32, len: u32, skip_index: u32) !void {
-        const zdelta = tm.zdelta.?;
-        var rebuilt = std.ArrayListUnmanaged(HarmonizedDeltaOp).empty;
+        const effective = tm.effective.?;
+        const relative = try effective.toOwnedRelativeOps(tm.allocator);
+        defer tm.allocator.free(relative);
+
+        var rebuilt = std.ArrayListUnmanaged(RelativeDeltaOp).empty;
         defer rebuilt.deinit(tm.allocator);
-        try rebuilt.ensureTotalCapacity(tm.allocator, zdelta.ops.len + 1);
+        try rebuilt.ensureTotalCapacity(tm.allocator, relative.len + 1);
 
         var cursor: u32 = 0;
         var inserted = false;
-        for (zdelta.ops) |op| {
-            switch (op.effective) {
+        for (relative) |op| {
+            switch (op.current) {
                 .insert => {
                     if (!inserted and cursor == at) {
-                        try appendBlockedOrRewrittenEqual(tm.allocator, &rebuilt, len, skip_index);
+                        try appendBlockedOrRewrittenEqual(tm.allocator, &rebuilt, len, skip_index, op.source_op_index);
                         inserted = true;
                     }
                     try appendAnalyzedOp(tm.allocator, &rebuilt, op);
@@ -372,19 +406,21 @@ pub const DeltaManager = struct {
                                 tm.allocator,
                                 &rebuilt,
                                 resizeOp(op.original, prefix),
-                                makeSameKind(op.effective, prefix),
+                                makeSameKind(op.current, prefix),
                                 op.skip_index,
+                                op.source_op_index,
                             );
                         }
-                        try appendBlockedOrRewrittenEqual(tm.allocator, &rebuilt, len, skip_index);
+                        try appendBlockedOrRewrittenEqual(tm.allocator, &rebuilt, len, skip_index, op.source_op_index);
                         inserted = true;
                         if (suffix != 0) {
                             try appendRewrittenOp(
                                 tm.allocator,
                                 &rebuilt,
                                 resizeOp(op.original, suffix),
-                                makeSameKind(op.effective, suffix),
+                                makeSameKind(op.current, suffix),
                                 op.skip_index,
+                                op.source_op_index,
                             );
                         }
                     } else {
@@ -395,26 +431,28 @@ pub const DeltaManager = struct {
             }
         }
         if (!inserted and cursor == at) {
-            try appendBlockedOrRewrittenEqual(tm.allocator, &rebuilt, len, skip_index);
+            try appendBlockedOrRewrittenEqual(tm.allocator, &rebuilt, len, skip_index, 0);
             inserted = true;
         }
-        if (!inserted) try appendBlockedMarker(tm.allocator, &rebuilt, skip_index);
+        if (!inserted) try appendBlockedMarker(tm.allocator, &rebuilt, skip_index, 0);
 
-        tm.allocator.free(zdelta.ops);
-        zdelta.ops = try rebuilt.toOwnedSlice(tm.allocator);
+        try effective.replaceFromRelativeOps(tm.allocator, rebuilt.items);
     }
 
     fn harmonizeSkippedInsert(tm: *DeltaManager, at: u32, skipped_len: u32, skip_index: u32) !void {
-        const zdelta = tm.zdelta.?;
-        var rebuilt = std.ArrayListUnmanaged(HarmonizedDeltaOp).empty;
+        const effective = tm.effective.?;
+        const relative = try effective.toOwnedRelativeOps(tm.allocator);
+        defer tm.allocator.free(relative);
+
+        var rebuilt = std.ArrayListUnmanaged(RelativeDeltaOp).empty;
         defer rebuilt.deinit(tm.allocator);
-        try rebuilt.ensureTotalCapacity(tm.allocator, zdelta.ops.len + 1);
+        try rebuilt.ensureTotalCapacity(tm.allocator, relative.len + 1);
 
         var cursor: u32 = 0;
         var pending = skipped_len;
         var reached = false;
-        for (zdelta.ops) |op| {
-            switch (op.effective) {
+        for (relative) |op| {
+            switch (op.current) {
                 .insert => {
                     if (!reached and cursor == at) reached = true;
                     try appendAnalyzedOp(tm.allocator, &rebuilt, op);
@@ -428,17 +466,19 @@ pub const DeltaManager = struct {
                                 tm.allocator,
                                 &rebuilt,
                                 resizeOp(op.original, prefix),
-                                makeSameKind(op.effective, prefix),
+                                makeSameKind(op.current, prefix),
                                 op.skip_index,
+                                op.source_op_index,
                             );
                         }
                         reached = true;
                         if (suffix != 0) {
-                            switch (op.effective) {
+                            switch (op.current) {
                                 .equal => {
-                                    const remainder = HarmonizedDeltaOp{
+                                    const remainder: RelativeDeltaOp = .{
+                                        .source_op_index = op.source_op_index,
                                         .original = resizeOp(op.original, suffix),
-                                        .effective = .{ .equal = suffix },
+                                        .current = .{ .equal = suffix },
                                         .state = op.state,
                                         .skip_index = op.skip_index,
                                     };
@@ -457,6 +497,7 @@ pub const DeltaManager = struct {
                                         resizeOp(op.original, suffix),
                                         .{ .delete = suffix },
                                         op.skip_index,
+                                        op.source_op_index,
                                     );
                                 },
                                 .insert => unreachable,
@@ -464,7 +505,7 @@ pub const DeltaManager = struct {
                         }
                     } else if (reached or at == cursor) {
                         reached = true;
-                        switch (op.effective) {
+                        switch (op.current) {
                             .equal => try rewriteAfterSkippedInsertSegment(
                                 tm.allocator,
                                 &rebuilt,
@@ -482,10 +523,9 @@ pub const DeltaManager = struct {
                 },
             }
         }
-        if (pending != 0) try appendBlockedMarker(tm.allocator, &rebuilt, skip_index);
+        if (pending != 0) try appendBlockedMarker(tm.allocator, &rebuilt, skip_index, 0);
 
-        tm.allocator.free(zdelta.ops);
-        zdelta.ops = try rebuilt.toOwnedSlice(tm.allocator);
+        try effective.replaceFromRelativeOps(tm.allocator, rebuilt.items);
     }
 
     pub fn textLen(tm: *const DeltaManager) u32 {
@@ -496,9 +536,8 @@ pub const DeltaManager = struct {
         var len: i33 = cast(i33, tm.textLen());
         for (tm.skipped.items) |skipped| {
             switch (skipped.op) {
-                .insert => |span| len += cast(i33, span.len),
-                .delete => |count| len -= cast(i33, count),
-                .equal => unreachable,
+                .insert => |ins| len += cast(i33, ins.len()),
+                .delete => |span| len -= cast(i33, span.len()),
             }
         }
         dbgassert(len >= 0);
@@ -512,28 +551,32 @@ pub const DeltaManager = struct {
 
 fn appendRewrittenOp(
     allocator: Allocator,
-    ops: *std.ArrayListUnmanaged(HarmonizedDeltaOp),
+    ops: *std.ArrayListUnmanaged(RelativeDeltaOp),
     original: DeltaOp,
-    effective: DeltaOp,
+    current: DeltaOp,
     skip_index: ?u32,
+    source_op_index: u32,
 ) !void {
-    switch (effective) {
+    switch (current) {
         .equal => |len| if (len != 0) try ops.append(allocator, .{
+            .source_op_index = source_op_index,
             .original = original,
-            .effective = effective,
-            .state = if (std.meta.eql(original, effective)) .unchanged else .rewritten,
+            .current = current,
+            .state = if (std.meta.eql(original, current)) .unchanged else .rewritten,
             .skip_index = skip_index,
         }),
         .delete => |len| if (len != 0) try ops.append(allocator, .{
+            .source_op_index = source_op_index,
             .original = original,
-            .effective = effective,
-            .state = if (std.meta.eql(original, effective)) .unchanged else .rewritten,
+            .current = current,
+            .state = if (std.meta.eql(original, current)) .unchanged else .rewritten,
             .skip_index = skip_index,
         }),
         .insert => |span| if (span.len != 0) try ops.append(allocator, .{
+            .source_op_index = source_op_index,
             .original = original,
-            .effective = effective,
-            .state = if (std.meta.eql(original, effective)) .unchanged else .rewritten,
+            .current = current,
+            .state = if (std.meta.eql(original, current)) .unchanged else .rewritten,
             .skip_index = skip_index,
         }),
     }
@@ -541,10 +584,10 @@ fn appendRewrittenOp(
 
 fn appendAnalyzedOp(
     allocator: Allocator,
-    ops: *std.ArrayListUnmanaged(HarmonizedDeltaOp),
-    op: HarmonizedDeltaOp,
+    ops: *std.ArrayListUnmanaged(RelativeDeltaOp),
+    op: RelativeDeltaOp,
 ) !void {
-    try appendRewrittenOp(allocator, ops, op.original, op.effective, op.skip_index);
+    try appendRewrittenOp(allocator, ops, op.original, op.current, op.skip_index, op.source_op_index);
     if (ops.items.len != 0) {
         ops.items[ops.items.len - 1].state = op.state;
     }
@@ -552,12 +595,14 @@ fn appendAnalyzedOp(
 
 fn appendBlockedMarker(
     allocator: Allocator,
-    ops: *std.ArrayListUnmanaged(HarmonizedDeltaOp),
+    ops: *std.ArrayListUnmanaged(RelativeDeltaOp),
     skip_index: u32,
+    source_op_index: u32,
 ) !void {
     try ops.append(allocator, .{
+        .source_op_index = source_op_index,
         .original = .{ .equal = 0 },
-        .effective = .{ .equal = 0 },
+        .current = .{ .equal = 0 },
         .state = .blocked,
         .skip_index = skip_index,
     });
@@ -565,26 +610,34 @@ fn appendBlockedMarker(
 
 fn appendBlockedOrRewrittenEqual(
     allocator: Allocator,
-    ops: *std.ArrayListUnmanaged(HarmonizedDeltaOp),
+    ops: *std.ArrayListUnmanaged(RelativeDeltaOp),
     len: u32,
     skip_index: u32,
+    source_op_index: u32,
 ) !void {
-    try appendRewrittenOp(allocator, ops, .{ .equal = len }, .{ .equal = len }, skip_index);
+    try appendRewrittenOp(allocator, ops, .{ .equal = len }, .{ .equal = len }, skip_index, source_op_index);
     if (ops.items.len != 0) ops.items[ops.items.len - 1].state = .rewritten;
 }
 
 fn rewriteAfterSkippedInsertSegment(
     allocator: Allocator,
-    ops: *std.ArrayListUnmanaged(HarmonizedDeltaOp),
-    op: HarmonizedDeltaOp,
+    ops: *std.ArrayListUnmanaged(RelativeDeltaOp),
+    op: RelativeDeltaOp,
     pending: *u32,
     skip_index: u32,
 ) !void {
-    const len = op.effective.equal;
+    const len = op.current.equal;
     const dropped = @min(len, pending.*);
     pending.* -= dropped;
     const kept = len - dropped;
-    if (kept != 0) try appendRewrittenOp(allocator, ops, op.original, .{ .equal = kept }, skip_index);
+    if (kept != 0) try appendRewrittenOp(
+        allocator,
+        ops,
+        op.original,
+        .{ .equal = kept },
+        skip_index,
+        op.source_op_index,
+    );
 }
 
 fn makeSameKind(op: DeltaOp, len: u32) DeltaOp {
@@ -656,6 +709,19 @@ fn expectManagerText(
     try testing.expectEqualStrings(expected, tm.view());
 }
 
+fn attachedInsertTextLen(tm: anytype) usize {
+    if (@hasField(@TypeOf(tm.*), "effective")) {
+        return tm.effective.?.insert_text.len;
+    }
+    return tm.zdelta.?.insert_text.len;
+}
+
+fn currentOpCursor(tm: anytype) !u32 {
+    if (@hasField(@TypeOf(tm.*), "t_idx")) return tm.t_idx;
+    if (tm.effective == null) return 0;
+    return if (try tm.previewNext()) |preview| preview.text_index else tm.textLen();
+}
+
 fn assertSharedApplicatorInterface(comptime TManager: type) void {
     _ = TManager.init;
     _ = TManager.initText;
@@ -702,8 +768,12 @@ test "ZDelta TextManager initText empty" {
         try testing.expectEqual(@as(u32, 0), tm.end);
         try testing.expectEqual(@as(u32, 0), tm.pivot);
         try testing.expectEqual(@as(u32, 0), tm.budget);
-        try testing.expectEqual(@as(?*ZDelta, null), tm.zdelta);
-        try testing.expectEqual(@as(u32, 0), tm.t_idx);
+        if (@hasField(TManager, "effective")) {
+            try testing.expectEqual(@as(?*EffectiveZDelta, null), tm.effective);
+        } else {
+            try testing.expectEqual(@as(?*ZDelta, null), tm.zdelta);
+        }
+        try testing.expectEqual(@as(u32, 0), try currentOpCursor(&tm));
         try testing.expectEqual(@as(u32, 0), tm.z_idx);
         try expectManagerText("", &tm);
     }
@@ -733,10 +803,14 @@ test "ZDelta TextManager init empty" {
         try testing.expectEqual(@as(u32, 0), tm.end);
         try testing.expectEqual(@as(u32, 0), tm.pivot);
         try testing.expectEqual(@as(u32, 0), tm.budget);
-        try testing.expectEqual(@as(usize, 0), tm.zdelta.?.insert_text.len);
-        try testing.expectEqual(@as(u32, 0), tm.t_idx);
+        try testing.expectEqual(@as(usize, 0), attachedInsertTextLen(&tm));
+        try testing.expectEqual(@as(u32, 0), try currentOpCursor(&tm));
         try testing.expectEqual(@as(u32, 0), tm.z_idx);
-        try testing.expect(tm.zdelta != null);
+        if (@hasField(TManager, "effective")) {
+            try testing.expect(tm.effective != null);
+        } else {
+            try testing.expect(tm.zdelta != null);
+        }
         try expectManagerText("", &tm);
     }
 }
@@ -747,7 +821,6 @@ test "ZDelta TextManager addDelta attaches and recenters" {
         var tm: TManager = try .initText(allocator, "abcd");
         defer tm.deinit();
         tm.pivot = 0;
-        tm.t_idx = 9;
         tm.z_idx = 9;
 
         const zdelta = try testOwnedZDelta(allocator, "XY", &.{
@@ -759,9 +832,13 @@ test "ZDelta TextManager addDelta attaches and recenters" {
         });
         try tm.addDelta(zdelta);
 
-        try testing.expect(tm.zdelta == zdelta);
+        if (@hasField(TManager, "effective")) {
+            try testing.expect(tm.effective != null);
+        } else {
+            try testing.expect(tm.zdelta == zdelta);
+        }
         try testing.expectEqual(@as(u32, 2), tm.pivot);
-        try testing.expectEqual(@as(u32, 0), tm.t_idx);
+        try testing.expectEqual(@as(u32, 0), try currentOpCursor(&tm));
         try testing.expectEqual(@as(u32, 0), tm.z_idx);
         try testing.expectEqual(@as(u32, 1), tm.start);
         try testing.expectEqual(@as(u32, 5), tm.end);
@@ -785,10 +862,14 @@ test "ZDelta TextManager addDelta refuses to replace active delta" {
         defer replacement.destroy(allocator);
         try testing.expectError(error.NewDeltaRefusedOldDeltaNotFullyApplied, tm.addDelta(replacement));
 
-        try testing.expect(tm.zdelta != null);
-        try testing.expect(tm.zdelta != replacement);
+        if (@hasField(TManager, "effective")) {
+            try testing.expect(tm.effective != null);
+        } else {
+            try testing.expect(tm.zdelta != null);
+            try testing.expect(tm.zdelta != replacement);
+        }
         try testing.expectEqual(@as(u32, 0), tm.z_idx);
-        try testing.expectEqual(@as(u32, 0), tm.t_idx);
+        try testing.expectEqual(@as(u32, 0), try currentOpCursor(&tm));
     }
 }
 
@@ -809,9 +890,17 @@ test "ZDelta TextManager addDelta replaces exhausted owned delta" {
         });
         try tm.addDelta(replacement);
 
-        try testing.expect(tm.zdelta == replacement);
+        if (@hasField(TManager, "effective")) {
+            try testing.expect(tm.effective != null);
+        } else {
+            try testing.expect(tm.zdelta == replacement);
+        }
         try testing.expectEqual(@as(u32, 0), tm.z_idx);
-        try testing.expectEqual(@as(u32, 0), tm.t_idx);
+        if (@hasField(TManager, "effective")) {
+            try testing.expectEqual(@as(u32, 5), try currentOpCursor(&tm));
+        } else {
+            try testing.expectEqual(@as(u32, 0), try currentOpCursor(&tm));
+        }
     }
 }
 
@@ -825,7 +914,11 @@ test "ZDelta TextManager addDelta rejects wrong text length" {
             .{ .equal = 3 },
         });
         try testing.expectError(error.ZDeltaTextLengthMismatch, tm.addDelta(zdelta));
-        try testing.expect(tm.zdelta == zdelta);
+        if (@hasField(TManager, "effective")) {
+            try testing.expectEqual(@as(?*EffectiveZDelta, null), tm.effective);
+        } else {
+            try testing.expect(tm.zdelta == zdelta);
+        }
     }
 }
 
@@ -892,7 +985,7 @@ test "ZDelta TextManager init and split lifecycle are equivalent" {
         try init_tm.applyAll();
         try split_tm.applyAll();
 
-        try testing.expectEqual(init_tm.t_idx, split_tm.t_idx);
+        try testing.expectEqual(try currentOpCursor(&init_tm), try currentOpCursor(&split_tm));
         try testing.expectEqual(init_tm.z_idx, split_tm.z_idx);
         try testing.expectEqual(init_tm.textLen(), split_tm.textLen());
         try expectManagerText(init_tm.view(), &split_tm);
@@ -921,7 +1014,10 @@ test "ZDelta TextManager skipNext skips insert and records text" {
     try testing.expectEqual(@as(usize, 1), tm.skippedItems().len);
     try testing.expectEqual(@as(u32, 0), tm.skippedItems()[0].at);
     try testing.expectEqual(@as(u32, 0), tm.skippedItems()[0].z_idx);
-    try testing.expectEqualDeep(DeltaOp{ .insert = .{ .offset = 0, .len = 1 } }, tm.skippedItems()[0].op);
+    try testing.expectEqualDeep(
+        effective_mod.EffectiveSkippedChange{ .insert = .{ .at = 0, .text = .{ .offset = 0, .len = 1 } } },
+        tm.skippedItems()[0].op,
+    );
     try testing.expectEqualStrings("X", tm.skippedItems()[0].text);
 
     try testing.expectEqual(@as(?void, {}), try tm.applyNext());
@@ -958,7 +1054,10 @@ test "ZDelta TextManager skipNext skips delete and records text" {
     try testing.expectEqual(@as(?void, {}), try tm.skipNext());
     try testing.expectEqual(@as(usize, 1), tm.skippedItems().len);
     try testing.expectEqual(@as(u32, 1), tm.skippedItems()[0].at);
-    try testing.expectEqualDeep(DeltaOp{ .delete = 2 }, tm.skippedItems()[0].op);
+    try testing.expectEqualDeep(
+        effective_mod.EffectiveSkippedChange{ .delete = .{ .start = 1, .end = 3 } },
+        tm.skippedItems()[0].op,
+    );
     try testing.expectEqualStrings("bc", tm.skippedItems()[0].text);
 
     try testing.expectEqual(@as(?void, {}), try tm.applyNext());
@@ -974,7 +1073,7 @@ test "ZDelta TextManager skipNext returns null when only equals remain" {
     defer tm.deinit();
 
     try testing.expectEqual(@as(?void, null), try tm.skipNext());
-    try testing.expectEqual(@as(u32, 4), tm.t_idx);
+    try testing.expectEqual(@as(u32, 4), try currentOpCursor(&tm));
     try testing.expectEqual(@as(u32, 1), tm.z_idx);
     try testing.expectEqual(@as(usize, 0), tm.skippedItems().len);
 }
@@ -1024,9 +1123,15 @@ test "ZDelta TextManager skip history survives later delta attachment" {
     try testing.expectEqual(@as(usize, 1), tm.skippedItems().len);
     try testing.expectEqualStrings("X", tm.skippedItems()[0].text);
     try testing.expect(tm.skippedItems()[0].accounted_for_current_delta);
-    try testing.expectEqualDeep(DeltaOp{ .equal = 5 }, tm.zdelta.?.ops[0].original);
-    try testing.expectEqualDeep(DeltaOp{ .equal = 4 }, tm.zdelta.?.ops[0].effective);
-    try testing.expectEqual(HarmonizedOpState.rewritten, tm.zdelta.?.ops[0].state);
+    try testing.expectEqualDeep(
+        EffectiveOp{ .equal = .{ .start = 0, .end = 5 } },
+        tm.effective.?.ops[0].source,
+    );
+    try testing.expectEqualDeep(
+        EffectiveOp{ .equal = .{ .start = 0, .end = 4 } },
+        tm.effective.?.ops[0].current,
+    );
+    try testing.expectEqual(EffectiveOpState.rewritten, tm.effective.?.ops[0].state);
 }
 
 test "ZDelta TextManager harmonizes skipped insert without shrinking later delete" {
@@ -1088,12 +1193,14 @@ test "ZDelta TextManager addDelta rejects blocked harmonization with impossible 
 
     try testing.expectEqual(@as(?void, {}), try tm.skipNext());
     try tm.applyAll();
+    const previous_effective = tm.effective;
 
     const blocked = try testOwnedZDelta(allocator, "Y", &.{
         .{ .insert = .{ .offset = 0, .len = 1 } },
     });
     try testing.expectError(error.ZDeltaTextLengthMismatch, tm.addDelta(blocked));
-    try testing.expect(tm.zdelta == blocked);
+    try testing.expect(tm.effective != null);
+    try testing.expectEqual(previous_effective, tm.effective);
 }
 
 test "ZDelta TextManager plans front and tail slack" {
@@ -1108,7 +1215,7 @@ test "ZDelta TextManager plans front and tail slack" {
         try testing.expectEqual(@as(u32, 1), front.start);
         try testing.expectEqual(@as(u32, 4), front.end);
         try testing.expectEqual(@as(u32, 1), front.budget);
-        try testing.expectEqual(@as(usize, 1), front.zdelta.?.insert_text.len);
+        try testing.expectEqual(@as(usize, 1), attachedInsertTextLen(&front));
 
         var tail = try testManager(TManager, allocator, "abc", "X", &.{
             .{ .equal = 3 },
@@ -1118,7 +1225,7 @@ test "ZDelta TextManager plans front and tail slack" {
         try testing.expectEqual(@as(u32, 0), tail.start);
         try testing.expectEqual(@as(u32, 3), tail.end);
         try testing.expectEqual(@as(u32, 1), tail.budget);
-        try testing.expectEqual(@as(usize, 1), tail.zdelta.?.insert_text.len);
+        try testing.expectEqual(@as(usize, 1), attachedInsertTextLen(&tail));
         try testing.expectEqual(@as(usize, 1), tail.buffer.len - tail.end);
     }
 }
@@ -1138,7 +1245,7 @@ test "ZDelta TextManager plans mixed pressure" {
         try testing.expectEqual(@as(u32, 1), tm.start);
         try testing.expectEqual(@as(u32, 1), tm.budget);
         try testing.expectEqual(@as(usize, 0), tm.buffer.len - tm.end);
-        try testing.expectEqual(@as(usize, 2), tm.zdelta.?.insert_text.len);
+        try testing.expectEqual(@as(usize, 2), attachedInsertTextLen(&tm));
     }
 }
 
@@ -1236,7 +1343,7 @@ test "ZDelta TextManager replace same size" {
         try tm.insert(1, "XY");
         try expectManagerText("aXYd", &tm);
         try testing.expectEqual(@as(u32, 0), tm.budget);
-        try testing.expectEqual(@as(usize, 0), tm.zdelta.?.insert_text.len);
+        try testing.expectEqual(@as(usize, 0), attachedInsertTextLen(&tm));
     }
 }
 
@@ -1276,7 +1383,7 @@ test "ZDelta TextManager grow from head side" {
         try expectManagerText("XYabcd", &tm);
         try testing.expectEqual(@as(u32, 0), tm.start);
         try testing.expectEqual(@as(u32, 0), tm.budget);
-        try testing.expectEqual(@as(usize, 2), tm.zdelta.?.insert_text.len);
+        try testing.expectEqual(@as(usize, 2), attachedInsertTextLen(&tm));
     }
 }
 
@@ -1292,7 +1399,7 @@ test "ZDelta TextManager grow from tail side" {
         try tm.insert(4, "XY");
         try expectManagerText("abcdXY", &tm);
         try testing.expectEqual(@as(u32, 0), tm.budget);
-        try testing.expectEqual(@as(usize, 2), tm.zdelta.?.insert_text.len);
+        try testing.expectEqual(@as(usize, 2), attachedInsertTextLen(&tm));
     }
 }
 
@@ -1309,7 +1416,7 @@ test "ZDelta TextManager shrink from head side" {
         try expectManagerText("cd", &tm);
         try testing.expectEqual(@as(u32, 2), tm.start);
         try testing.expectEqual(@as(u32, 2), tm.budget);
-        try testing.expectEqual(@as(usize, 0), tm.zdelta.?.insert_text.len);
+        try testing.expectEqual(@as(usize, 0), attachedInsertTextLen(&tm));
     }
 }
 
@@ -1325,7 +1432,7 @@ test "ZDelta TextManager shrink from tail side" {
         tm.delete(2, 2);
         try expectManagerText("ab", &tm);
         try testing.expectEqual(@as(u32, 2), tm.budget);
-        try testing.expectEqual(@as(usize, 0), tm.zdelta.?.insert_text.len);
+        try testing.expectEqual(@as(usize, 0), attachedInsertTextLen(&tm));
     }
 }
 
@@ -1353,7 +1460,11 @@ test "ZDelta TextManager move without delta trims slack" {
         const finished = try tm.move();
         defer allocator.free(finished);
         tm.buffer = &.{};
-        try testing.expectEqual(@as(?*ZDelta, null), tm.zdelta);
+        if (@hasField(TManager, "effective")) {
+            try testing.expectEqual(@as(?*EffectiveZDelta, null), tm.effective);
+        } else {
+            try testing.expectEqual(@as(?*ZDelta, null), tm.zdelta);
+        }
         try testing.expectEqualStrings("XYabcd", finished);
     }
 }
@@ -1372,7 +1483,11 @@ test "ZDelta TextManager move after exhausting delta trims slack" {
         const finished = try tm.move();
         defer allocator.free(finished);
         tm.buffer = &.{};
-        try testing.expectEqual(@as(?*ZDelta, null), tm.zdelta);
+        if (@hasField(TManager, "effective")) {
+            try testing.expectEqual(@as(?*EffectiveZDelta, null), tm.effective);
+        } else {
+            try testing.expectEqual(@as(?*ZDelta, null), tm.zdelta);
+        }
         try testing.expectEqualStrings("XYabcd", finished);
     }
 }
@@ -1386,9 +1501,15 @@ test "ZDelta TextManager applyNext rejects missing owned delta" {
         });
         defer tm.deinit();
 
-        const zdelta = tm.zdelta.?;
-        defer zdelta.destroy(allocator);
-        tm.zdelta = null;
+        if (@hasField(TManager, "effective")) {
+            const effective = tm.effective.?;
+            defer effective.destroy(allocator);
+            tm.effective = null;
+        } else {
+            const zdelta = tm.zdelta.?;
+            defer zdelta.destroy(allocator);
+            tm.zdelta = null;
+        }
         try testing.expectError(error.MissingZDelta, tm.applyNext());
     }
 }
@@ -1406,22 +1527,30 @@ test "ZDelta TextManager applyNext" {
         defer tm.deinit();
 
         try testing.expectEqual(@as(?void, {}), try tm.applyNext());
-        try testing.expectEqual(@as(u32, 1), tm.t_idx);
+        if (@hasField(TManager, "effective")) {
+            try testing.expectEqual(@as(u32, 3), try currentOpCursor(&tm));
+        } else {
+            try testing.expectEqual(@as(u32, 1), try currentOpCursor(&tm));
+        }
         try testing.expectEqual(@as(u32, 1), tm.z_idx);
         try expectManagerText("Xabcd", &tm);
 
         try testing.expectEqual(@as(?void, {}), try tm.applyNext());
-        try testing.expectEqual(@as(u32, 3), tm.t_idx);
+        try testing.expectEqual(@as(u32, 3), try currentOpCursor(&tm));
         try testing.expectEqual(@as(u32, 3), tm.z_idx);
         try expectManagerText("Xabd", &tm);
 
         try testing.expectEqual(@as(?void, {}), try tm.applyNext());
-        try testing.expectEqual(@as(u32, 4), tm.t_idx);
+        if (@hasField(TManager, "effective")) {
+            try testing.expectEqual(@as(u32, 5), try currentOpCursor(&tm));
+        } else {
+            try testing.expectEqual(@as(u32, 4), try currentOpCursor(&tm));
+        }
         try testing.expectEqual(@as(u32, 4), tm.z_idx);
         try expectManagerText("XabYd", &tm);
 
         try testing.expectEqual(@as(?void, null), try tm.applyNext());
-        try testing.expectEqual(@as(u32, 5), tm.t_idx);
+        try testing.expectEqual(@as(u32, 5), try currentOpCursor(&tm));
         try testing.expectEqual(@as(u32, 5), tm.z_idx);
         try expectManagerText("XabYd", &tm);
     }
@@ -1433,9 +1562,15 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const apply_base = @import("apply_base.zig");
 const common_apply = @import("common.zig");
+const effective_mod = @import("effective.zig");
 const whole_apply = @import("whole_apply.zig");
 const zdelta_mod = @import("../zdelta.zig");
 const ZDelta = zdelta_mod.ZDelta;
+const EffectiveOp = effective_mod.EffectiveOp;
+const EffectiveOpState = effective_mod.EffectiveOpState;
+const EffectiveZDelta = effective_mod.EffectiveZDelta;
+const EffectiveDeltaOp = effective_mod.EffectiveDeltaOp;
+const RelativeDeltaOp = effective_mod.RelativeDeltaOp;
 const addU32 = zdelta_mod.addU32;
 const checkedU32 = zdelta_mod.checkedU32;
 const testZDelta = zdelta_mod.testZDelta;
@@ -1446,7 +1581,5 @@ const DeltaApplicator = whole_apply.DeltaApplicator;
 const shared_applicator_types = .{ DeltaApplicator, DeltaManager };
 const DeltaSpan = common_apply.DeltaSpan;
 const DeltaOp = common_apply.DeltaOp;
-const HarmonizedOpState = common_apply.HarmonizedOpState;
-const HarmonizedDeltaOp = common_apply.HarmonizedDeltaOp;
-const PreviewDeltaOp = common_apply.PreviewDeltaOp;
-const SkippedDeltaOp = common_apply.SkippedDeltaOp;
+const PreviewDeltaOp = effective_mod.EffectivePreviewOp;
+const SkippedDeltaOp = effective_mod.EffectiveSkippedOp;

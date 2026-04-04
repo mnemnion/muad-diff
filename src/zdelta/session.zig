@@ -228,7 +228,6 @@ pub const ReviewSession = struct {
                     .kind = switch (item.op) {
                         .insert => .insert,
                         .delete => .delete,
-                        .equal => unreachable,
                     },
                     .text = item.text,
                 };
@@ -418,11 +417,7 @@ const ReviewDriver = struct {
         };
         const raw_before_len = owned_delta.originalBeforeLength();
         driver.last_before_len = raw_before_len;
-        driver.tm.addDelta(owned_delta) catch |err| {
-            if (driver.tm.zdelta == owned_delta) driver.tm.zdelta = null;
-            owned_delta.destroy(driver.tm.allocator);
-            return err;
-        };
+        try driver.tm.addDelta(owned_delta);
         return raw_before_len;
     }
 
@@ -439,10 +434,10 @@ const ReviewDriver = struct {
         return .{
             .change_number = preview.delta_index + 1,
             .text_index = preview.text_index,
-            .effect = switch (preview.op.effective) {
-                .insert => |span| .{ .insert = driver.tm.zdelta.?.insert_text[span.offset..][0..span.len] },
-                .delete => |len| .{ .delete = len },
-                .equal => |len| .{ .equal = len },
+            .effect = switch (preview.op.current) {
+                .insert => |insert| .{ .insert = driver.tm.effective.?.insert_text[insert.text.offset..][0..insert.text.len] },
+                .delete => |span| .{ .delete = span.len() },
+                .equal => |span| .{ .equal = span.len() },
             },
             .state = preview.op.state,
         };
