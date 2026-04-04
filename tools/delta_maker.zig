@@ -46,8 +46,8 @@ fn makeDeltaSets(
     root_dir: std.fs.Dir,
     stdout_writer: anytype,
 ) !void {
-    var batch_names = try collectSortedBatchNames(allocator, root_dir);
-    defer deinitOwnedStrings(allocator, &batch_names);
+    var batch_names = try corpus_contract.collectSortedBatchNames(allocator, root_dir);
+    defer corpus_contract.deinitOwnedStrings(allocator, &batch_names);
 
     if (batch_names.items.len == 0) return error.NoBatchDirectories;
 
@@ -63,8 +63,8 @@ fn makeDeltaSets(
         var batch_dir = try root_dir.openDir(batch_name, .{ .iterate = true });
         defer batch_dir.close();
 
-        var wiki_names = try collectSortedWikiNames(allocator, batch_dir);
-        defer deinitOwnedStrings(allocator, &wiki_names);
+        var wiki_names = try corpus_contract.collectSortedWikiNames(allocator, batch_dir);
+        defer corpus_contract.deinitOwnedStrings(allocator, &wiki_names);
 
         if (wiki_names.items.len == 0) return error.EmptyBatchDirectory;
 
@@ -82,7 +82,7 @@ fn makeDeltaSets(
 
             const file_data = try batch_dir.readFileAlloc(allocator, wiki_name, std.math.maxInt(usize));
             defer allocator.free(file_data);
-            const target_body = try fixtureBody(file_data);
+            const target_body = try corpus_contract.fixtureBody(file_data);
 
             if (!have_baseline) {
                 baseline_body = try allocator.dupe(u8, target_body);
@@ -116,58 +116,6 @@ fn makeDeltaSets(
     }
 }
 
-fn fixtureBody(file_data: []const u8) DeltaMakerError![]const u8 {
-    if (!std.mem.startsWith(u8, file_data, "---\n")) {
-        return error.MissingOpeningFrontmatter;
-    }
-
-    const closing_rel = std.mem.indexOf(u8, file_data[4..], "\n---\n") orelse {
-        return error.MissingClosingFrontmatter;
-    };
-    const frontmatter_end = 4 + closing_rel;
-    return file_data[frontmatter_end + "\n---\n".len ..];
-}
-
-fn collectSortedBatchNames(allocator: Allocator, root_dir: std.fs.Dir) !ArrayList([]const u8) {
-    var names = ArrayList([]const u8).init(allocator);
-    errdefer deinitOwnedStrings(allocator, &names);
-
-    var iterator = root_dir.iterate();
-    while (try iterator.next()) |entry| {
-        if (entry.kind != .directory) continue;
-        try names.append(try allocator.dupe(u8, entry.name));
-    }
-
-    std.sort.heap([]const u8, names.items, {}, lessThanString);
-    return names;
-}
-
-fn collectSortedWikiNames(allocator: Allocator, dir: std.fs.Dir) !ArrayList([]const u8) {
-    var names = ArrayList([]const u8).init(allocator);
-    errdefer deinitOwnedStrings(allocator, &names);
-
-    var iterator = dir.iterate();
-    while (try iterator.next()) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".wiki")) continue;
-        try names.append(try allocator.dupe(u8, entry.name));
-    }
-
-    std.sort.heap([]const u8, names.items, {}, lessThanString);
-    return names;
-}
-
-fn deinitOwnedStrings(allocator: Allocator, strings: *ArrayList([]const u8)) void {
-    for (strings.items) |item| {
-        allocator.free(item);
-    }
-    strings.deinit();
-}
-
-fn lessThanString(_: void, lhs: []const u8, rhs: []const u8) bool {
-    return std.mem.order(u8, lhs, rhs) == .lt;
-}
-
 const RealCodec = struct {
     fn encodePair(
         allocator: Allocator,
@@ -197,7 +145,7 @@ const RealCodec = struct {
 const testing = std.testing;
 
 test "fixtureBody extracts only the wiki portion" {
-    const body = try fixtureBody(
+    const body = try corpus_contract.fixtureBody(
         "---\norigin = \"wikipedia\"\n---\nbody text\nsecond line\n",
     );
 
@@ -374,3 +322,4 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
 const dmp = @import("dmp");
+const corpus_contract = @import("corpus_contract");

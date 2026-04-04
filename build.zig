@@ -12,6 +12,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const corpus_contract_mod = b.createModule(.{
+        .root_source_file = b.path("corpus/diff_contract.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const test_filters = b.option(
         []const []const u8,
         "test-filter",
@@ -55,6 +61,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     delta_tool_mod.addImport("dmp", dmp_module);
+    delta_tool_mod.addImport("corpus_contract", corpus_contract_mod);
 
     const delta_maker_mod = b.createModule(.{
         .root_source_file = b.path("tools/delta_maker.zig"),
@@ -62,12 +69,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     delta_maker_mod.addImport("dmp", dmp_module);
+    delta_maker_mod.addImport("corpus_contract", corpus_contract_mod);
 
     const all_tests_mod = b.createModule(.{
         .root_source_file = b.path("all_tests.zig"),
         .target = target,
         .optimize = optimize,
     });
+    all_tests_mod.addImport("corpus_contract", corpus_contract_mod);
 
     const ztap_dep = b.dependency("ztap", .{
         .target = b.graph.host,

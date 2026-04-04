@@ -18,13 +18,13 @@ const ViewMark = enum {
 };
 
 const xterm_marks = MarkedDocument.MarkupColorArray.init(.{
-    .target_delete = obelizmo.colors.fgBasic(.red),
-    .target_insert = obelizmo.colors.fgBasic(.green),
-    .skipped_delete = obelizmo.colors.fgBasic(.yellow),
-    .skipped_insert = obelizmo.colors.fgBasic(.cyan),
-    .focus = obelizmo.colors.inverse(),
-    .blocked = obelizmo.colors.ulBasic(.curly, .red),
-    .rewritten = obelizmo.colors.ulBasic(.single, .yellow),
+    .target_delete = colors.fgBasic(.red),
+    .target_insert = colors.fgBasic(.green),
+    .skipped_delete = colors.fgBasic(.yellow),
+    .skipped_insert = colors.fgBasic(.cyan),
+    .focus = colors.inverse(),
+    .blocked = colors.ulBasic(.curly, .red),
+    .rewritten = colors.ulBasic(.single, .yellow),
 });
 
 const OutputClient = struct {
@@ -95,7 +95,7 @@ const PromptInput = union(enum) {
 
 const RunOptions = struct {
     use_pager: bool,
-    runs_path: ?[]const u8 = default_runs_path,
+    runs_path: ?[]const u8 = corpus_contract.default_runs_path,
     timestamp_secs: ?u64 = null,
 };
 
@@ -105,59 +105,20 @@ const ParsedArgs = struct {
     end_revision_arg: []const u8,
 };
 
-const DeltaPromptInput = struct {
-    action: DeltaPromptAction,
+const PromptCommand = struct {
+    intent: zdelta_session.SessionIntent,
     canonical: ?u8,
 };
 
-const EditPromptInput = struct {
-    action: EditPromptAction,
-    canonical: ?u8,
-};
-
-const ParsedDeltaPrompt = struct {
-    action: DeltaPromptAction,
+const ParsedPrompt = struct {
+    intent: zdelta_session.SessionIntent,
     canonical: u8,
 };
 
-const ParsedEditPrompt = struct {
-    action: EditPromptAction,
-    canonical: u8,
-};
-
-fn PromptParseResult(comptime Action: type) type {
-    return union(enum) {
-        accepted: if (Action == DeltaPromptAction) ParsedDeltaPrompt else ParsedEditPrompt,
-        invalid,
-        incomplete,
-    };
-}
-
-const DeltaPromptParser = struct {
-    fn feed(_: *DeltaPromptParser, byte: u8) PromptParseResult(DeltaPromptAction) {
-        return switch (byte) {
-            'y' => .{ .accepted = .{ .action = .apply, .canonical = 'y' } },
-            'n' => .{ .accepted = .{ .action = .skip, .canonical = 'n' } },
-            's' => .{ .accepted = .{ .action = .split, .canonical = 's' } },
-            'q' => .{ .accepted = .{ .action = .quit, .canonical = 'q' } },
-            '?' => .{ .accepted = .{ .action = .help, .canonical = '?' } },
-            else => .invalid,
-        };
-    }
-};
-
-const EditPromptParser = struct {
-    fn feed(_: *EditPromptParser, byte: u8) PromptParseResult(EditPromptAction) {
-        return switch (byte) {
-            'y' => .{ .accepted = .{ .action = .apply, .canonical = 'y' } },
-            'n' => .{ .accepted = .{ .action = .skip, .canonical = 'n' } },
-            'a' => .{ .accepted = .{ .action = .apply_rest, .canonical = 'a' } },
-            'd' => .{ .accepted = .{ .action = .skip_rest, .canonical = 'd' } },
-            'q' => .{ .accepted = .{ .action = .quit, .canonical = 'q' } },
-            '?' => .{ .accepted = .{ .action = .help, .canonical = '?' } },
-            else => .invalid,
-        };
-    }
+const PromptParseResult = union(enum) {
+    accepted: ParsedPrompt,
+    invalid,
+    interrupt,
 };
 
 const RawTerminalGuard = struct {
@@ -253,19 +214,26 @@ const PromptSource = struct {
         return command;
     }
 
-    fn readDeltaInput(self: *PromptSource, writer: anytype, output: OutputClient) !?DeltaPromptInput {
+    // Live input is intentionally terse and byte-oriented. The parser boundary
+    // exists so the session core only sees canonical review intents, not
+    // terminal bytes or replay-script quirks.
+    fn readInput(
+        self: *PromptSource,
+        prompt_kind: zdelta_session.SessionPrompt,
+        writer: anytype,
+        output: OutputClient,
+    ) !?PromptCommand {
         switch (self.input) {
             .live => {
-                var parser = DeltaPromptParser{};
                 while (true) {
                     const byte = (try self.readLiveByte()) orelse return null;
-                    switch (parser.feed(byte)) {
+                    switch (parsePromptByte(prompt_kind, byte)) {
                         .accepted => |accepted| {
                             try writer.writeByte(accepted.canonical);
                             try output.writeLineEnding(writer);
                             try writer.flush();
                             return .{
-                                .action = accepted.action,
+                                .intent = accepted.intent,
                                 .canonical = accepted.canonical,
                             };
                         },
@@ -273,50 +241,18 @@ const PromptSource = struct {
                             try writer.writeByte(7);
                             try writer.flush();
                         },
-                        .incomplete => {},
+                        .interrupt => return error.Interrupted,
                     }
                 }
             },
             .replay => {
                 const command = try self.readReplayCommand();
-                const parsed = parseReplayDeltaPromptAction(command) orelse return error.InvalidReplayDeltaCommand;
-                return .{
-                    .action = parsed.action,
-                    .canonical = parsed.canonical,
+                const parsed = parseReplayPrompt(prompt_kind, command) orelse switch (prompt_kind) {
+                    .delta => return error.InvalidReplayDeltaCommand,
+                    .edit => return error.InvalidReplayEditCommand,
                 };
-            },
-        }
-    }
-
-    fn readEditInput(self: *PromptSource, writer: anytype, output: OutputClient) !?EditPromptInput {
-        switch (self.input) {
-            .live => {
-                var parser = EditPromptParser{};
-                while (true) {
-                    const byte = (try self.readLiveByte()) orelse return null;
-                    switch (parser.feed(byte)) {
-                        .accepted => |accepted| {
-                            try writer.writeByte(accepted.canonical);
-                            try output.writeLineEnding(writer);
-                            try writer.flush();
-                            return .{
-                                .action = accepted.action,
-                                .canonical = accepted.canonical,
-                            };
-                        },
-                        .invalid => {
-                            try writer.writeByte(7);
-                            try writer.flush();
-                        },
-                        .incomplete => {},
-                    }
-                }
-            },
-            .replay => {
-                const command = try self.readReplayCommand();
-                const parsed = parseReplayEditPromptAction(command) orelse return error.InvalidReplayEditCommand;
                 return .{
-                    .action = parsed.action,
+                    .intent = parsed.intent,
                     .canonical = parsed.canonical,
                 };
             },
@@ -386,57 +322,13 @@ const RunRecorder = struct {
     }
 };
 
-const CorpusRevision = struct {
-    ordinal: usize,
-    relative_path: []u8,
-    body: []u8,
-    zdelta: ?[]u8 = null,
+const OwnedSessionSeed = struct {
+    steps: []zdelta_session.SessionStep,
 
-    fn deinit(revision: *CorpusRevision, allocator: Allocator) void {
-        allocator.free(revision.relative_path);
-        allocator.free(revision.body);
-        if (revision.zdelta) |delta| allocator.free(delta);
-        revision.* = undefined;
+    fn deinit(seed: *OwnedSessionSeed, allocator: Allocator) void {
+        allocator.free(seed.steps);
+        seed.* = undefined;
     }
-};
-
-const CorpusSelection = struct {
-    revisions: []CorpusRevision,
-
-    fn deinit(selection: *CorpusSelection, allocator: Allocator) void {
-        for (selection.revisions) |*revision| revision.deinit(allocator);
-        allocator.free(selection.revisions);
-        selection.* = undefined;
-    }
-};
-
-const ZDeltaSummary = struct {
-    applied_deltas: usize = 0,
-    skipped_deltas: usize = 0,
-    partial_deltas: usize = 0,
-    applied_edits: usize = 0,
-    skipped_edits: usize = 0,
-    processed_revision: usize = 0,
-    quit_early: bool = false,
-};
-
-const DeltaPromptAction = enum {
-    apply,
-    skip,
-    split,
-    quit,
-    help,
-    invalid,
-};
-
-const EditPromptAction = enum {
-    apply,
-    skip,
-    apply_rest,
-    skip_rest,
-    quit,
-    help,
-    invalid,
 };
 
 pub fn main() !void {
@@ -465,10 +357,17 @@ pub fn main() !void {
         .{ .use_pager = true },
         &stdout_writer.interface,
         &stderr_writer.interface,
-    ) catch |err| {
-        try stderr_writer.interface.print("error: {s}\n", .{@errorName(err)});
-        try stderr_writer.interface.flush();
-        std.process.exit(1);
+    ) catch |err| switch (err) {
+        error.Interrupted => {
+            try stderr_writer.interface.print("error: {s}\n", .{@errorName(err)});
+            try stderr_writer.interface.flush();
+            std.process.exit(130);
+        },
+        else => {
+            try stderr_writer.interface.print("error: {s}\n", .{@errorName(err)});
+            try stderr_writer.interface.flush();
+            std.process.exit(1);
+        },
     };
 
     try stdout_writer.interface.flush();
@@ -519,7 +418,7 @@ fn runForTesting(
                 error.FileNotFound => null,
                 else => return read_err,
             },
-            .exit_code = 1,
+            .exit_code = if (err == error.Interrupted) 130 else 1,
         };
     };
 
@@ -573,8 +472,10 @@ fn run(
     }
     defer if (recorder) |*owned| owned.deinit();
 
-    var selection = try loadCorpusSelection(allocator, start_revision, end_revision);
+    var selection = try corpus_contract.loadCheckedInSelection(allocator, start_revision, end_revision);
     defer selection.deinit(allocator);
+    var owned_seed = try makeSessionSeed(allocator, selection);
+    defer owned_seed.deinit(allocator);
 
     const settings: zdelta_context.ContextSettings = .{
         .whole_delta_context_lines = 2,
@@ -593,169 +494,62 @@ fn run(
     defer raw_guard.deinit();
     const output = OutputClient.init(allocator, raw_guard.isActive());
 
-    var tm = try DeltaManager.initText(allocator, selection.revisions[0].body);
-    defer tm.deinit();
+    var session = try zdelta_session.ReviewSession.init(allocator, .{
+        .baseline = .{
+            .ordinal = selection.revisions[0].ordinal,
+            .relative_path = selection.revisions[0].relative_path,
+            .body = selection.revisions[0].body,
+        },
+        .steps = owned_seed.steps,
+    });
+    defer session.deinit();
 
-    var summary = ZDeltaSummary{
-        .processed_revision = start_revision,
-    };
+    var opened = try session.open();
+    defer opened.deinit(allocator);
+    try writeDiagnostics(stderr_writer, opened.diagnostics);
 
-    outer: for (selection.revisions[1..]) |revision| {
-        const zdelta_text = revision.zdelta orelse return error.MissingCorpusZDelta;
-        const owned_delta = try allocator.create(dmp.ZDelta);
-        owned_delta.* = dmp.decode(allocator, zdelta_text) catch |err| {
-            allocator.destroy(owned_delta);
-            return err;
-        };
-        const raw_before_len = owned_delta.originalBeforeLength();
-        tm.addDelta(owned_delta) catch |err| {
-            if (tm.zdelta == owned_delta) {
-                tm.zdelta = null;
-            }
-            owned_delta.destroy(allocator);
-            switch (err) {
-                error.ZDeltaTextLengthMismatch => {
-                    try writeLengthMismatchDiagnosis(
-                        stderr_writer,
-                        summary.processed_revision,
-                        revision.ordinal,
-                        tm.view().len,
-                        tm.skippedItems().len,
-                        raw_before_len,
-                        revision.body.len,
-                    );
-                    continue :outer;
-                },
-                else => return err,
-            }
-        };
+    outer: while (session.status() == .in_progress) {
+        var snapshot = try session.snapshot();
+        defer snapshot.deinit(allocator);
 
-        var delta_state = try zdelta_context.InteractionState.buildDelta(
-            allocator,
-            &tm,
-            revision.body,
-            .{
-                .current_revision = summary.processed_revision,
-                .target_revision = revision.ordinal,
-                .relative_path = revision.relative_path,
-            },
-            settings,
-        );
-        defer delta_state.deinit();
-        try renderInteractionState(output, stdout_writer, delta_state, stdout_supports_color);
+        var interaction_state = try zdelta_context.InteractionState.build(allocator, snapshot, settings);
+        defer interaction_state.deinit();
+        try renderInteractionState(output, stdout_writer, interaction_state, stdout_supports_color);
         try stdout_writer.flush();
 
         while (true) {
-            try output.writeText(stdout_writer, "\n[y] apply  [n] skip  [s] split  [q] quit  [?] help > ");
+            try output.writeText(stdout_writer, promptText(snapshot.prompt_kind));
             try stdout_writer.flush();
-            const input = (try prompt.readDeltaInput(stdout_writer, output)) orelse {
-                summary.quit_early = true;
+            const input = (try prompt.readInput(snapshot.prompt_kind, stdout_writer, output)) orelse {
+                session.quitEarly();
                 break :outer;
             };
             if (input.canonical) |command| {
                 if (recorder) |*owned| try owned.recordCommand(command);
             }
 
-            switch (input.action) {
-                .apply => {
-                    try applyRemainingDelta(&tm, &summary.applied_edits);
-                    summary.applied_deltas += 1;
-                    summary.processed_revision = revision.ordinal;
-                    continue :outer;
-                },
-                .skip => {
-                    try skipRemainingDelta(&tm, &summary.skipped_edits);
-                    summary.skipped_deltas += 1;
-                    summary.processed_revision = revision.ordinal;
-                    continue :outer;
-                },
-                .split => {
-                    summary.partial_deltas += 1;
-                    while (try tm.previewNext()) |preview| {
-                        var edit_state = try zdelta_context.InteractionState.buildEdit(
-                            allocator,
-                            &tm,
-                            revision.body,
-                            .{
-                                .current_revision = summary.processed_revision,
-                                .target_revision = revision.ordinal,
-                                .relative_path = revision.relative_path,
-                            },
-                            preview,
-                            settings,
-                        );
-                        defer edit_state.deinit();
-                        try renderInteractionState(output, stdout_writer, edit_state, stdout_supports_color);
-                        try stdout_writer.flush();
-
-                        while (true) {
-                            try output.writeText(stdout_writer, "\n[y] apply  [n] skip  [a] apply rest  [d] skip rest  [q] quit  [?] help > ");
-                            try stdout_writer.flush();
-                            const edit_input = (try prompt.readEditInput(stdout_writer, output)) orelse {
-                                summary.quit_early = true;
-                                break :outer;
-                            };
-                            if (edit_input.canonical) |command| {
-                                if (recorder) |*owned| try owned.recordCommand(command);
-                            }
-
-                            switch (edit_input.action) {
-                                .apply => {
-                                    _ = try tm.applyNext();
-                                    summary.applied_edits += 1;
-                                    break;
-                                },
-                                .skip => {
-                                    _ = try tm.skipNext();
-                                    summary.skipped_edits += 1;
-                                    break;
-                                },
-                                .apply_rest => {
-                                    try applyRemainingDelta(&tm, &summary.applied_edits);
-                                    summary.processed_revision = revision.ordinal;
-                                    continue :outer;
-                                },
-                                .skip_rest => {
-                                    try skipRemainingDelta(&tm, &summary.skipped_edits);
-                                    summary.processed_revision = revision.ordinal;
-                                    continue :outer;
-                                },
-                                .quit => {
-                                    summary.quit_early = true;
-                                    break :outer;
-                                },
-                                .help => {
-                                    try writeEditHelp(output, stdout_writer);
-                                    try stdout_writer.flush();
-                                },
-                                .invalid => unreachable,
-                            }
-                        }
-                    }
-
-                    summary.processed_revision = revision.ordinal;
-                    continue :outer;
-                },
-                .quit => {
-                    summary.quit_early = true;
-                    break :outer;
-                },
-                .help => {
-                    try writeDeltaHelp(output, stdout_writer);
-                    try stdout_writer.flush();
-                },
-                .invalid => unreachable,
+            var outcome = try session.dispatch(input.intent);
+            defer outcome.deinit(allocator);
+            try writeDiagnostics(stderr_writer, outcome.diagnostics);
+            if (outcome.help_prompt) |prompt_kind| {
+                switch (prompt_kind) {
+                    .delta => try writeDeltaHelp(output, stdout_writer),
+                    .edit => try writeEditHelp(output, stdout_writer),
+                }
+                try stdout_writer.flush();
+                continue;
             }
+            break;
         }
     }
 
-    if (!summary.quit_early) {
+    const summary = session.summary();
+    if (!summary.quit_early and session.status() == .complete) {
         try writeExitReview(
             allocator,
             stdout_writer,
-            output,
-            tm.view(),
-            selection.revisions[selection.revisions.len - 1].body,
+            session.currentText(),
+            session.expectedFinalText(),
             stdout_supports_color,
             options.use_pager,
         );
@@ -767,8 +561,8 @@ fn run(
         start_revision,
         end_revision,
         summary,
-        tm.view().len,
-        tm.skippedItems().len,
+        session.currentText().len,
+        session.skippedHistoryLen(),
     );
     try stdout_writer.flush();
     if (recorder) |*owned| try owned.ensureSuccessQuit();
@@ -830,171 +624,85 @@ fn parseRevisionOrdinal(text: []const u8) !usize {
     return std.fmt.parseUnsigned(usize, text, 10);
 }
 
-fn loadCorpusSelection(
+fn makeSessionSeed(
     allocator: Allocator,
-    start_revision: usize,
-    end_revision: usize,
-) !CorpusSelection {
-    var relative_paths = try collectSortedCorpusWikiPaths(allocator);
-    defer {
-        for (relative_paths.items) |path| allocator.free(path);
-        relative_paths.deinit();
-    }
+    selection: corpus_contract.CorpusSelection,
+) !OwnedSessionSeed {
+    const step_count = selection.revisions.len - 1;
+    var steps = try allocator.alloc(zdelta_session.SessionStep, step_count);
+    errdefer allocator.free(steps);
 
-    if (relative_paths.items.len == 0) return error.EmptyCorpus;
-    if (end_revision > relative_paths.items.len) return error.RevisionOrdinalOutOfRange;
-
-    const count = end_revision - start_revision + 1;
-    var revisions = try allocator.alloc(CorpusRevision, count);
-    var initialized: usize = 0;
-    errdefer {
-        for (revisions[0..initialized]) |*revision| revision.deinit(allocator);
-        allocator.free(revisions);
-    }
-
-    var corpus_dir = try std.fs.cwd().openDir(corpus_diff_root, .{});
-    defer corpus_dir.close();
-
-    for (revisions, 0..) |*revision, idx| {
-        const ordinal = start_revision + idx;
-        const relative_path = relative_paths.items[ordinal - 1];
-        const file_data = try corpus_dir.readFileAlloc(allocator, relative_path, std.math.maxInt(usize));
-        defer allocator.free(file_data);
-
-        revision.* = .{
-            .ordinal = ordinal,
-            .relative_path = try allocator.dupe(u8, relative_path),
-            .body = try copyFixtureBody(allocator, file_data),
-            .zdelta = null,
+    for (selection.revisions[1..], 0..) |revision, idx| {
+        steps[idx] = .{
+            .ordinal = revision.ordinal,
+            .relative_path = revision.relative_path,
+            .target_body = revision.body,
+            .zdelta_text = revision.zdelta.?,
         };
-        initialized += 1;
     }
 
-    try loadSelectionZDeltas(allocator, revisions);
-    return .{ .revisions = revisions };
+    return .{ .steps = steps };
 }
 
-fn collectSortedCorpusWikiPaths(allocator: Allocator) !ArrayList([]u8) {
-    var paths = ArrayList([]u8).init(allocator);
-    errdefer {
-        for (paths.items) |path| allocator.free(path);
-        paths.deinit();
+fn writeDiagnostics(
+    writer: *std.Io.Writer,
+    diagnostics: []const zdelta_session.AttachDiagnostic,
+) !void {
+    for (diagnostics) |diagnostic| {
+        try writeLengthMismatchDiagnosis(
+            writer,
+            diagnostic.current_revision,
+            diagnostic.target_revision,
+            diagnostic.current_bytes,
+            diagnostic.skipped_history_len,
+            diagnostic.delta_before_len,
+            diagnostic.target_bytes,
+        );
     }
-
-    var dir = try std.fs.cwd().openDir(corpus_diff_root, .{ .iterate = true });
-    defer dir.close();
-
-    var walker = try dir.walk(allocator);
-    defer walker.deinit();
-
-    while (try walker.next()) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.path, ".wiki")) continue;
-        try paths.append(try allocator.dupe(u8, entry.path));
-    }
-
-    std.sort.heap([]u8, paths.items, {}, lessThanString);
-    return paths;
+    if (diagnostics.len != 0) try writer.flush();
 }
 
-fn loadSelectionZDeltas(allocator: Allocator, revisions: []CorpusRevision) !void {
-    if (revisions.len <= 1) return;
-
-    var dir = try std.fs.cwd().openDir(corpus_diff_root, .{ .iterate = true });
-    defer dir.close();
-
-    var zdset_names = ArrayList([]u8).init(allocator);
-    defer {
-        for (zdset_names.items) |name| allocator.free(name);
-        zdset_names.deinit();
-    }
-
-    var iterator = dir.iterate();
-    while (try iterator.next()) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".zdset")) continue;
-        try zdset_names.append(try allocator.dupe(u8, entry.name));
-    }
-    std.sort.heap([]u8, zdset_names.items, {}, lessThanString);
-
-    var next_needed: usize = 1;
-    for (zdset_names.items) |name| {
-        if (next_needed >= revisions.len) break;
-
-        const file_data = try dir.readFileAlloc(allocator, name, std.math.maxInt(usize));
-        defer allocator.free(file_data);
-
-        var line_iter = std.mem.tokenizeScalar(u8, file_data, '\n');
-        var pending_path: ?[]const u8 = null;
-        while (line_iter.next()) |raw_line| {
-            const line = std.mem.trimRight(u8, raw_line, "\r");
-            if (line.len == 0) continue;
-            if (std.mem.startsWith(u8, line, "# baseline ")) {
-                pending_path = null;
-                continue;
-            }
-            if (std.mem.startsWith(u8, line, "# ")) {
-                pending_path = line[2..];
-                continue;
-            }
-            const path = pending_path orelse continue;
-            pending_path = null;
-
-            while (next_needed < revisions.len and std.mem.order(u8, revisions[next_needed].relative_path, path) == .lt) {
-                next_needed += 1;
-            }
-            if (next_needed >= revisions.len) break;
-            if (!std.mem.eql(u8, revisions[next_needed].relative_path, path)) continue;
-
-            revisions[next_needed].zdelta = try allocator.dupe(u8, line);
-            next_needed += 1;
-        }
-    }
-
-    for (revisions[1..]) |revision| {
-        if (revision.zdelta == null) return error.MissingCorpusZDelta;
-    }
-}
-
-fn copyFixtureBody(allocator: Allocator, file_data: []const u8) ![]u8 {
-    if (!std.mem.startsWith(u8, file_data, "---\n")) return error.MissingOpeningFrontmatter;
-    const closing_rel = std.mem.indexOf(u8, file_data[4..], "\n---\n") orelse {
-        return error.MissingClosingFrontmatter;
-    };
-    const start = 4 + closing_rel + "\n---\n".len;
-    return allocator.dupe(u8, file_data[start..]);
-}
-
-fn lessThanString(_: void, lhs: []const u8, rhs: []const u8) bool {
-    return std.mem.order(u8, lhs, rhs) == .lt;
-}
-
-fn parseReplayDeltaPromptAction(command: u8) ?ParsedDeltaPrompt {
-    var parser = DeltaPromptParser{};
-    return switch (parser.feed(command)) {
-        .accepted => |accepted| accepted,
-        .invalid, .incomplete => null,
+fn promptText(prompt_kind: zdelta_session.SessionPrompt) []const u8 {
+    return switch (prompt_kind) {
+        .delta => "[y] apply  [n] skip  [s] split  [q] quit  [?] help > ",
+        .edit => "[y] apply  [n] skip  [a] apply rest  [d] skip rest  [q] quit  [?] help > ",
     };
 }
 
-fn parseReplayEditPromptAction(command: u8) ?ParsedEditPrompt {
-    var parser = EditPromptParser{};
-    return switch (parser.feed(command)) {
-        .accepted => |accepted| accepted,
-        .invalid, .incomplete => null,
+fn parsePromptByte(
+    prompt_kind: zdelta_session.SessionPrompt,
+    byte: u8,
+) PromptParseResult {
+    if (byte == 3) return .interrupt;
+    return if (parseReplayPrompt(prompt_kind, byte)) |parsed|
+        .{ .accepted = parsed }
+    else
+        .invalid;
+}
+
+fn parseReplayPrompt(
+    prompt_kind: zdelta_session.SessionPrompt,
+    command: u8,
+) ?ParsedPrompt {
+    return switch (prompt_kind) {
+        .delta => switch (command) {
+            'y' => .{ .intent = .apply, .canonical = 'y' },
+            'n' => .{ .intent = .skip, .canonical = 'n' },
+            's' => .{ .intent = .split, .canonical = 's' },
+            'q' => .{ .intent = .quit, .canonical = 'q' },
+            '?' => .{ .intent = .help, .canonical = '?' },
+            else => null,
+        },
+        .edit => switch (command) {
+            'y' => .{ .intent = .apply, .canonical = 'y' },
+            'n' => .{ .intent = .skip, .canonical = 'n' },
+            'a' => .{ .intent = .apply_rest, .canonical = 'a' },
+            'd' => .{ .intent = .skip_rest, .canonical = 'd' },
+            'q' => .{ .intent = .quit, .canonical = 'q' },
+            '?' => .{ .intent = .help, .canonical = '?' },
+            else => null,
+        },
     };
-}
-
-fn applyRemainingDelta(tm: *DeltaManager, counter: *usize) !void {
-    while (try tm.applyNext()) |_| {
-        counter.* += 1;
-    }
-}
-
-fn skipRemainingDelta(tm: *DeltaManager, counter: *usize) !void {
-    while (try tm.skipNext()) |_| {
-        counter.* += 1;
-    }
 }
 
 fn renderInteractionState(
@@ -1023,10 +731,9 @@ fn renderInteractionState(
         if (state.focus) |focus| {
             try output.print(
                 writer,
-                "focus: edit {d} [{s}] @ {d}\n",
+                "focus: change {d} @ {d}\n",
                 .{
-                    focus.delta_index + 1,
-                    @tagName(focus.state),
+                    focus.change_number,
                     focus.text_index,
                 },
             );
@@ -1199,7 +906,7 @@ fn writeSummary(
     writer: *std.Io.Writer,
     start_revision: usize,
     end_revision: usize,
-    summary: ZDeltaSummary,
+    summary: zdelta_session.SessionSummary,
     current_len: usize,
     skipped_history_len: usize,
 ) !void {
@@ -1243,7 +950,6 @@ fn formatUtcTimestamp(buffer: []u8, timestamp_secs: u64) ![]const u8 {
 fn writeExitReview(
     allocator: Allocator,
     stdout_writer: *std.Io.Writer,
-    _: OutputClient,
     final_text: []const u8,
     expected_text: []const u8,
     use_color: bool,
@@ -1256,7 +962,22 @@ fn writeExitReview(
     _ = try diff.diff(allocator, final_text, expected_text);
     _ = try diff.cleanupSemantic(allocator);
 
-    try stdout_writer.flush();
+    if (use_pager and tryWriteExitReviewPager(allocator, &diff, use_color)) return;
+
+    _ = if (use_color)
+        try diff.writePrettyFormat(allocator, stdout_writer, .xterm_classic)
+    else
+        try diff.writePrettyFormat(allocator, stdout_writer, plain_diff_decorations);
+}
+
+fn tryWriteExitReviewPager(
+    allocator: Allocator,
+    diff: *const dmp.Diff,
+    use_color: bool,
+) bool {
+    var stdout = std.fs.File.stdout();
+    stdout.lock(.exclusive) catch return false;
+    defer stdout.unlock();
 
     var pager = std.process.Child.init(
         if (use_color) &.{ "less", "-R" } else &.{"less"},
@@ -1265,22 +986,28 @@ fn writeExitReview(
     pager.stdin_behavior = .Pipe;
     pager.stdout_behavior = .Inherit;
     pager.stderr_behavior = .Inherit;
-    try pager.spawn();
+    pager.spawn() catch return false;
+    errdefer {
+        if (pager.stdin) |stdin| stdin.close();
+        _ = pager.wait() catch {};
+    }
 
+    const pager_stdin = pager.stdin orelse return false;
     {
         var pager_buf: [4096]u8 = undefined;
-        var pager_writer = pager.stdin.?.writer(&pager_buf);
-        if (use_color) {
-            _ = try diff.writePrettyFormat(allocator, &pager_writer.interface, .xterm_classic);
-        } else {
-            _ = try diff.writePrettyFormat(allocator, &pager_writer.interface, plain_diff_decorations);
-        }
-        try pager_writer.interface.flush();
+        var pager_writer = pager_stdin.writer(&pager_buf);
+        const written = if (use_color)
+            diff.writePrettyFormat(allocator, &pager_writer.interface, .xterm_classic)
+        else
+            diff.writePrettyFormat(allocator, &pager_writer.interface, plain_diff_decorations);
+        _ = written catch return false;
+        pager_writer.interface.flush() catch return false;
     }
-    pager.stdin.?.close();
-    pager.stdin = null;
 
-    _ = try pager.wait();
+    pager_stdin.close();
+    pager.stdin = null;
+    _ = pager.wait() catch return false;
+    return true;
 }
 
 fn writeLengthMismatchDiagnosis(
@@ -1415,49 +1142,55 @@ test "user quit is not duplicated in runs log" {
     try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nq", result.runs.?);
 }
 
-test "delta prompt parser accepts lowercase commands only" {
-    var parser = DeltaPromptParser{};
+test "ctrl c interrupts without synthesizing quit" {
+    const allocator = std.testing.allocator;
+    var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "\x03", false);
+    defer result.deinit(allocator);
 
+    try std.testing.expectEqual(@as(u8, 130), result.exit_code);
+    try std.testing.expect(std.mem.containsAtLeast(u8, result.stderr, 1, "Interrupted"));
+    try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\n", result.runs.?);
+}
+
+test "delta prompt parser accepts lowercase canonical commands only" {
     try std.testing.expectEqualDeep(
-        PromptParseResult(DeltaPromptAction){ .accepted = .{ .action = .apply, .canonical = 'y' } },
-        parser.feed('y'),
+        PromptParseResult{ .accepted = .{ .intent = .apply, .canonical = 'y' } },
+        parsePromptByte(.delta, 'y'),
     );
     try std.testing.expectEqualDeep(
-        PromptParseResult(DeltaPromptAction){ .accepted = .{ .action = .help, .canonical = '?' } },
-        parser.feed('?'),
+        PromptParseResult{ .accepted = .{ .intent = .help, .canonical = '?' } },
+        parsePromptByte(.delta, '?'),
     );
     try std.testing.expectEqualDeep(
-        PromptParseResult(DeltaPromptAction){ .invalid = {} },
-        parser.feed('Y'),
+        PromptParseResult{ .invalid = {} },
+        parsePromptByte(.delta, 'Y'),
     );
     try std.testing.expectEqualDeep(
-        PromptParseResult(DeltaPromptAction){ .invalid = {} },
-        parser.feed('\n'),
+        PromptParseResult{ .invalid = {} },
+        parsePromptByte(.delta, '\n'),
     );
 }
 
-test "edit prompt parser accepts lowercase commands only" {
-    var parser = EditPromptParser{};
-
+test "edit prompt parser accepts lowercase canonical commands only" {
     try std.testing.expectEqualDeep(
-        PromptParseResult(EditPromptAction){ .accepted = .{ .action = .apply_rest, .canonical = 'a' } },
-        parser.feed('a'),
+        PromptParseResult{ .accepted = .{ .intent = .apply_rest, .canonical = 'a' } },
+        parsePromptByte(.edit, 'a'),
     );
     try std.testing.expectEqualDeep(
-        PromptParseResult(EditPromptAction){ .accepted = .{ .action = .help, .canonical = '?' } },
-        parser.feed('?'),
+        PromptParseResult{ .accepted = .{ .intent = .help, .canonical = '?' } },
+        parsePromptByte(.edit, '?'),
     );
     try std.testing.expectEqualDeep(
-        PromptParseResult(EditPromptAction){ .invalid = {} },
-        parser.feed('A'),
+        PromptParseResult{ .invalid = {} },
+        parsePromptByte(.edit, 'A'),
     );
     try std.testing.expectEqualDeep(
-        PromptParseResult(EditPromptAction){ .invalid = {} },
-        parser.feed('\n'),
+        PromptParseResult{ .invalid = {} },
+        parsePromptByte(.edit, '\n'),
     );
 }
 
-test "render interaction state writes plain controller sections" {
+test "render interaction state writes plain review sections" {
     const allocator = std.testing.allocator;
     var document = zdelta_context.DocumentModel{
         .text = try allocator.dupe(u8, "same\n"),
@@ -1496,12 +1229,10 @@ test "render interaction state writes plain controller sections" {
 
     var state = zdelta_context.InteractionState{
         .prompt_kind = .delta,
-        .actions = &.{ .apply, .skip },
         .session = .{
             .current_revision = 1,
             .target_revision = 2,
             .relative_path = try allocator.dupe(u8, "corpus/diff/sample.wiki"),
-            .document_name = try allocator.dupe(u8, "sample.wiki"),
         },
         .facts = .{
             .current_bytes = 5,
@@ -1556,7 +1287,7 @@ test "render interaction state hides focused data at delta prompt" {
     });
     try sections.append(.{
         .kind = .focused_edit,
-        .label = try allocator.dupe(u8, "next mutation"),
+        .label = try allocator.dupe(u8, "next change"),
         .provenance = .target_revision,
         .document = .{
             .text = try allocator.dupe(u8, document.text),
@@ -1568,12 +1299,10 @@ test "render interaction state hides focused data at delta prompt" {
 
     var state = zdelta_context.InteractionState{
         .prompt_kind = .delta,
-        .actions = &.{ .apply, .skip },
         .session = .{
             .current_revision = 1,
             .target_revision = 2,
             .relative_path = try allocator.dupe(u8, "corpus/diff/sample.wiki"),
-            .document_name = try allocator.dupe(u8, "sample.wiki"),
         },
         .facts = .{
             .current_bytes = 5,
@@ -1582,8 +1311,8 @@ test "render interaction state hides focused data at delta prompt" {
         },
         .focus = .{
             .text_index = 0,
-            .delta_index = 0,
-            .effective = .{ .insert = .{ .offset = 0, .len = 1 } },
+            .change_number = 1,
+            .effect = .{ .insert = "x" },
             .state = .unchanged,
         },
         .sections = sections,
@@ -1600,7 +1329,7 @@ test "render interaction state hides focused data at delta prompt" {
     try renderInteractionState(OutputClient.init(allocator, false), &out_writer, state, false);
 
     try std.testing.expect(!std.mem.containsAtLeast(u8, out.items, 1, "focus: edit"));
-    try std.testing.expect(!std.mem.containsAtLeast(u8, out.items, 1, "--- next mutation ---"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, out.items, 1, "--- next change ---"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "--- target revision ---"));
 }
 
@@ -1640,11 +1369,11 @@ test "render document ansi uses obelizmo for annotated lines" {
 const std = @import("std");
 const dmp = @import("dmp.zig");
 const obelizmo = @import("obelizmo");
+const corpus_contract = @import("corpus_contract");
 const zdelta_context = @import("zdelta/context.zig");
+const zdelta_session = @import("zdelta/session.zig");
 
 const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
-const DeltaManager = dmp.DeltaManager;
 const MarkedDocument = obelizmo.MarkedString(ViewMark);
-const corpus_diff_root = "corpus/diff";
-const default_runs_path = corpus_diff_root ++ "/delta_tool.runs";
+const colors = obelizmo.colors;

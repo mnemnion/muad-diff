@@ -1,3 +1,10 @@
+//! Whole-delta applicator.
+//!
+//! This is the uncomplicated baseline engine: attach a delta, walk its
+//! mutations in order, and never preserve operator-facing provenance. The
+//! storage policy is shared with `DeltaManager`, but this type intentionally
+//! avoids skip history and harmonization.
+
 pub const DeltaApplicator = struct {
     allocator: Allocator,
     zdelta: ?*ZDelta,
@@ -33,8 +40,8 @@ pub const DeltaApplicator = struct {
     }
 
     pub fn initText(allocator: Allocator, text: []const u8) !DeltaApplicator {
-        const text_len = try checkedTextLen(text.len);
-        const extra_slack = try initialSlack(text.len);
+        const text_len = try apply_base.checkedTextLen(text.len);
+        const extra_slack = try apply_base.initialSlack(text.len);
         const head_room = extra_slack / 2;
         const total_len = try std.math.add(usize, text.len, extra_slack);
         var buffer = try allocator.alloc(u8, total_len);
@@ -124,38 +131,19 @@ pub const DeltaApplicator = struct {
     }
 
     fn rebase(tm: *DeltaApplicator, new_start: u32) void {
-        if (new_start == tm.start) return;
-        const active_len = tm.textLen();
-        @memmove(
-            tm.buffer[new_start..][0..active_len],
-            tm.buffer[tm.start..][0..active_len],
-        );
-        tm.start = new_start;
-        tm.end = new_start + active_len;
+        apply_base.rebase(tm, new_start);
     }
 
     fn growForNeed(tm: *DeltaApplicator, need: u32) !void {
-        if (need <= tm.budget) return;
-        const shortfall = need - tm.budget;
-        const growth = shortfall +| growth_fudge;
-        const new_len = tm.buffer.len + growth;
-        tm.buffer = try tm.allocator.realloc(tm.buffer, new_len);
-        tm.budget +|= growth;
+        try apply_base.growForNeed(tm, growth_fudge, need);
     }
 
     fn ensureHeadRoom(tm: *DeltaApplicator, need: u32) !void {
-        if (need <= tm.start) return;
-        if (need > tm.budget) try tm.growForNeed(need);
-        dbgassert(need <= tm.totalSlack());
-        tm.rebase(need);
+        try apply_base.ensureHeadRoom(tm, growth_fudge, need);
     }
 
     fn ensureTailRoom(tm: *DeltaApplicator, need: u32) !void {
-        const tail_room: u32 = @intCast(tm.buffer.len - tm.end);
-        if (need <= tail_room) return;
-        if (need > tm.budget) try tm.growForNeed(need);
-        dbgassert(need <= tm.totalSlack());
-        tm.rebase(tm.totalSlack() - need);
+        try apply_base.ensureTailRoom(tm, growth_fudge, need);
     }
 
     pub fn insert(tm: *DeltaApplicator, at: u32, new_text: []const u8) !void {
@@ -236,26 +224,14 @@ pub const DeltaApplicator = struct {
     }
 
     fn totalSlack(tm: *const DeltaApplicator) u32 {
-        return tm.start + cast(u32, tm.buffer.len) - tm.end;
-    }
-
-    fn initialSlack(text_len: usize) !usize {
-        if (text_len == 0) return 0;
-        const twenty_percent = @divFloor(text_len - 1, 5) + 1;
-        return if (twenty_percent % 2 == 0)
-            twenty_percent
-        else
-            std.math.add(usize, twenty_percent, 1) catch error.ZDeltaTooLarge;
-    }
-
-    fn checkedTextLen(text_len: usize) !u32 {
-        return std.math.cast(u32, text_len) orelse error.ZDeltaTooLarge;
+        return apply_base.totalSlack(tm);
     }
 };
 
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
+const apply_base = @import("apply_base.zig");
 const common_apply = @import("common.zig");
 const zdelta_mod = @import("../zdelta.zig");
 const ZDelta = zdelta_mod.ZDelta;
@@ -263,6 +239,5 @@ const addU32 = zdelta_mod.addU32;
 const checkedU32 = zdelta_mod.checkedU32;
 const common = @import("../dmp/common.zig");
 const dbgassert = common.dbgassert;
-const cast = common.cast;
 const DeltaOp = common_apply.DeltaOp;
 const DeltaSpan = common_apply.DeltaSpan;

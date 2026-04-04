@@ -1,50 +1,25 @@
 //! zDelta Context
 //!
-//! This is the controller for interactive zdelta application.
-//! It synthesizes promptable interaction state from the underlying model:
-//! current text, attached delta, skipped-history state, and target revision.
+//! This is the projection layer for interactive zdelta review.
 //!
-//! This file knows about lines and excerpts. It does not know about colors,
-//! terminal escape sequences, or screen painting.
+//! It knows about lines, excerpts, annotations, and semantic review sections.
+//! It does not know how snapshots were produced, how input will be collected,
+//! or how documents will be painted to a terminal.
 
 const std = @import("std");
 const dmp = @import("../dmp.zig");
-const zdelta = @import("../zdelta.zig");
+const session_mod = @import("session.zig");
 
 const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
 const Edit = dmp.Edit;
 const DiffContext = dmp.DiffContext;
-const DeltaManager = dmp.DeltaManager;
-const PreviewDeltaOp = dmp.PreviewDeltaOp;
-
 pub const ContextSettings = struct {
     whole_delta_context_lines: usize,
     edit_context_lines: usize,
 };
 
-pub const RevisionInfo = struct {
-    current_revision: usize,
-    target_revision: usize,
-    relative_path: []const u8,
-};
-
-pub const PromptKind = enum {
-    delta,
-    edit,
-};
-
-pub const Action = enum {
-    apply,
-    skip,
-    split,
-    quit,
-    help,
-    apply_rest,
-    skip_rest,
-};
-
-pub const Provenance = enum {
+pub const ContentProvenance = enum {
     target_revision,
     skipped_history,
 };
@@ -61,7 +36,7 @@ pub const Annotation = struct {
     start: u32,
     len: u32,
     kind: AnnotationKind,
-    provenance: Provenance,
+    provenance: ContentProvenance,
     delta_index: ?u32 = null,
     skip_index: ?u32 = null,
 };
@@ -106,7 +81,7 @@ pub const SectionKind = enum {
 pub const Section = struct {
     kind: SectionKind,
     label: []u8,
-    provenance: ?Provenance,
+    provenance: ?ContentProvenance,
     document: DocumentModel,
 
     pub fn deinit(section: *Section, allocator: Allocator) void {
@@ -118,8 +93,8 @@ pub const Section = struct {
 
 pub const Focus = struct {
     text_index: u32,
-    delta_index: u32,
-    effective: dmp.DeltaOp,
+    change_number: usize,
+    effect: session_mod.FocusEffect,
     state: dmp.HarmonizedOpState,
 };
 
@@ -127,70 +102,25 @@ pub const StatusFacts = struct {
     current_bytes: usize,
     target_bytes: usize,
     skipped_history_len: usize,
-    focused_delta_index: ?u32 = null,
-    focused_state: ?dmp.HarmonizedOpState = null,
 };
 
 pub const SessionInfo = struct {
     current_revision: usize,
     target_revision: usize,
     relative_path: []u8,
-    document_name: []u8,
 
     pub fn deinit(session: *SessionInfo, allocator: Allocator) void {
         allocator.free(session.relative_path);
-        allocator.free(session.document_name);
         session.* = undefined;
     }
 };
 
 pub const InteractionState = struct {
-    prompt_kind: PromptKind,
-    actions: []const Action,
+    prompt_kind: session_mod.SessionPrompt,
     session: SessionInfo,
     facts: StatusFacts,
     focus: ?Focus,
     sections: ArrayList(Section),
-
-    pub fn init(
-        allocator: Allocator,
-        prompt_kind: PromptKind,
-        revision: RevisionInfo,
-        target_bytes: usize,
-        tm: *const DeltaManager,
-        focus: ?PreviewDeltaOp,
-    ) !InteractionState {
-        return .{
-            .prompt_kind = prompt_kind,
-            .actions = switch (prompt_kind) {
-                .delta => &delta_actions,
-                .edit => &edit_actions,
-            },
-            .session = .{
-                .current_revision = revision.current_revision,
-                .target_revision = revision.target_revision,
-                .relative_path = try allocator.dupe(u8, revision.relative_path),
-                .document_name = try allocator.dupe(u8, std.fs.path.basename(revision.relative_path)),
-            },
-            .facts = .{
-                .current_bytes = tm.view().len,
-                .target_bytes = target_bytes,
-                .skipped_history_len = tm.skippedItems().len,
-                .focused_delta_index = if (focus) |preview| preview.delta_index else null,
-                .focused_state = if (focus) |preview| preview.op.state else null,
-            },
-            .focus = if (focus) |preview|
-                .{
-                    .text_index = preview.text_index,
-                    .delta_index = preview.delta_index,
-                    .effective = preview.op.effective,
-                    .state = preview.op.state,
-                }
-            else
-                null,
-            .sections = ArrayList(Section).init(allocator),
-        };
-    }
 
     pub fn deinit(state: *InteractionState) void {
         const allocator = state.sections.allocator;
@@ -199,60 +129,47 @@ pub const InteractionState = struct {
         state.session.deinit(allocator);
         state.* = undefined;
     }
- 
-    pub fn buildDelta(
+
+    pub fn build(
         allocator: Allocator,
-        tm: *const DeltaManager,
-        target_body: []const u8,
-        revision: RevisionInfo,
+        snapshot: session_mod.SessionSnapshot,
         settings: ContextSettings,
     ) !InteractionState {
-        const focus = try tm.previewNext();
-        var state = try InteractionState.init(
-            allocator,
-            .delta,
-            revision,
-            target_body.len,
-            tm,
-            focus,
-        );
+        var state = InteractionState{
+            .prompt_kind = snapshot.prompt_kind,
+            .session = .{
+                .current_revision = snapshot.current_revision,
+                .target_revision = snapshot.target_revision,
+                .relative_path = try allocator.dupe(u8, snapshot.relative_path),
+            },
+            .facts = .{
+                .current_bytes = snapshot.facts.current_bytes,
+                .target_bytes = snapshot.facts.target_bytes,
+                .skipped_history_len = snapshot.facts.skipped_history_len,
+            },
+            .focus = if (snapshot.focus) |focus|
+                .{
+                    .text_index = focus.text_index,
+                    .change_number = focus.change_number,
+                    .effect = focus.effect,
+                    .state = focus.state,
+                }
+            else
+                null,
+            .sections = ArrayList(Section).init(allocator),
+        };
         errdefer state.deinit();
 
-        try state.appendOverviewSection(tm.view(), target_body, settings);
-        if (focus) |preview| {
-            try state.appendFocusedSection(tm.view(), tm.zdelta.?.insert_text, preview, settings, "next mutation");
+        try state.appendOverviewSection(snapshot.current_text, snapshot.target_text, settings);
+        if (state.focus) |focus| {
+            const label = switch (snapshot.prompt_kind) {
+                .delta => "next change",
+                .edit => try std.fmt.allocPrint(allocator, "change {d}", .{focus.change_number}),
+            };
+            defer if (snapshot.prompt_kind == .edit) allocator.free(label);
+            try state.appendFocusedSection(snapshot.current_text, focus, settings, label);
         }
-        try state.appendSkippedHistorySections(tm.skippedItems());
-        return state;
-    }
-
-    pub fn buildEdit(
-        allocator: Allocator,
-        tm: *const DeltaManager,
-        target_body: []const u8,
-        revision: RevisionInfo,
-        preview: PreviewDeltaOp,
-        settings: ContextSettings,
-    ) !InteractionState {
-        var state = try InteractionState.init(
-            allocator,
-            .edit,
-            revision,
-            target_body.len,
-            tm,
-            preview,
-        );
-        errdefer state.deinit();
-
-        try state.appendOverviewSection(tm.view(), target_body, settings);
-        const label = try std.fmt.allocPrint(
-            allocator,
-            "edit {d} [{s}]",
-            .{ preview.delta_index + 1, @tagName(preview.op.state) },
-        );
-        defer allocator.free(label);
-        try state.appendFocusedSection(tm.view(), tm.zdelta.?.insert_text, preview, settings, label);
-        try state.appendSkippedHistorySections(tm.skippedItems());
+        try state.appendSkippedHistorySections(snapshot.skipped);
         return state;
     }
 
@@ -287,13 +204,12 @@ pub const InteractionState = struct {
     fn appendFocusedSection(
         state: *InteractionState,
         before: []const u8,
-        insert_source: []const u8,
-        preview: PreviewDeltaOp,
+        focus: Focus,
         settings: ContextSettings,
         label: []const u8,
     ) !void {
-        const offset: usize = @intCast(preview.text_index);
-        const delete_len: usize = switch (preview.op.effective) {
+        const offset: usize = @intCast(focus.text_index);
+        const delete_len: usize = switch (focus.effect) {
             .delete => |len| len,
             .insert, .equal => 0,
         };
@@ -303,8 +219,8 @@ pub const InteractionState = struct {
         const prefix = before[snippet_start..offset];
         const deleted = before[offset..suffix_origin];
         const suffix = before[suffix_origin..snippet_end];
-        const inserted = switch (preview.op.effective) {
-            .insert => |span| insert_source[span.offset..][0..span.len],
+        const inserted = switch (focus.effect) {
+            .insert => |text| text,
             .delete, .equal => "",
         };
 
@@ -330,9 +246,9 @@ pub const InteractionState = struct {
                 settings.edit_context_lines,
                 .{
                     .provenance = .target_revision,
-                    .delta_index = preview.delta_index,
+                    .delta_index = @intCast(focus.change_number - 1),
                     .focused = true,
-                    .op_state = preview.op.state,
+                    .op_state = focus.state,
                 },
             ),
         });
@@ -340,10 +256,10 @@ pub const InteractionState = struct {
 
     fn appendSkippedHistorySections(
         state: *InteractionState,
-        skipped_items: anytype,
+        skipped_items: []const session_mod.SkippedChange,
     ) !void {
-        for (skipped_items, 0..) |skipped, index| {
-            var document = try buildSkippedDocument(state.sections.allocator, skipped, @intCast(index));
+        for (skipped_items) |skipped| {
+            var document = try buildSkippedDocument(state.sections.allocator, skipped);
             errdefer document.deinit(state.sections.allocator);
 
             try state.sections.append(.{
@@ -351,7 +267,7 @@ pub const InteractionState = struct {
                 .label = try std.fmt.allocPrint(
                     state.sections.allocator,
                     "skipped {d} [{s}]",
-                    .{ index + 1, deltaOpTagName(skipped.op) },
+                    .{ skipped.number, skippedKindName(skipped.kind) },
                 ),
                 .provenance = .skipped_history,
                 .document = document,
@@ -452,7 +368,7 @@ const DocumentBuilder = struct {
 };
 
 const AppendMeta = struct {
-    provenance: Provenance,
+    provenance: ContentProvenance,
     kind: ?AnnotationKind = null,
     delta_index: ?u32 = null,
     skip_index: ?u32 = null,
@@ -526,23 +442,21 @@ fn buildContextDocument(
 
 fn buildSkippedDocument(
     allocator: Allocator,
-    skipped: anytype,
-    skip_index: u32,
+    skipped: session_mod.SkippedChange,
 ) !DocumentModel {
     var builder = DocumentBuilder.init(allocator);
     errdefer builder.deinit();
 
     var cursor: usize = 0;
-    const kind = switch (skipped.op) {
+    const kind = switch (skipped.kind) {
         .insert => AnnotationKind.insert,
         .delete => AnnotationKind.delete,
-        .equal => null,
     };
     while (nextDisplayLine(skipped.text, cursor)) |part| {
         try builder.appendLine(part.line, .{
             .provenance = .skipped_history,
             .kind = kind,
-            .skip_index = skip_index,
+            .skip_index = @intCast(skipped.number - 1),
         });
         cursor = part.next;
     }
@@ -653,111 +567,96 @@ fn lineNumbersAtOffset(item: DiffContext.EditContext, line_offset: usize) struct
     };
 }
 
-fn deltaOpTagName(op: dmp.DeltaOp) []const u8 {
-    return switch (op) {
+fn skippedKindName(kind: session_mod.SkippedKind) []const u8 {
+    return switch (kind) {
         .insert => "insert",
         .delete => "delete",
-        .equal => "equal",
     };
 }
 
-const delta_actions = [_]Action{
-    .apply,
-    .skip,
-    .split,
-    .quit,
-    .help,
-};
-
-const edit_actions = [_]Action{
-    .apply,
-    .skip,
-    .apply_rest,
-    .skip_rest,
-    .quit,
-    .help,
-};
-
-test "delta interaction state exposes prompt facts and multiple sections" {
+test "interaction state projects snapshot facts and skipped history" {
     const allocator = std.testing.allocator;
     const before = "alpha\nbeta\ngamma\ndelta\n";
     const after = "alpha\nbeta\ngamma changed\ndelta\nepsilon\n";
-
-    var diff: dmp.Diff = .default;
-    defer diff.deinit(allocator);
-    _ = try diff.diff(allocator, before, after);
-
-    const encoded = try zdelta.encode(allocator, diff.edits, .b);
+    const encoded = try encodeDelta(allocator, before, after);
     defer allocator.free(encoded);
 
-    const owned_delta = try allocator.create(dmp.ZDelta);
-    owned_delta.* = try dmp.decode(allocator, encoded);
-    var tm = try DeltaManager.initText(allocator, before);
-    defer tm.deinit();
-    try tm.addDelta(owned_delta);
-    _ = try tm.skipNext();
+    var session = try session_mod.ReviewSession.init(allocator, .{
+        .baseline = .{
+            .ordinal = 8,
+            .relative_path = "corpus/diff/sample_8.wiki",
+            .body = before,
+        },
+        .steps = &.{
+            .{
+                .ordinal = 9,
+                .relative_path = "corpus/diff/sample_9.wiki",
+                .target_body = after,
+                .zdelta_text = encoded,
+            },
+        },
+    });
+    defer session.deinit();
 
-    var state = try InteractionState.buildDelta(
-        allocator,
-        &tm,
-        after,
-        .{
-            .current_revision = 8,
-            .target_revision = 9,
-            .relative_path = "corpus/diff/sample.wiki",
-        },
-        .{
-            .whole_delta_context_lines = 2,
-            .edit_context_lines = 2,
-        },
-    );
+    var opened = try session.open();
+    defer opened.deinit(allocator);
+    var split = try session.dispatch(.split);
+    defer split.deinit(allocator);
+    var skip = try session.dispatch(.skip);
+    defer skip.deinit(allocator);
+
+    var snapshot = try session.snapshot();
+    defer snapshot.deinit(allocator);
+    var state = try InteractionState.build(allocator, snapshot, .{
+        .whole_delta_context_lines = 2,
+        .edit_context_lines = 2,
+    });
     defer state.deinit();
 
-    try std.testing.expectEqual(.delta, state.prompt_kind);
+    try std.testing.expectEqual(session_mod.SessionPrompt.edit, state.prompt_kind);
     try std.testing.expect(state.sections.items.len >= 2);
     try std.testing.expectEqual(@as(usize, 1), state.facts.skipped_history_len);
-    try std.testing.expectEqual(@as(?u32, 1), state.facts.focused_delta_index);
 }
 
 test "edit interaction state exposes focused provenance" {
     const allocator = std.testing.allocator;
     const before = "alpha\nbeta\ngamma\ndelta\n";
     const after = "alpha\nbeta\ngamma changed\ndelta\nepsilon\n";
-
-    var diff: dmp.Diff = .default;
-    defer diff.deinit(allocator);
-    _ = try diff.diff(allocator, before, after);
-
-    const encoded = try zdelta.encode(allocator, diff.edits, .b);
+    const encoded = try encodeDelta(allocator, before, after);
     defer allocator.free(encoded);
 
-    const owned_delta = try allocator.create(dmp.ZDelta);
-    owned_delta.* = try dmp.decode(allocator, encoded);
-    var tm = try DeltaManager.initText(allocator, before);
-    defer tm.deinit();
-    try tm.addDelta(owned_delta);
+    var session = try session_mod.ReviewSession.init(allocator, .{
+        .baseline = .{
+            .ordinal = 8,
+            .relative_path = "corpus/diff/sample_8.wiki",
+            .body = before,
+        },
+        .steps = &.{
+            .{
+                .ordinal = 9,
+                .relative_path = "corpus/diff/sample_9.wiki",
+                .target_body = after,
+                .zdelta_text = encoded,
+            },
+        },
+    });
+    defer session.deinit();
 
-    const preview = (try tm.previewNext()).?;
-    var state = try InteractionState.buildEdit(
-        allocator,
-        &tm,
-        after,
-        .{
-            .current_revision = 8,
-            .target_revision = 9,
-            .relative_path = "corpus/diff/sample.wiki",
-        },
-        preview,
-        .{
-            .whole_delta_context_lines = 2,
-            .edit_context_lines = 2,
-        },
-    );
+    var opened = try session.open();
+    defer opened.deinit(allocator);
+    var split = try session.dispatch(.split);
+    defer split.deinit(allocator);
+    var snapshot = try session.snapshot();
+    defer snapshot.deinit(allocator);
+
+    var state = try InteractionState.build(allocator, snapshot, .{
+        .whole_delta_context_lines = 2,
+        .edit_context_lines = 2,
+    });
     defer state.deinit();
 
-    try std.testing.expectEqual(.edit, state.prompt_kind);
-    try std.testing.expectEqual(preview.delta_index, state.focus.?.delta_index);
-    try std.testing.expectEqual(preview.op.state, state.facts.focused_state.?);
+    try std.testing.expectEqual(session_mod.SessionPrompt.edit, state.prompt_kind);
+    try std.testing.expectEqual(snapshot.focus.?.change_number, state.focus.?.change_number);
 
     var found_focus = false;
     for (state.sections.items) |section| {
@@ -775,34 +674,34 @@ test "controller boundaries are semantic markers, not embedded strings" {
     const allocator = std.testing.allocator;
     const before = "before\none\ntwo\nthree\nfour\n";
     const after = "one\ntwo\nthree\nfour\n";
-
-    var diff: dmp.Diff = .default;
-    defer diff.deinit(allocator);
-    _ = try diff.diff(allocator, before, after);
-
-    const encoded = try zdelta.encode(allocator, diff.edits, .b);
+    const encoded = try encodeDelta(allocator, before, after);
     defer allocator.free(encoded);
 
-    const owned_delta = try allocator.create(dmp.ZDelta);
-    owned_delta.* = try dmp.decode(allocator, encoded);
-    var tm = try DeltaManager.initText(allocator, before);
-    defer tm.deinit();
-    try tm.addDelta(owned_delta);
+    var session = try session_mod.ReviewSession.init(allocator, .{
+        .baseline = .{
+            .ordinal = 1,
+            .relative_path = "corpus/diff/sample_1.wiki",
+            .body = before,
+        },
+        .steps = &.{
+            .{
+                .ordinal = 2,
+                .relative_path = "corpus/diff/sample_2.wiki",
+                .target_body = after,
+                .zdelta_text = encoded,
+            },
+        },
+    });
+    defer session.deinit();
 
-    var state = try InteractionState.buildDelta(
-        allocator,
-        &tm,
-        after,
-        .{
-            .current_revision = 1,
-            .target_revision = 2,
-            .relative_path = "corpus/diff/sample.wiki",
-        },
-        .{
-            .whole_delta_context_lines = 2,
-            .edit_context_lines = 2,
-        },
-    );
+    var opened = try session.open();
+    defer opened.deinit(allocator);
+    var snapshot = try session.snapshot();
+    defer snapshot.deinit(allocator);
+    var state = try InteractionState.build(allocator, snapshot, .{
+        .whole_delta_context_lines = 2,
+        .edit_context_lines = 2,
+    });
     defer state.deinit();
 
     var found_boundary = false;
@@ -812,4 +711,11 @@ test "controller boundaries are semantic markers, not embedded strings" {
         try std.testing.expect(!std.mem.containsAtLeast(u8, section.document.text, 1, "..."));
     }
     try std.testing.expect(found_boundary);
+}
+
+fn encodeDelta(allocator: Allocator, before: []const u8, after: []const u8) ![]const u8 {
+    var diff: dmp.Diff = .default;
+    defer diff.deinit(allocator);
+    _ = try diff.diff(allocator, before, after);
+    return try diff.toZDelta(allocator, .b);
 }

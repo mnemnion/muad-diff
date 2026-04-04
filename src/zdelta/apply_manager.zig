@@ -1,11 +1,10 @@
-// TODO: split this all up.
-// ---
-// It will not remain useful for there to be a comptime specialization between these two
-// tasks.  One of them is already finished and unlikely to change, and we've written maybe
-// 10% of the other.
-// ---
-// We will go so far as to make separate files.  We'll need common structs to live in
-// zdelta/common.zig.  More notes found in the rest of this file.
+//! Partial-application driver with skip-history harmonization.
+//!
+//! `DeltaManager` shares the same slack-buffer storage rules as
+//! `DeltaApplicator`, but it layers review-time policy on top of them.
+//! Skipped operations remain as history, incoming deltas are rewritten against
+//! that history, and blocked markers preserve places where the operator's past
+//! choices make a later mutation impossible to apply blindly.
 
 pub const DeltaManager = struct {
     allocator: Allocator,
@@ -17,6 +16,9 @@ pub const DeltaManager = struct {
     budget: u32,
     t_idx: u32,
     z_idx: u32,
+    // Skip history is not just a transcript artifact. It is the materialized
+    // divergence between the reviewed text and the corpus baseline, and later
+    // deltas must be harmonized against it before they can be trusted.
     skipped: std.ArrayListUnmanaged(SkippedDeltaOp),
 
     pub const growth_fudge: u32 = 16;
@@ -44,8 +46,8 @@ pub const DeltaManager = struct {
     }
 
     pub fn initText(allocator: Allocator, text: []const u8) !DeltaManager {
-        const text_len = try checkedTextLen(text.len);
-        const extra_slack = try initialSlack(text.len);
+        const text_len = try apply_base.checkedTextLen(text.len);
+        const extra_slack = try apply_base.initialSlack(text.len);
         const head_room = extra_slack / 2;
         const total_len = try std.math.add(usize, text.len, extra_slack);
         var buffer = try allocator.alloc(u8, total_len);
@@ -179,38 +181,19 @@ pub const DeltaManager = struct {
     }
 
     fn rebase(tm: *DeltaManager, new_start: u32) void {
-        if (new_start == tm.start) return;
-        const active_len = tm.textLen();
-        @memmove(
-            tm.buffer[new_start..][0..active_len],
-            tm.buffer[tm.start..][0..active_len],
-        );
-        tm.start = new_start;
-        tm.end = new_start + active_len;
+        apply_base.rebase(tm, new_start);
     }
 
     fn growForNeed(tm: *DeltaManager, need: u32) !void {
-        if (need <= tm.budget) return;
-        const shortfall = need - tm.budget;
-        const growth = shortfall +| growth_fudge;
-        const new_len = tm.buffer.len + growth;
-        tm.buffer = try tm.allocator.realloc(tm.buffer, new_len);
-        tm.budget +|= growth;
+        try apply_base.growForNeed(tm, growth_fudge, need);
     }
 
     fn ensureHeadRoom(tm: *DeltaManager, need: u32) !void {
-        if (need <= tm.start) return;
-        if (need > tm.budget) try tm.growForNeed(need);
-        dbgassert(need <= tm.totalSlack());
-        tm.rebase(need);
+        try apply_base.ensureHeadRoom(tm, growth_fudge, need);
     }
 
     fn ensureTailRoom(tm: *DeltaManager, need: u32) !void {
-        const tail_room: u32 = @intCast(tm.buffer.len - tm.end);
-        if (need <= tail_room) return;
-        if (need > tm.budget) try tm.growForNeed(need);
-        dbgassert(need <= tm.totalSlack());
-        tm.rebase(tm.totalSlack() - need);
+        try apply_base.ensureTailRoom(tm, growth_fudge, need);
     }
 
     pub fn insert(tm: *DeltaManager, at: u32, new_text: []const u8) !void {
@@ -523,20 +506,7 @@ pub const DeltaManager = struct {
     }
 
     fn totalSlack(tm: *const DeltaManager) u32 {
-        return tm.start + cast(u32, tm.buffer.len) - tm.end;
-    }
-
-    fn initialSlack(text_len: usize) !usize {
-        if (text_len == 0) return 0;
-        const twenty_percent = @divFloor(text_len - 1, 5) + 1;
-        return if (twenty_percent % 2 == 0)
-            twenty_percent
-        else
-            std.math.add(usize, twenty_percent, 1) catch error.ZDeltaTooLarge;
-    }
-
-    fn checkedTextLen(text_len: usize) !u32 {
-        return std.math.cast(u32, text_len) orelse error.ZDeltaTooLarge;
+        return apply_base.totalSlack(tm);
     }
 };
 
@@ -686,11 +656,25 @@ fn expectManagerText(
     try testing.expectEqualStrings(expected, tm.view());
 }
 
-// TODO: We still want the two new types to have a common interface, and
-// for what's now DeltaManager to pass every test which is also
-// passed by what's now DeltaApplicator. Probably this means we keep
-// the tests in the new home of no-longer-DeltaManager, and do
-// the same inline for thing we're doing right here.
+fn assertSharedApplicatorInterface(comptime TManager: type) void {
+    _ = TManager.init;
+    _ = TManager.initText;
+    _ = TManager.addDelta;
+    _ = TManager.deinit;
+    _ = TManager.view;
+    _ = TManager.move;
+    _ = TManager.applyAll;
+    _ = TManager.applyNext;
+    _ = TManager.insert;
+    _ = TManager.delete;
+    _ = TManager.textLen;
+}
+
+test "ZDelta applicators expose the shared baseline interface" {
+    inline for (shared_applicator_types) |TManager| {
+        assertSharedApplicatorInterface(TManager);
+    }
+}
 
 test "ZDelta TextManager rejects wrong text length" {
     const allocator = testing.allocator;
@@ -1447,6 +1431,7 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
+const apply_base = @import("apply_base.zig");
 const common_apply = @import("common.zig");
 const whole_apply = @import("whole_apply.zig");
 const zdelta_mod = @import("../zdelta.zig");
@@ -1458,6 +1443,7 @@ const common = @import("../dmp/common.zig");
 const dbgassert = common.dbgassert;
 const cast = common.cast;
 const DeltaApplicator = whole_apply.DeltaApplicator;
+const shared_applicator_types = .{ DeltaApplicator, DeltaManager };
 const DeltaSpan = common_apply.DeltaSpan;
 const DeltaOp = common_apply.DeltaOp;
 const HarmonizedOpState = common_apply.HarmonizedOpState;
