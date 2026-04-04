@@ -75,7 +75,6 @@ pub const DocumentModel = struct {
 pub const SectionKind = enum {
     overview,
     focused_edit,
-    skipped_history,
 };
 
 pub const Section = struct {
@@ -160,7 +159,7 @@ pub const InteractionState = struct {
         };
         errdefer state.deinit();
 
-        try state.appendOverviewSection(snapshot.current_text, snapshot.target_text, settings);
+        try state.appendOverviewSection(snapshot.current_text, snapshot.target_text, snapshot.skipped, settings);
         if (state.focus) |focus| {
             const label = switch (snapshot.prompt_kind) {
                 .delta => "next change",
@@ -169,7 +168,6 @@ pub const InteractionState = struct {
             defer if (snapshot.prompt_kind == .edit) allocator.free(label);
             try state.appendFocusedSection(snapshot.current_text, focus, settings, label);
         }
-        try state.appendSkippedHistorySections(snapshot.skipped);
         return state;
     }
 
@@ -177,6 +175,7 @@ pub const InteractionState = struct {
         state: *InteractionState,
         before: []const u8,
         after: []const u8,
+        skipped: []const session_mod.SkippedChange,
         settings: ContextSettings,
     ) !void {
         var diff: dmp.Diff = .default;
@@ -194,6 +193,7 @@ pub const InteractionState = struct {
                 state.sections.allocator,
                 ctx,
                 settings.whole_delta_context_lines,
+                skipped,
                 .{
                     .provenance = .target_revision,
                 },
@@ -244,6 +244,7 @@ pub const InteractionState = struct {
                 state.sections.allocator,
                 ctx,
                 settings.edit_context_lines,
+                &.{},
                 .{
                     .provenance = .target_revision,
                     .delta_index = @intCast(focus.change_number - 1),
@@ -252,27 +253,6 @@ pub const InteractionState = struct {
                 },
             ),
         });
-    }
-
-    fn appendSkippedHistorySections(
-        state: *InteractionState,
-        skipped_items: []const session_mod.SkippedChange,
-    ) !void {
-        for (skipped_items) |skipped| {
-            var document = try buildSkippedDocument(state.sections.allocator, skipped);
-            errdefer document.deinit(state.sections.allocator);
-
-            try state.sections.append(.{
-                .kind = .skipped_history,
-                .label = try std.fmt.allocPrint(
-                    state.sections.allocator,
-                    "skipped {d} [{s}]",
-                    .{ skipped.number, skippedKindName(skipped.kind) },
-                ),
-                .provenance = .skipped_history,
-                .document = document,
-            });
-        }
     }
 };
 
@@ -380,20 +360,32 @@ fn buildContextDocument(
     allocator: Allocator,
     ctx: DiffContext,
     show_lines: usize,
+    skipped_items: []const session_mod.SkippedChange,
     meta: AppendMeta,
 ) !DocumentModel {
     var builder = DocumentBuilder.init(allocator);
     errdefer builder.deinit();
+    var skipped_cursor = SkippedOverlayCursor{
+        .items = skipped_items,
+    };
+    var before_offset: usize = 0;
 
     for (ctx.items.items, 0..) |item, index| {
+        const item_meta = skipped_cursor.metaForItem(item.edit, before_offset, meta);
         if (item.edit.operation != .equal) {
-            try appendEditLines(&builder, item.edit, null, null, metaForEdit(meta, item.edit.operation));
+            try appendEditLines(&builder, item.edit, null, null, item_meta);
+            switch (item.edit.operation) {
+                .delete => before_offset += item.edit.text.len,
+                .insert => {},
+                .equal => unreachable,
+            }
             continue;
         }
 
         const line_count = countDisplayLines(item.edit.text);
         if (line_count == 0 or line_count <= show_lines) {
             try appendEditLines(&builder, item.edit, null, null, null);
+            before_offset += item.edit.text.len;
             continue;
         }
 
@@ -404,6 +396,7 @@ fn buildContextDocument(
 
         if (line_count <= keep_head + keep_tail) {
             try appendEditLines(&builder, item.edit, null, null, null);
+            before_offset += item.edit.text.len;
             continue;
         }
 
@@ -435,30 +428,7 @@ fn buildContextDocument(
             const tail_start = byteOffsetAfterLines(item.edit.text, line_count - keep_tail);
             try appendEditLines(&builder, item.edit, tail_start, null, null);
         }
-    }
-
-    return builder.finish();
-}
-
-fn buildSkippedDocument(
-    allocator: Allocator,
-    skipped: session_mod.SkippedChange,
-) !DocumentModel {
-    var builder = DocumentBuilder.init(allocator);
-    errdefer builder.deinit();
-
-    var cursor: usize = 0;
-    const kind = switch (skipped.kind) {
-        .insert => AnnotationKind.insert,
-        .delete => AnnotationKind.delete,
-    };
-    while (nextDisplayLine(skipped.text, cursor)) |part| {
-        try builder.appendLine(part.line, .{
-            .provenance = .skipped_history,
-            .kind = kind,
-            .skip_index = @intCast(skipped.number - 1),
-        });
-        cursor = part.next;
+        before_offset += item.edit.text.len;
     }
 
     return builder.finish();
@@ -474,6 +444,46 @@ fn metaForEdit(base: AppendMeta, operation: Edit.Operation) ?AppendMeta {
     meta.kind = kind;
     return meta;
 }
+
+const SkippedOverlayCursor = struct {
+    items: []const session_mod.SkippedChange,
+    next_index: usize = 0,
+
+    // Skipped history stays in the session as durable state, but the active
+    // review screen folds matching skipped edits back into the main diff so a
+    // repaint shows one coherent document instead of appended history blocks.
+    fn metaForItem(
+        cursor: *SkippedOverlayCursor,
+        edit: Edit,
+        before_offset: usize,
+        base: AppendMeta,
+    ) ?AppendMeta {
+        var item_meta = metaForEdit(base, edit.operation) orelse return null;
+        const skipped = cursor.match(edit, before_offset) orelse return item_meta;
+        item_meta.provenance = .skipped_history;
+        item_meta.skip_index = @intCast(skipped.number - 1);
+        return item_meta;
+    }
+
+    fn match(
+        cursor: *SkippedOverlayCursor,
+        edit: Edit,
+        before_offset: usize,
+    ) ?session_mod.SkippedChange {
+        if (cursor.next_index >= cursor.items.len) return null;
+        const skipped = cursor.items[cursor.next_index];
+        const expected_kind = switch (edit.operation) {
+            .insert => session_mod.SkippedKind.insert,
+            .delete => session_mod.SkippedKind.delete,
+            .equal => return null,
+        };
+        if (skipped.kind != expected_kind) return null;
+        if (skipped.at != before_offset) return null;
+        if (!std.mem.eql(u8, skipped.text, edit.text)) return null;
+        cursor.next_index += 1;
+        return skipped;
+    }
+};
 
 fn appendEditLines(
     builder: *DocumentBuilder,
@@ -567,13 +577,6 @@ fn lineNumbersAtOffset(item: DiffContext.EditContext, line_offset: usize) struct
     };
 }
 
-fn skippedKindName(kind: session_mod.SkippedKind) []const u8 {
-    return switch (kind) {
-        .insert => "insert",
-        .delete => "delete",
-    };
-}
-
 test "interaction state projects snapshot facts and skipped history" {
     const allocator = std.testing.allocator;
     const before = "alpha\nbeta\ngamma\ndelta\n";
@@ -616,6 +619,14 @@ test "interaction state projects snapshot facts and skipped history" {
     try std.testing.expectEqual(session_mod.SessionPrompt.edit, state.prompt_kind);
     try std.testing.expect(state.sections.items.len >= 2);
     try std.testing.expectEqual(@as(usize, 1), state.facts.skipped_history_len);
+    var found_skipped_annotation = false;
+    for (state.sections.items) |section| {
+        try std.testing.expect(section.provenance != .skipped_history);
+        for (section.document.annotations) |annotation| {
+            if (annotation.provenance == .skipped_history) found_skipped_annotation = true;
+        }
+    }
+    try std.testing.expect(found_skipped_annotation);
 }
 
 test "edit interaction state exposes focused provenance" {

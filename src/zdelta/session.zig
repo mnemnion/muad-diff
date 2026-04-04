@@ -91,6 +91,7 @@ pub const SkippedKind = enum {
 
 pub const SkippedChange = struct {
     number: usize,
+    at: u32,
     kind: SkippedKind,
     text: []const u8,
 };
@@ -225,6 +226,7 @@ pub const ReviewSession = struct {
             for (session.driver.skippedItems(), 0..) |item, idx| {
                 skipped[idx] = .{
                     .number = idx + 1,
+                    .at = item.at,
                     .kind = switch (item.op) {
                         .insert => .insert,
                         .delete => .delete,

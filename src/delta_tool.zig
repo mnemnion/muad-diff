@@ -7,6 +7,16 @@ const plain_diff_decorations: dmp.DiffDecorations = .{
     .insert_end = "+}",
 };
 
+const ESC = "\x1b";
+const CSI = ESC ++ "[";
+const CURSOR_SAVE = CSI ++ "s";
+const CURSOR_RESTORE = CSI ++ "u";
+const CURSOR_POSITION_REQUEST = CSI ++ "6n";
+const TERMINAL_SIZE_REQUEST = CSI ++ "18t";
+const ERASE_TO_SCREEN_END = CSI ++ "0J";
+const SYNC_ON = CSI ++ "?2026h";
+const SYNC_SEND = CSI ++ "?2026l";
+
 const ViewMark = enum {
     target_delete,
     target_insert,
@@ -30,11 +40,13 @@ const xterm_marks = MarkedDocument.MarkupColorArray.init(.{
 const OutputClient = struct {
     allocator: Allocator,
     line_ending: []const u8,
+    raw_mode: bool,
 
     fn init(allocator: Allocator, raw_mode: bool) OutputClient {
         return .{
             .allocator = allocator,
             .line_ending = if (raw_mode) "\r\n" else "\n",
+            .raw_mode = raw_mode,
         };
     }
 
@@ -61,6 +73,76 @@ const OutputClient = struct {
         const text = try std.fmt.allocPrint(self.allocator, fmt, args);
         defer self.allocator.free(text);
         try self.writeText(writer, text);
+    }
+
+    fn writeControl(self: OutputClient, writer: anytype, sequence: []const u8) !void {
+        if (!self.raw_mode) return;
+        try writer.writeAll(sequence);
+    }
+
+    fn supportsInPlaceRepaint(self: OutputClient) bool {
+        return self.raw_mode;
+    }
+};
+
+const CursorAnchor = struct {
+    row: u16,
+    col: u16,
+};
+
+const TerminalSize = struct {
+    rows: u16,
+    cols: u16,
+};
+
+const LiveRenderController = struct {
+    anchor: ?CursorAnchor = null,
+
+    // Raw interactive output is redrawn as one synchronized frame because the
+    // terminal transport owns repaint policy, while replay/plain output keeps
+    // its append-only transcript shape for tests and captured logs.
+    fn renderPromptFrame(
+        controller: *LiveRenderController,
+        output: OutputClient,
+        writer: anytype,
+        prompt: *PromptSource,
+        state: zdelta_context.InteractionState,
+        use_color: bool,
+    ) !void {
+        if (!output.supportsInPlaceRepaint()) {
+            try renderPromptContents(output, writer, state, use_color);
+            return;
+        }
+
+        if (controller.anchor == null) {
+            const start = try prompt.readCursorAnchor(writer);
+            const size = try prompt.readTerminalSize(writer);
+
+            var frame_buffer: std.Io.Writer.Allocating = .init(output.allocator);
+            defer frame_buffer.deinit();
+            try renderPromptContents(output, &frame_buffer.writer, state, use_color);
+            const frame = frame_buffer.written();
+            const frame_rows = countRenderedRows(frame, size.cols);
+            const final_row = @as(u32, start.row) + frame_rows - 1;
+            const scroll_rows = final_row -| size.rows;
+            controller.anchor = .{
+                .row = @intCast(@max(1, @as(i32, start.row) - @as(i32, @intCast(scroll_rows)))),
+                .col = 1,
+            };
+            try writer.writeAll(frame);
+            return;
+        }
+
+        const anchor = controller.anchor orelse return error.LiveRenderAnchorMissing;
+        // Modern terminals handle a full erase-and-repaint cheaply, and
+        // synchronized updates avoid visible churn better than trying to
+        // diff the screen locally.
+        try output.writeControl(writer, SYNC_ON);
+        defer output.writeControl(writer, SYNC_SEND) catch {};
+        try writeCursorMove(writer, anchor);
+        try output.writeControl(writer, ERASE_TO_SCREEN_END);
+
+        try renderPromptContents(output, writer, state, use_color);
     }
 };
 
@@ -110,6 +192,11 @@ const PromptCommand = struct {
     canonical: ?u8,
 };
 
+const PromptReadResult = union(enum) {
+    command: PromptCommand,
+    demo_recolor,
+};
+
 const ParsedPrompt = struct {
     intent: zdelta_session.SessionIntent,
     canonical: u8,
@@ -117,6 +204,7 @@ const ParsedPrompt = struct {
 
 const PromptParseResult = union(enum) {
     accepted: ParsedPrompt,
+    demo_recolor,
     invalid,
     interrupt,
 };
@@ -214,6 +302,71 @@ const PromptSource = struct {
         return command;
     }
 
+    fn readCursorAnchor(self: *PromptSource, writer: *std.Io.Writer) !CursorAnchor {
+        switch (self.input) {
+            .live => {},
+            .replay => return error.CursorAnchorUnavailable,
+        }
+
+        try writer.writeAll(CURSOR_POSITION_REQUEST);
+        try writer.flush();
+
+        var buf: [32]u8 = undefined;
+        var len: usize = 0;
+        while (len < buf.len) {
+            const byte = (try self.readLiveByte()) orelse return error.CursorAnchorUnavailable;
+            buf[len] = byte;
+            len += 1;
+            if (byte == 'R') break;
+        }
+        if (len < 6) return error.InvalidCursorAnchorResponse;
+        if (buf[0] != 0x1b or buf[1] != '[' or buf[len - 1] != 'R') {
+            return error.InvalidCursorAnchorResponse;
+        }
+
+        const body = buf[2 .. len - 1];
+        const sep = std.mem.indexOfScalar(u8, body, ';') orelse return error.InvalidCursorAnchorResponse;
+        const row = try std.fmt.parseUnsigned(u16, body[0..sep], 10);
+        const col = try std.fmt.parseUnsigned(u16, body[sep + 1 ..], 10);
+        return .{ .row = row, .col = col };
+    }
+
+    fn readTerminalSize(self: *PromptSource, writer: *std.Io.Writer) !TerminalSize {
+        switch (self.input) {
+            .live => {},
+            .replay => return error.TerminalSizeUnavailable,
+        }
+
+        try writer.writeAll(TERMINAL_SIZE_REQUEST);
+        try writer.flush();
+
+        var buf: [32]u8 = undefined;
+        var len: usize = 0;
+        while (len < buf.len) {
+            const byte = (try self.readLiveByte()) orelse return error.TerminalSizeUnavailable;
+            buf[len] = byte;
+            len += 1;
+            if (byte == 't') break;
+        }
+        if (len < 8) return error.InvalidTerminalSizeResponse;
+        if (buf[0] != 0x1b or buf[1] != '[' or buf[len - 1] != 't') {
+            return error.InvalidTerminalSizeResponse;
+        }
+
+        const body = buf[2 .. len - 1];
+        var parts = std.mem.splitScalar(u8, body, ';');
+        const kind = parts.next() orelse return error.InvalidTerminalSizeResponse;
+        if (!std.mem.eql(u8, kind, "8")) return error.InvalidTerminalSizeResponse;
+        const rows_text = parts.next() orelse return error.InvalidTerminalSizeResponse;
+        const cols_text = parts.next() orelse return error.InvalidTerminalSizeResponse;
+        if (parts.next() != null) return error.InvalidTerminalSizeResponse;
+
+        return .{
+            .rows = try std.fmt.parseUnsigned(u16, rows_text, 10),
+            .cols = try std.fmt.parseUnsigned(u16, cols_text, 10),
+        };
+    }
+
     // Live input is intentionally terse and byte-oriented. The parser boundary
     // exists so the session core only sees canonical review intents, not
     // terminal bytes or replay-script quirks.
@@ -222,21 +375,24 @@ const PromptSource = struct {
         prompt_kind: zdelta_session.SessionPrompt,
         writer: anytype,
         output: OutputClient,
-    ) !?PromptCommand {
+    ) !?PromptReadResult {
         switch (self.input) {
             .live => {
                 while (true) {
                     const byte = (try self.readLiveByte()) orelse return null;
                     switch (parsePromptByte(prompt_kind, byte)) {
                         .accepted => |accepted| {
-                            try writer.writeByte(accepted.canonical);
-                            try output.writeLineEnding(writer);
-                            try writer.flush();
-                            return .{
+                            if (!output.supportsInPlaceRepaint()) {
+                                try writer.writeByte(accepted.canonical);
+                                try output.writeLineEnding(writer);
+                                try writer.flush();
+                            }
+                            return .{ .command = .{
                                 .intent = accepted.intent,
                                 .canonical = accepted.canonical,
-                            };
+                            } };
                         },
+                        .demo_recolor => return .demo_recolor,
                         .invalid => {
                             try writer.writeByte(7);
                             try writer.flush();
@@ -251,10 +407,10 @@ const PromptSource = struct {
                     .delta => return error.InvalidReplayDeltaCommand,
                     .edit => return error.InvalidReplayEditCommand,
                 };
-                return .{
+                return .{ .command = .{
                     .intent = parsed.intent,
                     .canonical = parsed.canonical,
-                };
+                } };
             },
         }
     }
@@ -493,6 +649,7 @@ fn run(
         RawTerminalGuard{};
     defer raw_guard.deinit();
     const output = OutputClient.init(allocator, raw_guard.isActive());
+    var render_controller = LiveRenderController{};
 
     var session = try zdelta_session.ReviewSession.init(allocator, .{
         .baseline = .{
@@ -514,32 +671,41 @@ fn run(
 
         var interaction_state = try zdelta_context.InteractionState.build(allocator, snapshot, settings);
         defer interaction_state.deinit();
-        try renderInteractionState(output, stdout_writer, interaction_state, stdout_supports_color);
+        try render_controller.renderPromptFrame(output, stdout_writer, &prompt, interaction_state, stdout_supports_color);
         try stdout_writer.flush();
 
         while (true) {
-            try output.writeText(stdout_writer, promptText(snapshot.prompt_kind));
-            try stdout_writer.flush();
             const input = (try prompt.readInput(snapshot.prompt_kind, stdout_writer, output)) orelse {
                 session.quitEarly();
                 break :outer;
             };
-            if (input.canonical) |command| {
-                if (recorder) |*owned| try owned.recordCommand(command);
-            }
+            switch (input) {
+                .demo_recolor => {
+                    recolorFirstVisibleEdit(&interaction_state);
+                    try render_controller.renderPromptFrame(output, stdout_writer, &prompt, interaction_state, stdout_supports_color);
+                    try stdout_writer.flush();
+                    continue;
+                },
+                .command => |command| {
+                    if (command.canonical) |byte| {
+                        if (recorder) |*owned| try owned.recordCommand(byte);
+                    }
 
-            var outcome = try session.dispatch(input.intent);
-            defer outcome.deinit(allocator);
-            try writeDiagnostics(stderr_writer, outcome.diagnostics);
-            if (outcome.help_prompt) |prompt_kind| {
-                switch (prompt_kind) {
-                    .delta => try writeDeltaHelp(output, stdout_writer),
-                    .edit => try writeEditHelp(output, stdout_writer),
+                    var outcome = try session.dispatch(command.intent);
+                    defer outcome.deinit(allocator);
+                    try writeDiagnostics(stderr_writer, outcome.diagnostics);
+                    if (outcome.help_prompt) |prompt_kind| {
+                        switch (prompt_kind) {
+                            .delta => try writeDeltaHelp(output, stdout_writer),
+                            .edit => try writeEditHelp(output, stdout_writer),
+                        }
+                        try output.writeText(stdout_writer, promptText(snapshot.prompt_kind));
+                        try stdout_writer.flush();
+                        continue;
+                    }
+                    break;
                 }
-                try stdout_writer.flush();
-                continue;
             }
-            break;
         }
     }
 
@@ -674,10 +840,32 @@ fn parsePromptByte(
     byte: u8,
 ) PromptParseResult {
     if (byte == 3) return .interrupt;
+    if (byte == 'x') return .demo_recolor;
     return if (parseReplayPrompt(prompt_kind, byte)) |parsed|
         .{ .accepted = parsed }
     else
         .invalid;
+}
+
+// This is a deliberately local UI-only mutation: the render path already knows
+// how to color skipped edits from annotation provenance, so the demo command
+// only flips the first currently visible target annotation and lets normal
+// repaint/render do the rest.
+fn recolorFirstVisibleEdit(state: *zdelta_context.InteractionState) void {
+    const show_focus = state.prompt_kind == .edit;
+    for (state.sections.items) |*section| {
+        if (!show_focus and section.kind == .focused_edit) continue;
+        for (section.document.annotations) |*annotation| {
+            if (annotation.provenance != .target_revision) continue;
+            switch (annotation.kind) {
+                .insert, .delete => {
+                    annotation.provenance = .skipped_history;
+                    return;
+                },
+                .focus, .blocked, .rewritten => {},
+            }
+        }
+    }
 }
 
 fn parseReplayPrompt(
@@ -703,6 +891,55 @@ fn parseReplayPrompt(
             else => null,
         },
     };
+}
+
+fn writeCursorMove(writer: *std.Io.Writer, anchor: CursorAnchor) !void {
+    var buf: [32]u8 = undefined;
+    const sequence = try std.fmt.bufPrint(&buf, "{s}{d};{d}H", .{
+        CSI,
+        anchor.row,
+        anchor.col,
+    });
+    try writer.writeAll(sequence);
+}
+
+fn countRenderedRows(text: []const u8, terminal_cols: u16) u32 {
+    if (terminal_cols == 0) return 1;
+
+    var rows: u32 = 1;
+    var line_width: u16 = 0;
+    var idx: usize = 0;
+    while (idx < text.len) {
+        const byte = text[idx];
+        if (byte == 0x1b and idx + 1 < text.len and text[idx + 1] == '[') {
+            idx += 2;
+            while (idx < text.len) : (idx += 1) {
+                const tail = text[idx];
+                if (tail >= 0x40 and tail <= 0x7e) {
+                    idx += 1;
+                    break;
+                }
+            }
+            continue;
+        }
+        if (byte == '\r') {
+            idx += 1;
+            continue;
+        }
+        if (byte == '\n') {
+            rows += 1;
+            line_width = 0;
+            idx += 1;
+            continue;
+        }
+        if (line_width == terminal_cols) {
+            rows += 1;
+            line_width = 0;
+        }
+        line_width += 1;
+        idx += 1;
+    }
+    return rows;
 }
 
 fn renderInteractionState(
@@ -750,6 +987,16 @@ fn renderInteractionState(
             try renderDocumentPlain(output, writer, section.document);
         }
     }
+}
+
+fn renderPromptContents(
+    output: OutputClient,
+    writer: anytype,
+    state: zdelta_context.InteractionState,
+    use_color: bool,
+) !void {
+    try renderInteractionState(output, writer, state, use_color);
+    try output.writeText(writer, promptText(state.prompt_kind));
 }
 
 fn renderDocumentAnsi(
@@ -1331,6 +1578,84 @@ test "render interaction state hides focused data at delta prompt" {
     try std.testing.expect(!std.mem.containsAtLeast(u8, out.items, 1, "focus: edit"));
     try std.testing.expect(!std.mem.containsAtLeast(u8, out.items, 1, "--- next change ---"));
     try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "--- target revision ---"));
+}
+
+test "raw repaint frame uses synchronized updates" {
+    const allocator = std.testing.allocator;
+    var document = zdelta_context.DocumentModel{
+        .text = try allocator.dupe(u8, "line\n"),
+        .line_starts = try allocator.dupe(u32, &.{0}),
+        .annotations = try allocator.dupe(zdelta_context.Annotation, &.{
+            .{
+                .start = 0,
+                .len = 5,
+                .kind = .insert,
+                .provenance = .skipped_history,
+                .skip_index = 0,
+            },
+        }),
+        .boundaries = try allocator.dupe(zdelta_context.BoundaryMarker, &.{}),
+    };
+    defer document.deinit(allocator);
+
+    var sections = ArrayList(zdelta_context.Section).init(allocator);
+    defer {
+        for (sections.items) |*section| section.deinit(allocator);
+        sections.deinit();
+    }
+    try sections.append(.{
+        .kind = .overview,
+        .label = try allocator.dupe(u8, "target revision"),
+        .provenance = .target_revision,
+        .document = .{
+            .text = try allocator.dupe(u8, document.text),
+            .line_starts = try allocator.dupe(u32, document.line_starts),
+            .annotations = try allocator.dupe(zdelta_context.Annotation, document.annotations),
+            .boundaries = try allocator.dupe(zdelta_context.BoundaryMarker, document.boundaries),
+        },
+    });
+
+    var state = zdelta_context.InteractionState{
+        .prompt_kind = .delta,
+        .session = .{
+            .current_revision = 1,
+            .target_revision = 2,
+            .relative_path = try allocator.dupe(u8, "corpus/diff/sample.wiki"),
+        },
+        .facts = .{
+            .current_bytes = 4,
+            .target_bytes = 5,
+            .skipped_history_len = 1,
+        },
+        .focus = null,
+        .sections = sections,
+    };
+    defer {
+        state.sections = .init(allocator);
+        state.session.deinit(allocator);
+    }
+
+    var controller = LiveRenderController{};
+
+    var first = ArrayList(u8).init(allocator);
+    defer first.deinit();
+    var first_writer = first.writer();
+    _ = &first_writer;
+    try controller.renderPromptFrame(OutputClient.init(allocator, true), &first_writer, state, false);
+
+    var second = ArrayList(u8).init(allocator);
+    defer second.deinit();
+    var second_writer = second.writer();
+    _ = &second_writer;
+    try controller.renderPromptFrame(OutputClient.init(allocator, true), &second_writer, state, false);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, first.items, 1, CURSOR_SAVE));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, first.items, 1, SYNC_ON));
+    try std.testing.expect(std.mem.startsWith(u8, second.items, SYNC_ON));
+    try std.testing.expect(std.mem.containsAtLeast(u8, second.items, 1, CURSOR_RESTORE));
+    try std.testing.expect(std.mem.containsAtLeast(u8, second.items, 1, ERASE_TO_SCREEN_END));
+    try std.testing.expect(std.mem.containsAtLeast(u8, second.items, 1, "--- target revision ---"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, second.items, 1, "--- skipped 1 [insert] ---"));
 }
 
 test "render document ansi uses obelizmo for annotated lines" {
