@@ -2,11 +2,13 @@
 
 const std = @import("std");
 const dmp = @import("dmp.zig");
+const obelizmo = @import("obelizmo");
 const zdelta_context = @import("zdelta/context.zig");
 
 const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
 const DeltaManager = dmp.DeltaManager;
+const MarkedDocument = obelizmo.MarkedString(ViewMark);
 const corpus_diff_root = "corpus/diff";
 const default_runs_path = corpus_diff_root ++ "/delta_tool.runs";
 
@@ -16,6 +18,26 @@ const plain_diff_decorations: dmp.DiffDecorations = .{
     .insert_start = "{+",
     .insert_end = "+}",
 };
+
+const ViewMark = enum {
+    target_delete,
+    target_insert,
+    skipped_delete,
+    skipped_insert,
+    focus,
+    blocked,
+    rewritten,
+};
+
+const xterm_marks = MarkedDocument.MarkupColorArray.init(.{
+    .target_delete = obelizmo.colors.fgBasic(.red),
+    .target_insert = obelizmo.colors.fgBasic(.green),
+    .skipped_delete = obelizmo.colors.fgBasic(.yellow),
+    .skipped_insert = obelizmo.colors.fgBasic(.cyan),
+    .focus = obelizmo.colors.inverse(),
+    .blocked = obelizmo.colors.ulBasic(.curly, .red),
+    .rewritten = obelizmo.colors.ulBasic(.single, .yellow),
+});
 
 const OutputClient = struct {
     allocator: Allocator,
@@ -566,7 +588,7 @@ fn run(
     var selection = try loadCorpusSelection(allocator, start_revision, end_revision);
     defer selection.deinit(allocator);
 
-    const settings: zdelta_context.RenderSettings = .{};
+    const settings: zdelta_context.ContextSettings = .{};
     var prompt = PromptSource{
         .input = if (parsed_args.replay_script) |script|
             .{ .replay = script }
@@ -602,27 +624,19 @@ fn run(
             return err;
         };
 
-        try writeDeltaHeader(
-            output,
-            stdout_writer,
-            summary.processed_revision,
-            revision.ordinal,
-            revision.relative_path,
-        );
-
-        var delta_page = try zdelta_context.buildWholeDeltaPage(
+        var delta_state = try zdelta_context.InteractionState.buildDelta(
             allocator,
-            tm.view(),
+            &tm,
             revision.body,
-            std.fs.path.basename(revision.relative_path),
+            .{
+                .current_revision = summary.processed_revision,
+                .target_revision = revision.ordinal,
+                .relative_path = revision.relative_path,
+            },
             settings,
         );
-        defer delta_page.deinit();
-        if (stdout_supports_color) {
-            try renderPage(output, stdout_writer, delta_page, .xterm_classic);
-        } else {
-            try renderPage(output, stdout_writer, delta_page, plain_diff_decorations);
-        }
+        defer delta_state.deinit();
+        try renderInteractionState(output, stdout_writer, delta_state, stdout_supports_color);
         try stdout_writer.flush();
 
         while (true) {
@@ -652,30 +666,20 @@ fn run(
                 .split => {
                     summary.partial_deltas += 1;
                     while (try tm.previewNext()) |preview| {
-                        try writeEditHeader(
-                            output,
-                            stdout_writer,
-                            summary.processed_revision,
-                            revision.ordinal,
-                            preview.delta_index + 1,
-                            preview.op.state,
-                        );
-
-                        var edit_page = try zdelta_context.buildEditPage(
+                        var edit_state = try zdelta_context.InteractionState.buildEdit(
                             allocator,
-                            tm.view(),
-                            preview.text_index,
-                            preview.op.effective,
-                            tm.zdelta.?.insert_text,
-                            std.fs.path.basename(revision.relative_path),
+                            &tm,
+                            revision.body,
+                            .{
+                                .current_revision = summary.processed_revision,
+                                .target_revision = revision.ordinal,
+                                .relative_path = revision.relative_path,
+                            },
+                            preview,
                             settings,
                         );
-                        defer edit_page.deinit();
-                        if (stdout_supports_color) {
-                            try renderPage(output, stdout_writer, edit_page, .xterm_classic);
-                        } else {
-                            try renderPage(output, stdout_writer, edit_page, plain_diff_decorations);
-                        }
+                        defer edit_state.deinit();
+                        try renderInteractionState(output, stdout_writer, edit_state, stdout_supports_color);
                         try stdout_writer.flush();
 
                         while (true) {
@@ -985,110 +989,177 @@ fn skipRemainingDelta(tm: *DeltaManager, counter: *usize) !void {
     }
 }
 
-fn renderPage(
+fn renderInteractionState(
     output: OutputClient,
     writer: anytype,
-    page: zdelta_context.Page,
-    deco: dmp.DiffDecorations,
+    state: zdelta_context.InteractionState,
+    use_color: bool,
 ) !void {
-    var line_start = true;
-    for (page.lines.items) |line| {
-        switch (line) {
-            .header => |text| {
-                if (!line_start) try output.writeLineEnding(writer);
-                try output.writeText(writer, text);
-                try output.writeLineEnding(writer);
-                line_start = true;
+    try output.print(writer, "\n=== revision {d} -> {d} ({s}) ===\n", .{
+        state.session.current_revision,
+        state.session.target_revision,
+        state.session.relative_path,
+    });
+    try output.print(
+        writer,
+        "current bytes: {d}  target bytes: {d}  skipped history: {d}\n",
+        .{
+            state.facts.current_bytes,
+            state.facts.target_bytes,
+            state.facts.skipped_history_len,
+        },
+    );
+    if (state.focus) |focus| {
+        try output.print(
+            writer,
+            "focus: edit {d} [{s}] @ {d}\n",
+            .{
+                focus.delta_index + 1,
+                @tagName(focus.state),
+                focus.text_index,
             },
-            .diff => |diff| {
-                if (line_start) {
-                    try writer.writeByte(' ');
-                    line_start = false;
-                }
-                const normalized_text = if (output.line_ending.len == 1)
-                    diff.text
-                else
-                    try std.mem.replaceOwned(u8, output.allocator, diff.text, "\n", output.line_ending);
-                defer if (output.line_ending.len != 1) output.allocator.free(normalized_text);
-                _ = try dmp.writeDecoratedEdit(
-                    output.allocator,
-                    writer,
-                    deco,
-                    dmp.Edit.asBorrow(diff.operation, normalized_text),
-                );
-                if (diff.text.len != 0 and diff.text[diff.text.len - 1] == '\n') {
-                    line_start = true;
-                }
-            },
-            .elision => |elision| {
-                if (!line_start) try output.writeLineEnding(writer);
-                try writer.writeAll(" ... ");
-                {
-                    var before_buf: [std.fmt.count("{d}", .{std.math.maxInt(u32)})]u8 = undefined;
-                    const before_text = try std.fmt.bufPrint(&before_buf, "{d}", .{elision.before});
-                    _ = try dmp.writeDecoratedEdit(
-                        output.allocator,
-                        writer,
-                        deco,
-                        dmp.Edit.asBorrow(.delete, before_text),
-                    );
-                }
-                try writer.writeByte(';');
-                {
-                    var after_buf: [std.fmt.count("{d}", .{std.math.maxInt(u32)})]u8 = undefined;
-                    const after_text = try std.fmt.bufPrint(&after_buf, "{d}", .{elision.after});
-                    _ = try dmp.writeDecoratedEdit(
-                        output.allocator,
-                        writer,
-                        deco,
-                        dmp.Edit.asBorrow(.insert, after_text),
-                    );
-                }
-                try output.writeLineEnding(writer);
-                line_start = true;
-            },
-            .eof_marker => {
-                if (!line_start) try output.writeLineEnding(writer);
-                try output.writeText(writer, " ---[eof]---\n\n");
-                line_start = true;
-            },
-            .truncated => {
-                if (!line_start) try output.writeLineEnding(writer);
-                try output.writeText(writer, "... [truncated]\n");
-                line_start = true;
-            },
+        );
+    }
+
+    for (state.sections.items) |section| {
+        try output.writeLineEnding(writer);
+        try output.print(writer, "--- {s} ---\n", .{section.label});
+        if (use_color) {
+            try renderDocumentAnsi(output, writer, section.document);
+        } else {
+            try renderDocumentPlain(output, writer, section.document);
         }
     }
 }
 
-fn writeDeltaHeader(
+fn renderDocumentAnsi(
     output: OutputClient,
-    writer: *std.Io.Writer,
-    current_revision: usize,
-    target_revision: usize,
-    relative_path: []const u8,
+    writer: anytype,
+    document: zdelta_context.DocumentModel,
 ) !void {
-    try output.print(writer, "\n=== revision {d} -> {d} ({s}) ===\n", .{
-        current_revision,
-        target_revision,
-        relative_path,
-    });
+    var marker = MarkedDocument.init(output.allocator, document.text);
+    defer marker.deinit();
+
+    for (document.annotations) |annotation| {
+        if (annotation.len == 0) continue;
+        const mark_kind = annotationToMark(annotation) orelse continue;
+        try marker.markFrom(mark_kind, annotation.start, annotation.len);
+    }
+
+    var xprint = MarkedDocument.XtermLineWriter(@TypeOf(writer)).init(&marker, xterm_marks, writer);
+    defer xprint.deinit();
+
+    var boundary_index: usize = 0;
+    for (document.line_starts, 0..) |_, line_index| {
+        try writeBoundaries(output, writer, document.boundaries, &boundary_index, @intCast(line_index));
+        _ = try xprint.next();
+        try output.writeLineEnding(writer);
+    }
+    try writeBoundaries(output, writer, document.boundaries, &boundary_index, @intCast(document.lineCount()));
+    while (try xprint.next()) |_| {
+        try output.writeLineEnding(writer);
+    }
 }
 
-fn writeEditHeader(
+fn renderDocumentPlain(
     output: OutputClient,
-    writer: *std.Io.Writer,
-    current_revision: usize,
-    target_revision: usize,
-    delta_index: u32,
-    state: dmp.HarmonizedOpState,
+    writer: anytype,
+    document: zdelta_context.DocumentModel,
 ) !void {
-    try output.print(writer, "\n--- revision {d} -> {d}, edit {d} [{s}] ---\n", .{
-        current_revision,
-        target_revision,
-        delta_index,
-        @tagName(state),
-    });
+    var boundary_index: usize = 0;
+    for (document.line_starts, 0..) |line_start, line_index| {
+        try writeBoundaries(output, writer, document.boundaries, &boundary_index, @intCast(line_index));
+        const line = lineSlice(document, @intCast(line_index), line_start);
+        try writer.writeByte(' ');
+        try writePlainAnnotatedLine(output, writer, document, @intCast(line_index), line);
+        try output.writeLineEnding(writer);
+    }
+    try writeBoundaries(output, writer, document.boundaries, &boundary_index, @intCast(document.lineCount()));
+}
+
+fn writeBoundaries(
+    output: OutputClient,
+    writer: anytype,
+    boundaries: []const zdelta_context.BoundaryMarker,
+    boundary_index: *usize,
+    line_index: u32,
+) !void {
+    while (boundary_index.* < boundaries.len and boundaries[boundary_index.*].line_index == line_index) {
+        const boundary = boundaries[boundary_index.*];
+        switch (boundary.kind) {
+            .elision => {
+                try output.print(writer, " ... {d};{d}\n", .{
+                    boundary.before_line,
+                    boundary.after_line,
+                });
+            },
+            .eof => try output.writeText(writer, " ---[eof]---\n"),
+        }
+        boundary_index.* += 1;
+    }
+}
+
+fn lineSlice(
+    document: zdelta_context.DocumentModel,
+    line_index: u32,
+    line_start: u32,
+) []const u8 {
+    const start: usize = @intCast(line_start);
+    const next_index: usize = @intCast(line_index + 1);
+    const end: usize = if (next_index < document.line_starts.len)
+        document.line_starts[next_index]
+    else
+        document.text.len;
+    return document.text[start..end];
+}
+
+fn writePlainAnnotatedLine(
+    output: OutputClient,
+    writer: anytype,
+    document: zdelta_context.DocumentModel,
+    line_index: u32,
+    line: []const u8,
+) !void {
+    const start = document.line_starts[line_index];
+    const end = start + line.len;
+    const display_line = std.mem.trimRight(u8, line, "\n");
+    var primary: ?zdelta_context.Annotation = null;
+    for (document.annotations) |annotation| {
+        if (annotation.start == start and annotation.start + annotation.len == end) {
+            switch (annotation.kind) {
+                .insert, .delete => {
+                    if (primary == null) primary = annotation;
+                },
+                .focus, .blocked, .rewritten => {},
+            }
+        }
+    }
+
+    if (primary) |annotation| {
+        switch (annotation.kind) {
+            .insert => try output.print(writer, "{{+{s}+}}", .{display_line}),
+            .delete => try output.print(writer, "[-{s}-]", .{display_line}),
+            .focus, .blocked, .rewritten => unreachable,
+        }
+    } else {
+        try output.writeText(writer, display_line);
+    }
+}
+
+fn annotationToMark(annotation: zdelta_context.Annotation) ?ViewMark {
+    return switch (annotation.kind) {
+        .insert => switch (annotation.provenance) {
+            .target_revision => .target_insert,
+            .skipped_history => .skipped_insert,
+        },
+        .delete => switch (annotation.provenance) {
+            .target_revision => .target_delete,
+            .skipped_history => .skipped_delete,
+        },
+        .focus => .focus,
+        .blocked => .blocked,
+        .rewritten => .rewritten,
+    };
 }
 
 fn writeDeltaHelp(output: OutputClient, writer: *std.Io.Writer) !void {
@@ -1346,52 +1417,106 @@ test "edit prompt parser accepts lowercase commands only" {
     );
 }
 
-test "render page writes plain semantic lines" {
+test "render interaction state writes plain controller sections" {
     const allocator = std.testing.allocator;
-    var page = zdelta_context.Page.init(allocator);
-    defer page.deinit();
-
-    try page.lines.append(.{ .header = try allocator.dupe(u8, "diff -- sample") });
-    try page.lines.append(.{
-        .diff = .{
-            .operation = .equal,
-            .text = try allocator.dupe(u8, "same\n"),
+    var document = zdelta_context.DocumentModel{
+        .text = try allocator.dupe(u8, "same\n"),
+        .line_starts = try allocator.dupe(u32, &.{0}),
+        .annotations = try allocator.dupe(zdelta_context.Annotation, &.{}),
+        .boundaries = try allocator.dupe(zdelta_context.BoundaryMarker, &.{
+            .{
+                .line_index = 1,
+                .kind = .elision,
+                .before_line = 4,
+                .after_line = 9,
+            },
+            .{
+                .line_index = 1,
+                .kind = .eof,
+            },
+        }),
+    };
+    defer document.deinit(allocator);
+    var sections = ArrayList(zdelta_context.Section).init(allocator);
+    defer {
+        for (sections.items) |*section| section.deinit(allocator);
+        sections.deinit();
+    }
+    try sections.append(.{
+        .kind = .overview,
+        .label = try allocator.dupe(u8, "target revision"),
+        .provenance = .target_revision,
+        .document = .{
+            .text = try allocator.dupe(u8, document.text),
+            .line_starts = try allocator.dupe(u32, document.line_starts),
+            .annotations = try allocator.dupe(zdelta_context.Annotation, document.annotations),
+            .boundaries = try allocator.dupe(zdelta_context.BoundaryMarker, document.boundaries),
         },
     });
-    try page.lines.append(.{ .elision = .{ .before = 4, .after = 9 } });
-    try page.lines.append(.{ .eof_marker = {} });
+
+    var state = zdelta_context.InteractionState{
+        .prompt_kind = .delta,
+        .actions = &.{ .apply, .skip },
+        .session = .{
+            .current_revision = 1,
+            .target_revision = 2,
+            .relative_path = try allocator.dupe(u8, "corpus/diff/sample.wiki"),
+            .document_name = try allocator.dupe(u8, "sample.wiki"),
+        },
+        .facts = .{
+            .current_bytes = 5,
+            .target_bytes = 7,
+            .skipped_history_len = 0,
+        },
+        .focus = null,
+        .sections = sections,
+    };
+    defer {
+        state.sections = .init(allocator);
+        state.session.deinit(allocator);
+    }
 
     var out = ArrayList(u8).init(allocator);
     defer out.deinit();
     var out_writer = out.writer();
     _ = &out_writer;
-    try renderPage(OutputClient.init(allocator, false), &out_writer, page, plain_diff_decorations);
+    try renderInteractionState(OutputClient.init(allocator, false), &out_writer, state, false);
 
-    try std.testing.expectEqualStrings(
-        "diff -- sample\n same\n ... [-4-];{+9+}\n ---[eof]---\n\n",
-        out.items,
-    );
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "--- target revision ---"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, " same\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, " ... 4;9\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, " ---[eof]---\n"));
 }
 
-test "render page leaves prompt-safe ansi state after truncated insert line" {
+test "render document ansi uses obelizmo for annotated lines" {
     const allocator = std.testing.allocator;
-    var page = zdelta_context.Page.init(allocator);
-    defer page.deinit();
-
-    try page.lines.append(.{ .header = try allocator.dupe(u8, "diff -- sample") });
-    try page.lines.append(.{
-        .diff = .{
-            .operation = .insert,
-            .text = try allocator.dupe(u8, "green\n"),
-        },
-    });
-    try page.lines.append(.{ .truncated = {} });
+    var document = zdelta_context.DocumentModel{
+        .text = try allocator.dupe(u8, "green\n"),
+        .line_starts = try allocator.dupe(u32, &.{0}),
+        .annotations = try allocator.dupe(zdelta_context.Annotation, &.{
+            .{
+                .start = 0,
+                .len = 6,
+                .kind = .insert,
+                .provenance = .target_revision,
+            },
+            .{
+                .start = 0,
+                .len = 6,
+                .kind = .focus,
+                .provenance = .target_revision,
+            },
+        }),
+        .boundaries = try allocator.dupe(zdelta_context.BoundaryMarker, &.{}),
+    };
+    defer document.deinit(allocator);
 
     var out = ArrayList(u8).init(allocator);
     defer out.deinit();
     var out_writer = out.writer();
     _ = &out_writer;
-    try renderPage(OutputClient.init(allocator, false), &out_writer, page, .xterm_classic);
+    try renderDocumentAnsi(OutputClient.init(allocator, false), &out_writer, document);
 
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "\x1b[m... [truncated]\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "\x1b["));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "green"));
 }

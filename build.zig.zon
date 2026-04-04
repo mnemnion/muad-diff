@@ -16,6 +16,9 @@
         .ztap = .{
             .path = "../ztap",
         },
+        .obelizmo = .{
+            .path = "../obelizmo",
+        },
     },
 
     .paths = .{

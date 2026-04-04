@@ -1,152 +1,483 @@
-//! Screen-bounded contextualization helpers for interactive zdelta inspection.
+//! zDelta Context
+//!
+//! This is the controller for interactive zdelta application.
+//! It synthesizes promptable interaction state from the underlying model:
+//! current text, attached delta, skipped-history state, and target revision.
+//!
+//! This file knows about lines and excerpts. It does not know about colors,
+//! terminal escape sequences, or screen painting.
 
 const std = @import("std");
 const dmp = @import("../dmp.zig");
+const zdelta = @import("../zdelta.zig");
 
 const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
 const Edit = dmp.Edit;
 const DiffContext = dmp.DiffContext;
+const DeltaManager = dmp.DeltaManager;
+const PreviewDeltaOp = dmp.PreviewDeltaOp;
 
-pub const RenderSettings = struct {
-    page_lines: usize = 20,
-    prompt_lines: usize = 5,
+pub const ContextSettings = struct {
     whole_delta_context_lines: usize = 2,
     edit_context_lines: usize = 2,
+};
 
-    fn bodyLineBudget(settings: RenderSettings) usize {
-        if (settings.page_lines <= settings.prompt_lines) return 1;
-        return settings.page_lines - settings.prompt_lines;
+pub const RevisionInfo = struct {
+    current_revision: usize,
+    target_revision: usize,
+    relative_path: []const u8,
+};
+
+pub const PromptKind = enum {
+    delta,
+    edit,
+};
+
+pub const Action = enum {
+    apply,
+    skip,
+    split,
+    quit,
+    help,
+    apply_rest,
+    skip_rest,
+};
+
+pub const Provenance = enum {
+    target_revision,
+    skipped_history,
+};
+
+pub const AnnotationKind = enum {
+    insert,
+    delete,
+    focus,
+    blocked,
+    rewritten,
+};
+
+pub const Annotation = struct {
+    start: u32,
+    len: u32,
+    kind: AnnotationKind,
+    provenance: Provenance,
+    delta_index: ?u32 = null,
+    skip_index: ?u32 = null,
+};
+
+pub const BoundaryMarker = struct {
+    pub const Kind = enum {
+        elision,
+        eof,
+    };
+
+    line_index: u32,
+    kind: Kind,
+    before_line: u32 = 0,
+    after_line: u32 = 0,
+};
+
+pub const DocumentModel = struct {
+    text: []u8,
+    line_starts: []u32,
+    annotations: []Annotation,
+    boundaries: []BoundaryMarker,
+
+    pub fn deinit(document: *DocumentModel, allocator: Allocator) void {
+        allocator.free(document.text);
+        allocator.free(document.line_starts);
+        allocator.free(document.annotations);
+        allocator.free(document.boundaries);
+        document.* = undefined;
+    }
+
+    pub fn lineCount(document: DocumentModel) usize {
+        return document.line_starts.len;
     }
 };
 
-pub const PageLine = union(enum) {
-    header: []u8,
-    diff: struct {
-        operation: Edit.Operation,
-        text: []u8,
-    },
-    elision: ElisionLine,
-    eof_marker: void,
-    truncated: void,
+pub const SectionKind = enum {
+    overview,
+    focused_edit,
+    skipped_history,
+};
 
-    fn deinit(line: *PageLine, allocator: Allocator) void {
-        switch (line.*) {
-            .header => |text| allocator.free(text),
-            .diff => |diff| allocator.free(diff.text),
-            .elision, .eof_marker, .truncated => {},
+pub const Section = struct {
+    kind: SectionKind,
+    label: []u8,
+    provenance: ?Provenance,
+    document: DocumentModel,
+
+    pub fn deinit(section: *Section, allocator: Allocator) void {
+        allocator.free(section.label);
+        section.document.deinit(allocator);
+        section.* = undefined;
+    }
+};
+
+pub const Focus = struct {
+    text_index: u32,
+    delta_index: u32,
+    effective: dmp.DeltaOp,
+    state: dmp.HarmonizedOpState,
+};
+
+pub const StatusFacts = struct {
+    current_bytes: usize,
+    target_bytes: usize,
+    skipped_history_len: usize,
+    focused_delta_index: ?u32 = null,
+    focused_state: ?dmp.HarmonizedOpState = null,
+};
+
+pub const SessionInfo = struct {
+    current_revision: usize,
+    target_revision: usize,
+    relative_path: []u8,
+    document_name: []u8,
+
+    pub fn deinit(session: *SessionInfo, allocator: Allocator) void {
+        allocator.free(session.relative_path);
+        allocator.free(session.document_name);
+        session.* = undefined;
+    }
+};
+
+pub const InteractionState = struct {
+    prompt_kind: PromptKind,
+    actions: []const Action,
+    session: SessionInfo,
+    facts: StatusFacts,
+    focus: ?Focus,
+    sections: ArrayList(Section),
+
+    pub fn init(
+        allocator: Allocator,
+        prompt_kind: PromptKind,
+        revision: RevisionInfo,
+        target_bytes: usize,
+        tm: *const DeltaManager,
+        focus: ?PreviewDeltaOp,
+    ) !InteractionState {
+        return .{
+            .prompt_kind = prompt_kind,
+            .actions = switch (prompt_kind) {
+                .delta => &delta_actions,
+                .edit => &edit_actions,
+            },
+            .session = .{
+                .current_revision = revision.current_revision,
+                .target_revision = revision.target_revision,
+                .relative_path = try allocator.dupe(u8, revision.relative_path),
+                .document_name = try allocator.dupe(u8, std.fs.path.basename(revision.relative_path)),
+            },
+            .facts = .{
+                .current_bytes = tm.view().len,
+                .target_bytes = target_bytes,
+                .skipped_history_len = tm.skippedItems().len,
+                .focused_delta_index = if (focus) |preview| preview.delta_index else null,
+                .focused_state = if (focus) |preview| preview.op.state else null,
+            },
+            .focus = if (focus) |preview|
+                .{
+                    .text_index = preview.text_index,
+                    .delta_index = preview.delta_index,
+                    .effective = preview.op.effective,
+                    .state = preview.op.state,
+                }
+            else
+                null,
+            .sections = ArrayList(Section).init(allocator),
+        };
+    }
+
+    pub fn deinit(state: *InteractionState) void {
+        const allocator = state.sections.allocator;
+        for (state.sections.items) |*section| section.deinit(state.sections.allocator);
+        state.sections.deinit();
+        state.session.deinit(allocator);
+        state.* = undefined;
+    }
+ 
+    pub fn buildDelta(
+        allocator: Allocator,
+        tm: *const DeltaManager,
+        target_body: []const u8,
+        revision: RevisionInfo,
+        settings: ContextSettings,
+    ) !InteractionState {
+        const focus = try tm.previewNext();
+        var state = try InteractionState.init(
+            allocator,
+            .delta,
+            revision,
+            target_body.len,
+            tm,
+            focus,
+        );
+        errdefer state.deinit();
+
+        try state.appendOverviewSection(tm.view(), target_body, settings);
+        if (focus) |preview| {
+            try state.appendFocusedSection(tm.view(), tm.zdelta.?.insert_text, preview, settings, "next mutation");
         }
-        line.* = undefined;
+        try state.appendSkippedHistorySections(tm.skippedItems());
+        return state;
+    }
+
+    pub fn buildEdit(
+        allocator: Allocator,
+        tm: *const DeltaManager,
+        target_body: []const u8,
+        revision: RevisionInfo,
+        preview: PreviewDeltaOp,
+        settings: ContextSettings,
+    ) !InteractionState {
+        var state = try InteractionState.init(
+            allocator,
+            .edit,
+            revision,
+            target_body.len,
+            tm,
+            preview,
+        );
+        errdefer state.deinit();
+
+        try state.appendOverviewSection(tm.view(), target_body, settings);
+        const label = try std.fmt.allocPrint(
+            allocator,
+            "edit {d} [{s}]",
+            .{ preview.delta_index + 1, @tagName(preview.op.state) },
+        );
+        defer allocator.free(label);
+        try state.appendFocusedSection(tm.view(), tm.zdelta.?.insert_text, preview, settings, label);
+        try state.appendSkippedHistorySections(tm.skippedItems());
+        return state;
+    }
+
+    fn appendOverviewSection(
+        state: *InteractionState,
+        before: []const u8,
+        after: []const u8,
+        settings: ContextSettings,
+    ) !void {
+        var diff: dmp.Diff = .default;
+        defer diff.deinit(state.sections.allocator);
+        _ = try diff.diff(state.sections.allocator, before, after);
+
+        var ctx = try dmp.DiffContext.fromDiff(state.sections.allocator, diff);
+        defer ctx.deinit(state.sections.allocator);
+
+        try state.sections.append(.{
+            .kind = .overview,
+            .label = try state.sections.allocator.dupe(u8, "target revision"),
+            .provenance = .target_revision,
+            .document = try buildContextDocument(
+                state.sections.allocator,
+                ctx,
+                settings.whole_delta_context_lines,
+                .{
+                    .provenance = .target_revision,
+                },
+            ),
+        });
+    }
+
+    fn appendFocusedSection(
+        state: *InteractionState,
+        before: []const u8,
+        insert_source: []const u8,
+        preview: PreviewDeltaOp,
+        settings: ContextSettings,
+        label: []const u8,
+    ) !void {
+        const offset: usize = @intCast(preview.text_index);
+        const delete_len: usize = switch (preview.op.effective) {
+            .delete => |len| len,
+            .insert, .equal => 0,
+        };
+        const suffix_origin = offset + delete_len;
+        const snippet_start = lineStartForContext(before, offset, settings.edit_context_lines);
+        const snippet_end = lineEndForContext(before, suffix_origin, settings.edit_context_lines);
+        const prefix = before[snippet_start..offset];
+        const deleted = before[offset..suffix_origin];
+        const suffix = before[suffix_origin..snippet_end];
+        const inserted = switch (preview.op.effective) {
+            .insert => |span| insert_source[span.offset..][0..span.len],
+            .delete, .equal => "",
+        };
+
+        const excerpt_before = try join3(state.sections.allocator, prefix, deleted, suffix);
+        defer state.sections.allocator.free(excerpt_before);
+        const excerpt_after = try join3(state.sections.allocator, prefix, inserted, suffix);
+        defer state.sections.allocator.free(excerpt_after);
+
+        var diff: dmp.Diff = .default;
+        defer diff.deinit(state.sections.allocator);
+        _ = try diff.diff(state.sections.allocator, excerpt_before, excerpt_after);
+
+        var ctx = try dmp.DiffContext.fromDiff(state.sections.allocator, diff);
+        defer ctx.deinit(state.sections.allocator);
+
+        try state.sections.append(.{
+            .kind = .focused_edit,
+            .label = try state.sections.allocator.dupe(u8, label),
+            .provenance = .target_revision,
+            .document = try buildContextDocument(
+                state.sections.allocator,
+                ctx,
+                settings.edit_context_lines,
+                .{
+                    .provenance = .target_revision,
+                    .delta_index = preview.delta_index,
+                    .focused = true,
+                    .op_state = preview.op.state,
+                },
+            ),
+        });
+    }
+
+    fn appendSkippedHistorySections(
+        state: *InteractionState,
+        skipped_items: anytype,
+    ) !void {
+        for (skipped_items, 0..) |skipped, index| {
+            var document = try buildSkippedDocument(state.sections.allocator, skipped, @intCast(index));
+            errdefer document.deinit(state.sections.allocator);
+
+            try state.sections.append(.{
+                .kind = .skipped_history,
+                .label = try std.fmt.allocPrint(
+                    state.sections.allocator,
+                    "skipped {d} [{s}]",
+                    .{ index + 1, deltaOpTagName(skipped.op) },
+                ),
+                .provenance = .skipped_history,
+                .document = document,
+            });
+        }
     }
 };
 
-pub const ElisionLine = struct {
-    before: u32,
-    after: u32,
-};
-
-pub const Page = struct {
-    lines: ArrayList(PageLine),
-
-    pub fn init(allocator: Allocator) Page {
-        return .{ .lines = ArrayList(PageLine).init(allocator) };
-    }
-
-    pub fn deinit(page: *Page) void {
-        for (page.lines.items) |*line| line.deinit(page.lines.allocator);
-        page.lines.deinit();
-        page.* = undefined;
-    }
-};
-
-pub fn buildWholeDeltaPage(
+const DocumentBuilder = struct {
     allocator: Allocator,
-    before: []const u8,
-    after: []const u8,
-    name: []const u8,
-    settings: RenderSettings,
-) !Page {
-    var diff: dmp.Diff = .default;
-    defer diff.deinit(allocator);
-    _ = try diff.diff(allocator, before, after);
+    text: ArrayList(u8),
+    line_starts: ArrayList(u32),
+    annotations: ArrayList(Annotation),
+    boundaries: ArrayList(BoundaryMarker),
 
-    var ctx = try dmp.DiffContext.fromDiff(allocator, diff);
-    defer ctx.deinit(allocator);
-    return buildBoundedContextPage(
-        allocator,
-        ctx,
-        name,
-        settings.whole_delta_context_lines,
-        settings.bodyLineBudget(),
-    );
-}
+    fn init(allocator: Allocator) DocumentBuilder {
+        return .{
+            .allocator = allocator,
+            .text = ArrayList(u8).init(allocator),
+            .line_starts = ArrayList(u32).init(allocator),
+            .annotations = ArrayList(Annotation).init(allocator),
+            .boundaries = ArrayList(BoundaryMarker).init(allocator),
+        };
+    }
 
-pub fn buildEditPage(
-    allocator: Allocator,
-    before: []const u8,
-    at: u32,
-    op: dmp.DeltaOp,
-    insert_source: []const u8,
-    name: []const u8,
-    settings: RenderSettings,
-) !Page {
-    const offset: usize = @intCast(at);
-    const delete_len: usize = switch (op) {
-        .delete => |len| len,
-        .insert, .equal => 0,
-    };
-    const suffix_origin = offset + delete_len;
-    const snippet_start = lineStartForContext(before, offset, settings.edit_context_lines);
-    const snippet_end = lineEndForContext(before, suffix_origin, settings.edit_context_lines);
-    const prefix = before[snippet_start..offset];
-    const deleted = before[offset..suffix_origin];
-    const suffix = before[suffix_origin..snippet_end];
-    const inserted = switch (op) {
-        .insert => |span| insert_source[span.offset..][0..span.len],
-        .delete, .equal => "",
-    };
+    fn deinit(builder: *DocumentBuilder) void {
+        builder.text.deinit();
+        builder.line_starts.deinit();
+        builder.annotations.deinit();
+        builder.boundaries.deinit();
+        builder.* = undefined;
+    }
 
-    const excerpt_before = try join3(allocator, prefix, deleted, suffix);
-    defer allocator.free(excerpt_before);
-    const excerpt_after = try join3(allocator, prefix, inserted, suffix);
-    defer allocator.free(excerpt_after);
+    fn appendBoundary(builder: *DocumentBuilder, boundary: BoundaryMarker) !void {
+        try builder.boundaries.append(boundary);
+    }
 
-    var diff: dmp.Diff = .default;
-    defer diff.deinit(allocator);
-    _ = try diff.diff(allocator, excerpt_before, excerpt_after);
+    fn appendLine(
+        builder: *DocumentBuilder,
+        line: []const u8,
+        meta: ?AppendMeta,
+    ) !void {
+        const start: u32 = @intCast(builder.text.items.len);
+        try builder.line_starts.append(start);
+        try builder.text.appendSlice(line);
 
-    var ctx = try dmp.DiffContext.fromDiff(allocator, diff);
-    defer ctx.deinit(allocator);
-    return buildBoundedContextPage(
-        allocator,
-        ctx,
-        name,
-        settings.edit_context_lines,
-        settings.bodyLineBudget(),
-    );
-}
+        if (meta) |owned| {
+            if (owned.kind) |kind| {
+                try builder.annotations.append(.{
+                    .start = start,
+                    .len = @intCast(line.len),
+                    .kind = kind,
+                    .provenance = owned.provenance,
+                    .delta_index = owned.delta_index,
+                    .skip_index = owned.skip_index,
+                });
+            }
+            if (owned.focused and line.len != 0) {
+                try builder.annotations.append(.{
+                    .start = start,
+                    .len = @intCast(line.len),
+                    .kind = .focus,
+                    .provenance = owned.provenance,
+                    .delta_index = owned.delta_index,
+                    .skip_index = owned.skip_index,
+                });
+            }
+            if (owned.op_state) |state| switch (state) {
+                .blocked => try builder.annotations.append(.{
+                    .start = start,
+                    .len = @intCast(line.len),
+                    .kind = .blocked,
+                    .provenance = owned.provenance,
+                    .delta_index = owned.delta_index,
+                    .skip_index = owned.skip_index,
+                }),
+                .rewritten => try builder.annotations.append(.{
+                    .start = start,
+                    .len = @intCast(line.len),
+                    .kind = .rewritten,
+                    .provenance = owned.provenance,
+                    .delta_index = owned.delta_index,
+                    .skip_index = owned.skip_index,
+                }),
+                .unchanged => {},
+            };
+        }
+    }
 
-fn buildBoundedContextPage(
+    fn finish(builder: *DocumentBuilder) !DocumentModel {
+        return .{
+            .text = try builder.text.toOwnedSlice(),
+            .line_starts = try builder.line_starts.toOwnedSlice(),
+            .annotations = try builder.annotations.toOwnedSlice(),
+            .boundaries = try builder.boundaries.toOwnedSlice(),
+        };
+    }
+};
+
+const AppendMeta = struct {
+    provenance: Provenance,
+    kind: ?AnnotationKind = null,
+    delta_index: ?u32 = null,
+    skip_index: ?u32 = null,
+    focused: bool = false,
+    op_state: ?dmp.HarmonizedOpState = null,
+};
+
+fn buildContextDocument(
     allocator: Allocator,
     ctx: DiffContext,
-    name: []const u8,
     show_lines: usize,
-    max_lines: usize,
-) !Page {
-    var page = Page.init(allocator);
-    errdefer page.deinit();
-
-    try appendHeaderLine(&page, name);
+    meta: AppendMeta,
+) !DocumentModel {
+    var builder = DocumentBuilder.init(allocator);
+    errdefer builder.deinit();
 
     for (ctx.items.items, 0..) |item, index| {
         if (item.edit.operation != .equal) {
-            try appendEditLines(&page, item.edit, null, null);
+            try appendEditLines(&builder, item.edit, null, null, metaForEdit(meta, item.edit.operation));
             continue;
         }
 
         const line_count = countDisplayLines(item.edit.text);
         if (line_count == 0 or line_count <= show_lines) {
-            try appendEditLines(&page, item.edit, null, null);
+            try appendEditLines(&builder, item.edit, null, null, null);
             continue;
         }
 
@@ -156,13 +487,13 @@ fn buildBoundedContextPage(
         const keep_tail = if (is_first) show_lines else if (is_last) 0 else show_lines;
 
         if (line_count <= keep_head + keep_tail) {
-            try appendEditLines(&page, item.edit, null, null);
+            try appendEditLines(&builder, item.edit, null, null, null);
             continue;
         }
 
         if (keep_head != 0) {
             const head_end = byteOffsetAfterLines(item.edit.text, keep_head);
-            try appendEditLines(&page, item.edit, 0, head_end);
+            try appendEditLines(&builder, item.edit, 0, head_end, null);
         }
 
         const elision_line_offset = if (keep_head != 0 and keep_tail == 0)
@@ -170,48 +501,72 @@ fn buildBoundedContextPage(
         else
             line_count - keep_tail;
         if (is_last and keep_tail == 0) {
-            try page.lines.append(.{ .eof_marker = {} });
+            try builder.appendBoundary(.{
+                .line_index = @intCast(builder.line_starts.items.len),
+                .kind = .eof,
+            });
         } else {
-            try page.lines.append(.{
-                .elision = lineNumbersAtOffset(item, elision_line_offset),
+            const numbers = lineNumbersAtOffset(item, elision_line_offset);
+            try builder.appendBoundary(.{
+                .line_index = @intCast(builder.line_starts.items.len),
+                .kind = .elision,
+                .before_line = numbers.before,
+                .after_line = numbers.after,
             });
         }
 
         if (keep_tail != 0) {
             const tail_start = byteOffsetAfterLines(item.edit.text, line_count - keep_tail);
-            try appendEditLines(&page, item.edit, tail_start, null);
+            try appendEditLines(&builder, item.edit, tail_start, null, null);
         }
     }
 
-    try truncatePage(&page, max_lines);
-    return page;
+    return builder.finish();
 }
 
-fn truncatePage(page: *Page, max_lines: usize) !void {
-    if (max_lines == 0) {
-        for (page.lines.items) |*line| line.deinit(page.lines.allocator);
-        page.lines.clearRetainingCapacity();
-        return;
+fn buildSkippedDocument(
+    allocator: Allocator,
+    skipped: anytype,
+    skip_index: u32,
+) !DocumentModel {
+    var builder = DocumentBuilder.init(allocator);
+    errdefer builder.deinit();
+
+    var cursor: usize = 0;
+    const kind = switch (skipped.op) {
+        .insert => AnnotationKind.insert,
+        .delete => AnnotationKind.delete,
+        .equal => null,
+    };
+    while (nextDisplayLine(skipped.text, cursor)) |part| {
+        try builder.appendLine(part.line, .{
+            .provenance = .skipped_history,
+            .kind = kind,
+            .skip_index = skip_index,
+        });
+        cursor = part.next;
     }
-    if (page.lines.items.len <= max_lines) return;
 
-    const keep = if (max_lines > 0) max_lines - 1 else 0;
-    for (page.lines.items[keep..]) |*line| line.deinit(page.lines.allocator);
-    page.lines.shrinkRetainingCapacity(keep);
-    try page.lines.append(.{ .truncated = {} });
+    return builder.finish();
 }
 
-fn appendHeaderLine(page: *Page, name: []const u8) !void {
-    const text = try std.fmt.allocPrint(page.lines.allocator, "diff -- {s}", .{name});
-    errdefer page.lines.allocator.free(text);
-    try page.lines.append(.{ .header = text });
+fn metaForEdit(base: AppendMeta, operation: Edit.Operation) ?AppendMeta {
+    const kind = switch (operation) {
+        .insert => AnnotationKind.insert,
+        .delete => AnnotationKind.delete,
+        .equal => return null,
+    };
+    var meta = base;
+    meta.kind = kind;
+    return meta;
 }
 
 fn appendEditLines(
-    page: *Page,
+    builder: *DocumentBuilder,
     edit: Edit,
     start_offset_opt: ?usize,
     end_offset_opt: ?usize,
+    meta: ?AppendMeta,
 ) !void {
     const text_start = start_offset_opt orelse 0;
     const text_end = end_offset_opt orelse edit.text.len;
@@ -219,14 +574,7 @@ fn appendEditLines(
 
     var cursor: usize = 0;
     while (nextDisplayLine(text, cursor)) |part| {
-        const owned = try page.lines.allocator.dupe(u8, part.line);
-        errdefer page.lines.allocator.free(owned);
-        try page.lines.append(.{
-            .diff = .{
-                .operation = edit.operation,
-                .text = owned,
-            },
-        });
+        try builder.appendLine(part.line, meta);
         cursor = part.next;
     }
 }
@@ -297,7 +645,7 @@ fn byteOffsetAfterLines(text: []const u8, lines: usize) usize {
     return cursor;
 }
 
-fn lineNumbersAtOffset(item: DiffContext.EditContext, line_offset: usize) ElisionLine {
+fn lineNumbersAtOffset(item: DiffContext.EditContext, line_offset: usize) struct { before: u32, after: u32 } {
     const offset: u32 = @intCast(line_offset);
     return .{
         .before = item.pre_start + offset,
@@ -305,75 +653,154 @@ fn lineNumbersAtOffset(item: DiffContext.EditContext, line_offset: usize) Elisio
     };
 }
 
-test "whole delta page truncates to the configured budget" {
-    const allocator = std.testing.allocator;
-    var page = try buildWholeDeltaPage(
-        allocator,
-        "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\n",
-        "alpha\nbeta\ngamma changed\ndelta\nepsilon\nzeta\neta\n",
-        "sample",
-        .{
-            .page_lines = 6,
-            .prompt_lines = 1,
-            .whole_delta_context_lines = 2,
-        },
-    );
-    defer page.deinit();
-
-    try std.testing.expectEqual(@as(usize, 5), page.lines.items.len);
-    try std.testing.expectEqualStrings("diff -- sample", page.lines.items[0].header);
-    try std.testing.expectEqual(.truncated, page.lines.items[4]);
+fn deltaOpTagName(op: dmp.DeltaOp) []const u8 {
+    return switch (op) {
+        .insert => "insert",
+        .delete => "delete",
+        .equal => "equal",
+    };
 }
 
-test "whole delta page represents eof marker explicitly" {
-    const allocator = std.testing.allocator;
-    var page = try buildWholeDeltaPage(
-        allocator,
-        "before\none\ntwo\nthree\nfour\n",
-        "one\ntwo\nthree\nfour\n",
-        "sample",
-        .{
-            .page_lines = 10,
-            .prompt_lines = 1,
-            .whole_delta_context_lines = 2,
-        },
-    );
-    defer page.deinit();
+const delta_actions = [_]Action{
+    .apply,
+    .skip,
+    .split,
+    .quit,
+    .help,
+};
 
-    var found_eof = false;
-    for (page.lines.items) |line| {
-        if (line == .eof_marker) found_eof = true;
-    }
-    try std.testing.expect(found_eof);
+const edit_actions = [_]Action{
+    .apply,
+    .skip,
+    .apply_rest,
+    .skip_rest,
+    .quit,
+    .help,
+};
+
+test "delta interaction state exposes prompt facts and multiple sections" {
+    const allocator = std.testing.allocator;
+    const before = "alpha\nbeta\ngamma\ndelta\n";
+    const after = "alpha\nbeta\ngamma changed\ndelta\nepsilon\n";
+
+    var diff: dmp.Diff = .default;
+    defer diff.deinit(allocator);
+    _ = try diff.diff(allocator, before, after);
+
+    const encoded = try zdelta.encode(allocator, diff.edits, .b);
+    defer allocator.free(encoded);
+
+    const owned_delta = try allocator.create(dmp.ZDelta);
+    owned_delta.* = try dmp.decode(allocator, encoded);
+    var tm = try DeltaManager.initText(allocator, before);
+    defer tm.deinit();
+    try tm.addDelta(owned_delta);
+    _ = try tm.skipNext();
+
+    var state = try InteractionState.buildDelta(
+        allocator,
+        &tm,
+        after,
+        .{
+            .current_revision = 8,
+            .target_revision = 9,
+            .relative_path = "corpus/diff/sample.wiki",
+        },
+        .{},
+    );
+    defer state.deinit();
+
+    try std.testing.expectEqual(.delta, state.prompt_kind);
+    try std.testing.expect(state.sections.items.len >= 2);
+    try std.testing.expectEqual(@as(usize, 1), state.facts.skipped_history_len);
+    try std.testing.expectEqual(@as(?u32, 1), state.facts.focused_delta_index);
 }
 
-test "edit page includes inserted text in a diff line" {
+test "edit interaction state exposes focused provenance" {
     const allocator = std.testing.allocator;
-    var page = try buildEditPage(
-        allocator,
-        "alpha\nbeta\ngamma\n",
-        6,
-        .{ .insert = .{ .offset = 0, .len = 6 } },
-        "BRAVO\n",
-        "edit",
-        .{
-            .page_lines = 10,
-            .prompt_lines = 2,
-            .edit_context_lines = 1,
-        },
-    );
-    defer page.deinit();
+    const before = "alpha\nbeta\ngamma\ndelta\n";
+    const after = "alpha\nbeta\ngamma changed\ndelta\nepsilon\n";
 
-    var found_insert = false;
-    for (page.lines.items) |line| {
-        switch (line) {
-            .diff => |diff| {
-                if (diff.operation == .insert and std.mem.containsAtLeast(u8, diff.text, 1, "BRAVO")) {
-                    found_insert = true;
-                }
-            },
-            else => {},
+    var diff: dmp.Diff = .default;
+    defer diff.deinit(allocator);
+    _ = try diff.diff(allocator, before, after);
+
+    const encoded = try zdelta.encode(allocator, diff.edits, .b);
+    defer allocator.free(encoded);
+
+    const owned_delta = try allocator.create(dmp.ZDelta);
+    owned_delta.* = try dmp.decode(allocator, encoded);
+    var tm = try DeltaManager.initText(allocator, before);
+    defer tm.deinit();
+    try tm.addDelta(owned_delta);
+
+    const preview = (try tm.previewNext()).?;
+    var state = try InteractionState.buildEdit(
+        allocator,
+        &tm,
+        after,
+        .{
+            .current_revision = 8,
+            .target_revision = 9,
+            .relative_path = "corpus/diff/sample.wiki",
+        },
+        preview,
+        .{},
+    );
+    defer state.deinit();
+
+    try std.testing.expectEqual(.edit, state.prompt_kind);
+    try std.testing.expectEqual(preview.delta_index, state.focus.?.delta_index);
+    try std.testing.expectEqual(preview.op.state, state.facts.focused_state.?);
+
+    var found_focus = false;
+    for (state.sections.items) |section| {
+        if (section.kind != .focused_edit) continue;
+        for (section.document.annotations) |annotation| {
+            if (annotation.kind == .focus and annotation.provenance == .target_revision) {
+                found_focus = true;
+            }
         }
     }
-    try std.testing.expect(found_insert);
+    try std.testing.expect(found_focus);
+}
+
+test "controller boundaries are semantic markers, not embedded strings" {
+    const allocator = std.testing.allocator;
+    const before = "before\none\ntwo\nthree\nfour\n";
+    const after = "one\ntwo\nthree\nfour\n";
+
+    var diff: dmp.Diff = .default;
+    defer diff.deinit(allocator);
+    _ = try diff.diff(allocator, before, after);
+
+    const encoded = try zdelta.encode(allocator, diff.edits, .b);
+    defer allocator.free(encoded);
+
+    const owned_delta = try allocator.create(dmp.ZDelta);
+    owned_delta.* = try dmp.decode(allocator, encoded);
+    var tm = try DeltaManager.initText(allocator, before);
+    defer tm.deinit();
+    try tm.addDelta(owned_delta);
+
+    var state = try InteractionState.buildDelta(
+        allocator,
+        &tm,
+        after,
+        .{
+            .current_revision = 1,
+            .target_revision = 2,
+            .relative_path = "corpus/diff/sample.wiki",
+        },
+        .{},
+    );
+    defer state.deinit();
+
+    var found_boundary = false;
+    for (state.sections.items) |section| {
+        if (section.kind != .overview) continue;
+        found_boundary = section.document.boundaries.len != 0;
+        try std.testing.expect(!std.mem.containsAtLeast(u8, section.document.text, 1, "..."));
+    }
+    try std.testing.expect(found_boundary);
 }
