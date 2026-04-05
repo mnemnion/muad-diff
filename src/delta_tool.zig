@@ -155,7 +155,7 @@ const PromptSource = struct {
         return command;
     }
 
-    fn readCursorAnchor(self: *PromptSource, writer: *std.Io.Writer) !paint_mod.CursorAnchor {
+    pub fn readCursorAnchor(self: *PromptSource, writer: *std.Io.Writer) !paint_mod.CursorAnchor {
         switch (self.input) {
             .live => {},
             .replay => return error.CursorAnchorUnavailable,
@@ -184,7 +184,7 @@ const PromptSource = struct {
         return .{ .row = row, .col = col };
     }
 
-    fn readTerminalSize(self: *PromptSource, writer: *std.Io.Writer) !paint_mod.TerminalSize {
+    pub fn readTerminalSize(self: *PromptSource, writer: *std.Io.Writer) !paint_mod.TerminalSize {
         switch (self.input) {
             .live => {},
             .replay => return error.TerminalSizeUnavailable,
@@ -329,30 +329,6 @@ const RunRecorder = struct {
         try recorder.recordCommand('q');
     }
 };
-
-fn makeTerminalProbe(prompt: *PromptSource) paint_mod.TerminalProbe {
-    return .{
-        .context = @ptrCast(prompt),
-        .read_cursor_anchor = promptReadCursorAnchor,
-        .read_terminal_size = promptReadTerminalSize,
-    };
-}
-
-fn promptReadCursorAnchor(
-    context: *anyopaque,
-    writer: *std.Io.Writer,
-) anyerror!paint_mod.CursorAnchor {
-    const prompt: *PromptSource = @ptrCast(@alignCast(context));
-    return prompt.readCursorAnchor(writer);
-}
-
-fn promptReadTerminalSize(
-    context: *anyopaque,
-    writer: *std.Io.Writer,
-) anyerror!paint_mod.TerminalSize {
-    const prompt: *PromptSource = @ptrCast(@alignCast(context));
-    return prompt.readTerminalSize(writer);
-}
 
 const OwnedSessionSeed = struct {
     steps: []zdelta_session.SessionStep,
@@ -524,16 +500,13 @@ fn run(
         else
             .{ .live = stdin },
     };
+    const prompt_probe = paint_mod.TerminalProbe(*PromptSource){ .context = &prompt };
     const raw_guard = if (parsed_args.replay_script == null)
         try RawTerminalGuard.init(stdin)
     else
         RawTerminalGuard{};
     defer raw_guard.deinit();
     painter.setRawMode(raw_guard.isActive());
-    const terminal_probe: ?paint_mod.TerminalProbe = if (painter.supportsInPlaceRepaint())
-        makeTerminalProbe(&prompt)
-    else
-        null;
 
     var session = try zdelta_session.ReviewSession.init(allocator, .{
         .baseline = .{
@@ -555,7 +528,7 @@ fn run(
 
         var interaction_state = try zdelta_context.InteractionState.build(allocator, snapshot, settings);
         defer interaction_state.deinit();
-        try painter.renderPromptFrame(terminal_probe, interaction_state);
+        try painter.renderPromptFrame(*PromptSource, prompt_probe, interaction_state);
 
         while (true) {
             const input = (try prompt.readInput(snapshot.prompt_kind, stdout_writer, painter.echoesAcceptedCommands())) orelse {
@@ -563,7 +536,7 @@ fn run(
                 break :outer;
             };
             if (painter.supportsInPlaceRepaint() and painter.previewIntent(&interaction_state, input.intent)) {
-                try painter.renderPromptFrame(terminal_probe, interaction_state);
+                try painter.renderPromptFrame(*PromptSource, prompt_probe, interaction_state);
             }
             if (input.canonical) |byte| {
                 if (recorder) |*owned| try owned.recordCommand(byte);
@@ -574,6 +547,14 @@ fn run(
             try painter.writeDiagnostics(outcome.diagnostics);
             if (outcome.help_prompt) |prompt_kind| {
                 try painter.writePromptHelp(prompt_kind);
+                if (painter.supportsInPlaceRepaint()) {
+                    _ = (try prompt.readLiveByte()) orelse {
+                        session.quitEarly();
+                        break :outer;
+                    };
+                    try painter.dismissPromptHelp();
+                    try painter.renderPromptFrame(*PromptSource, prompt_probe, interaction_state);
+                }
                 continue;
             }
             break;

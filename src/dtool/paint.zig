@@ -15,19 +15,19 @@ pub const TerminalSize = struct {
     cols: u16,
 };
 
-pub const TerminalProbe = struct {
-    context: *anyopaque,
-    read_cursor_anchor: *const fn (*anyopaque, *std.Io.Writer) anyerror!CursorAnchor,
-    read_terminal_size: *const fn (*anyopaque, *std.Io.Writer) anyerror!TerminalSize,
+pub fn TerminalProbe(comptime T: type) type {
+    return struct {
+        context: T,
 
-    pub fn readCursorAnchor(probe: TerminalProbe, writer: *std.Io.Writer) !CursorAnchor {
-        return probe.read_cursor_anchor(probe.context, writer);
-    }
+        pub fn readCursorAnchor(probe: @This(), writer: *std.Io.Writer) !CursorAnchor {
+            return probe.context.readCursorAnchor(writer);
+        }
 
-    pub fn readTerminalSize(probe: TerminalProbe, writer: *std.Io.Writer) !TerminalSize {
-        return probe.read_terminal_size(probe.context, writer);
-    }
-};
+        pub fn readTerminalSize(probe: @This(), writer: *std.Io.Writer) !TerminalSize {
+            return probe.context.readTerminalSize(writer);
+        }
+    };
+}
 
 pub const Settings = struct {
     raw_mode: bool,
@@ -116,10 +116,12 @@ pub const Painter = struct {
 
     pub fn renderPromptFrame(
         painter: *Painter,
-        probe: ?TerminalProbe,
+        comptime T: type,
+        probe: TerminalProbe(T),
         state: zdelta_context.InteractionState,
     ) !void {
         try painter.render_controller.renderPromptFrame(
+            T,
             painter.output,
             painter.stdout_writer,
             probe,
@@ -142,11 +144,24 @@ pub const Painter = struct {
         painter: *Painter,
         prompt_kind: zdelta_session.SessionPrompt,
     ) !void {
-        switch (prompt_kind) {
-            .delta => try writeDeltaHelp(painter.output, painter.stdout_writer),
-            .edit => try writeEditHelp(painter.output, painter.stdout_writer),
+        if (painter.supportsInPlaceRepaint()) {
+            try painter.output.writeControl(painter.stdout_writer, ALT_SCREEN_ON);
+            try painter.output.writeControl(painter.stdout_writer, CLEAR_SCREEN);
+            try painter.output.writeControl(painter.stdout_writer, CURSOR_HOME);
+            try writeHelpBody(painter.output, painter.stdout_writer, prompt_kind);
+            try painter.output.writeText(painter.stdout_writer, "\nPress any key to return.\n");
+            try painter.stdout_writer.flush();
+            return;
         }
+
+        try writeHelpBody(painter.output, painter.stdout_writer, prompt_kind);
         try painter.output.writeText(painter.stdout_writer, promptText(prompt_kind));
+        try painter.stdout_writer.flush();
+    }
+
+    pub fn dismissPromptHelp(painter: *Painter) !void {
+        if (!painter.supportsInPlaceRepaint()) return;
+        try painter.output.writeControl(painter.stdout_writer, ALT_SCREEN_OFF);
         try painter.stdout_writer.flush();
     }
 
@@ -206,6 +221,17 @@ pub const Painter = struct {
     }
 };
 
+fn writeHelpBody(
+    output: OutputClient,
+    writer: *std.Io.Writer,
+    prompt_kind: zdelta_session.SessionPrompt,
+) !void {
+    switch (prompt_kind) {
+        .delta => try writeDeltaHelp(output, writer),
+        .edit => try writeEditHelp(output, writer),
+    }
+}
+
 const plain_diff_decorations: dmp.DiffDecorations = .{
     .delete_start = "[-",
     .delete_end = "-]",
@@ -215,6 +241,10 @@ const plain_diff_decorations: dmp.DiffDecorations = .{
 
 const ESC = "\x1b";
 const CSI = ESC ++ "[";
+const ALT_SCREEN_ON = CSI ++ "?1049h";
+const ALT_SCREEN_OFF = CSI ++ "?1049l";
+const CLEAR_SCREEN = CSI ++ "2J";
+const CURSOR_HOME = CSI ++ "H";
 const ERASE_TO_SCREEN_END = CSI ++ "0J";
 const SYNC_ON = CSI ++ "?2026h";
 const SYNC_SEND = CSI ++ "?2026l";
@@ -295,9 +325,10 @@ const LiveRenderController = struct {
     // its append-only transcript shape for tests and captured logs.
     fn renderPromptFrame(
         controller: *LiveRenderController,
+        comptime T: type,
         output: OutputClient,
         writer: *std.Io.Writer,
-        probe: ?TerminalProbe,
+        probe: TerminalProbe(T),
         state: zdelta_context.InteractionState,
         use_color: bool,
     ) !void {
@@ -306,10 +337,9 @@ const LiveRenderController = struct {
             return;
         }
 
-        const owned_probe = probe orelse return error.LiveRenderProbeMissing;
         if (controller.anchor == null) {
-            const start = try owned_probe.readCursorAnchor(writer);
-            const size = try owned_probe.readTerminalSize(writer);
+            const start = try probe.readCursorAnchor(writer);
+            const size = try probe.readTerminalSize(writer);
 
             var frame_buffer: std.Io.Writer.Allocating = .init(output.allocator);
             defer frame_buffer.deinit();
@@ -917,18 +947,14 @@ test "raw repaint frame uses synchronized updates" {
         .stdout_supports_color = false,
         .use_pager = false,
     });
-    const probe = TerminalProbe{
-        .context = undefined,
-        .read_cursor_anchor = testReadCursorAnchor,
-        .read_terminal_size = testReadTerminalSize,
-    };
+    const probe = TerminalProbe(TestTerminalProbe){ .context = .{} };
 
-    try painter.renderPromptFrame(probe, state);
+    try painter.renderPromptFrame(TestTerminalProbe, probe, state);
     const first = try allocator.dupe(u8, stdout_buffer.written());
     defer allocator.free(first);
 
     stdout_buffer.clearRetainingCapacity();
-    try painter.renderPromptFrame(probe, state);
+    try painter.renderPromptFrame(TestTerminalProbe, probe, state);
     const second = stdout_buffer.written();
 
     try std.testing.expect(!std.mem.containsAtLeast(u8, first, 1, SYNC_ON));
@@ -938,13 +964,15 @@ test "raw repaint frame uses synchronized updates" {
     try std.testing.expect(std.mem.containsAtLeast(u8, second, 1, "--- target revision ---"));
 }
 
-fn testReadCursorAnchor(_: *anyopaque, _: *std.Io.Writer) anyerror!CursorAnchor {
-    return .{ .row = 1, .col = 1 };
-}
+const TestTerminalProbe = struct {
+    fn readCursorAnchor(_: TestTerminalProbe, _: *std.Io.Writer) !CursorAnchor {
+        return .{ .row = 1, .col = 1 };
+    }
 
-fn testReadTerminalSize(_: *anyopaque, _: *std.Io.Writer) anyerror!TerminalSize {
-    return .{ .rows = 40, .cols = 120 };
-}
+    fn readTerminalSize(_: TestTerminalProbe, _: *std.Io.Writer) !TerminalSize {
+        return .{ .rows = 40, .cols = 120 };
+    }
+};
 
 test "render document ansi uses obelizmo for annotated lines" {
     const allocator = std.testing.allocator;
@@ -996,6 +1024,27 @@ test "writer helpers split stdout and stderr policy" {
 
     try std.testing.expect(std.mem.containsAtLeast(u8, stdout_buffer.written(), 1, "Interactive zdelta inspector"));
     try std.testing.expect(std.mem.containsAtLeast(u8, stderr_buffer.written(), 1, "Try --help for more information."));
+}
+
+test "raw prompt help uses alternate screen" {
+    const allocator = std.testing.allocator;
+    var stdout_buffer: std.Io.Writer.Allocating = .init(allocator);
+    defer stdout_buffer.deinit();
+    var stderr_buffer: std.Io.Writer.Allocating = .init(allocator);
+    defer stderr_buffer.deinit();
+
+    var painter = Painter.init(allocator, &stdout_buffer.writer, &stderr_buffer.writer, .{
+        .raw_mode = true,
+        .stdout_supports_color = false,
+        .use_pager = false,
+    });
+    try painter.writePromptHelp(.delta);
+    try painter.dismissPromptHelp();
+
+    const written = stdout_buffer.written();
+    try std.testing.expect(std.mem.containsAtLeast(u8, written, 1, ALT_SCREEN_ON));
+    try std.testing.expect(std.mem.containsAtLeast(u8, written, 1, ALT_SCREEN_OFF));
+    try std.testing.expect(std.mem.containsAtLeast(u8, written, 1, "Press any key to return."));
 }
 
 const std = @import("std");
