@@ -8,7 +8,8 @@ This library has a number of affordances in a mature state:
   flexibility tolerated as to whether the document has also changed.
   This is relevant here as a reference, but not as a working surface.
 - Deltas.  These are compressed Diffs, effectively, and must be applied
-  to the exact before text of the diff to be effective.
+  to the exact before text of the diff to be effective.  This is where
+  the action is.
 
 Whole application of deltas is a solved problem.  Partial application of
 deltas is a barely-attempted and very difficult problem.
@@ -33,7 +34,51 @@ invalidated must be made again.
 
 ## Data Model
 
-We call a skipped edit a reject.  Each reject partitions the future.
-There is the moved, and the no longer possible.  The moved, we model
-with an interval tree: an edit which remains possible is told where
-it has to move in order to apply.
+We call a skipped edit a `skip`.  Each `skip` partitions the future.
+Deltas are a series of instructions ordered from beginning to end of
+the before text: thus a skip affects two regions: the `reject` and
+the `remainder`.
+
+Skips come in two flavors: a skipped insert we call a `decline`,
+and a skipped delete we call a `rescue.`  A decline's reject is an
+`evacuation`.  A rescue's reject is an `imposition`.  These regions
+together we call `anomalies`.
+
+We will have an additional condition, once the mechanism is in place.
+We will be able to pair the combination of a delete in one place, with
+an insert in another, and deem these semantically the same, but in
+different locations.  This, we call a `translation`.  Translations will
+not be added before the other mechanisms are solid.
+
+The remaining regions we call `pristine`.  This does not mean that they
+exist where the deltas expect them to, but merely that a single number,
+updated with each edit, will suffice to find the application of an edit
+wholly contained in a pristine region.  This number, which may be zero,
+we call the `shift`.
+
+Here we must note a fundamental distinction between deletes and inserts,
+namely: at the time of application, deletes comprise a region, while
+inserts comprise only a position.
+
+The situation of an insert is thus simpler, but not simplistic: at the
+moment of insertion, the edit has a definite location, but no _width_,
+and we may posit that, in making the decision to accept or reject the
+insert, those positions between two regions may call for different
+display from those wholly enclosed within one.
+
+The number and nature of regions crossed by a single edit is unbounded,
+such that every variation cannot be named.  But certain ones must be:
+we call an edit lying wholly within a pristine region `pure`, one rooted
+on both sides in pristine regions, but crossing one anomoly, we call
+`overlaid`, one with a foot in each status is `clipped`.
+
+To apply a delete which overlays an evacuation is well-formed: simply,
+we delete such text as still exists, and similarly, if skipped, such
+text as still remains becomes rescued.  An insertion wholly within an
+evacuation has no effect if declined, and ramifies matters if applied,
+but is similarly well-formed as its inverse.
+
+A delete overlaying an imposition is more complex, as the user may wish
+to apply the delete wholly, that is, to include the rescue, or in part,
+deleting that which was but leaving that which wasn't but now is.
+

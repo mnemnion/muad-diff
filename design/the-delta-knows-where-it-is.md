@@ -1,27 +1,27 @@
 # Remember This
 
 The delta knows where it is at all times.  It knows this because it
-knows where it applies and where it does not.  By subtracting where
-it applies from where it does not, or where it does not from where it
-applies, whichever looks more principled in the current subsystem, it
-attains an effective location.  The application logic uses effective
-locations to generate corrective rewrites to drive the delta from a
-representation where it is merely described to a representation where it
-can actually be used, arriving at a position where it was not originally
-stored, but is now.  Consequently, the location where it is is no longer
-the location where it was. So it follows that the location where it was
-is the location where it is not.
+knows where it applies and where it does not.  By subtracting where it
+applies from where it does not, or where it doesn't from where it does,
+whichever looks more principled in the current subsystem, it attains an
+effective location.  The application logic uses effective locations to
+generate corrective rewrites to drive the delta from a representation
+where it is merely described to a representation where it can actually
+be used, arriving at a position where it was not originally stored,
+but is now.  Consequently, the location where it is is no longer the
+location where it was. So it follows that the location where it was is
+the location where it is not.
 
 In the event that the location where it is now is not the location where
 the corpus insisted it ought to have been, the system has acquired
 harmonization.  Harmonization being the difference between where the
 raw delta says the change is and where the reviewed text has made that
-change politically possible.  If the harmonization is con- sidered to be
+change politically possible.  If the harmonization is considered to be
 a significant factor, the partial application logic will allow for it,
 provided that the delta remembers where it started, where it currently
 is, and which skipped edit ruined everything.
 
-Due to the harmonization modifying some of the infor- mation obtained
+Due to the harmonization modifying some of the information obtained
 from the raw instruction stream, the delta is not entirely sure where
 it is in the original sense.  However, the thought process of the
 delta is that it is very sure where it is effectively, and it knows

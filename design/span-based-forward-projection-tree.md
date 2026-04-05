@@ -1,9 +1,20 @@
 # Plan: Replace Replay Harmonization with a Span-Based Forward Projection Tree
 
 ## Summary
-Keep `TextManager.skipped` as the canonical permanent history, but add a compiled forward projection tree that maps future-delta spans onto the current realized text. The tree is keyed by half-open spans, stores either a continuous coordinate shift or an unmapped gap, and carries all causal skip ids for each segment. `addDelta` should stop replaying all skips against the incoming delta and instead harmonize each incoming op by querying this projection tree. An op is mechanically rewritable only if its full span maps through one continuous translated segment; if it crosses a gap or multiple segments, it becomes unresolved and keeps the touched skip ids as provenance.
+
+Keep `TextManager.skipped` as the canonical permanent history, but add
+a compiled forward projection tree that maps future-delta spans onto
+the current realized text. The tree is keyed by half-open spans, stores
+either a continuous coordinate shift or an unmapped gap, and carries all
+causal skip ids for each segment. `addDelta` should stop replaying all
+skips against the incoming delta and instead harmonize each incoming op
+by querying this projection tree. An op is mechanically rewritable only
+if its full span maps through one continuous translated segment; if it
+crosses a gap or multiple segments, it becomes unresolved and keeps the
+touched skip ids as provenance.
 
 ## Key Changes
+
 - Add a compiled projection structure owned by `TextManager`.
   - It is span-based, forward-only, and append-updated when `skipNext()` happens.
   - It maps from the counterfactual/future coordinate space that later deltas use into the current realized text coordinate space.
