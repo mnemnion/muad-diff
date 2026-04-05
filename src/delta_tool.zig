@@ -1,10 +1,5 @@
 //! Specialized interactive zdelta corpus tool.
 
-const ESC = "\x1b";
-const CSI = ESC ++ "[";
-const CURSOR_POSITION_REQUEST = CSI ++ "6n";
-const TERMINAL_SIZE_REQUEST = CSI ++ "18t";
-
 const RunResult = struct {
     stdout: []u8,
     stderr: []u8,
@@ -24,16 +19,6 @@ const RunResult = struct {
     }
 };
 
-const StdinSource = union(enum) {
-    file: std.fs.File,
-    bytes: []const u8,
-};
-
-const PromptInput = union(enum) {
-    live: StdinSource,
-    replay: []const u8,
-};
-
 const RunOptions = struct {
     use_pager: bool,
     runs_path: ?[]const u8 = corpus_contract.default_runs_path,
@@ -46,33 +31,20 @@ const ParsedArgs = struct {
     end_revision_arg: []const u8,
 };
 
-const PromptCommand = struct {
-    intent: zdelta_session.SessionIntent,
-    canonical: ?u8,
-};
+/// Set terminal raw, with fallbacks if something goes hinky.
+const RawTerminal = struct {
+    file: ?std.fs.File,
+    original_state: ?std.posix.termios,
 
-const ParsedPrompt = struct {
-    intent: zdelta_session.SessionIntent,
-    canonical: u8,
-};
+    pub const dummy: RawTerminal = .{ .file = null, .original_state = null };
 
-const PromptParseResult = union(enum) {
-    accepted: ParsedPrompt,
-    invalid,
-    interrupt,
-};
-
-const RawTerminalGuard = struct {
-    file: ?std.fs.File = null,
-    original_state: ?std.posix.termios = null,
-
-    fn init(stdin: StdinSource) !RawTerminalGuard {
+    fn init(stdin: StdinSource) !RawTerminal {
         const file = switch (stdin) {
             .file => |file| file,
-            .bytes => return .{},
+            .bytes => return .dummy,
         };
         const original_state = std.posix.tcgetattr(file.handle) catch |err| switch (err) {
-            error.NotATerminal => return .{},
+            error.NotATerminal => return .dummy,
             else => return err,
         };
 
@@ -107,164 +79,14 @@ const RawTerminalGuard = struct {
         };
     }
 
-    fn deinit(self: *const RawTerminalGuard) void {
+    fn deinit(self: *const RawTerminal) void {
         if (self.file) |file| {
             std.posix.tcsetattr(file.handle, .DRAIN, self.original_state.?) catch {};
         }
     }
 
-    fn isActive(self: RawTerminalGuard) bool {
+    fn isActive(self: RawTerminal) bool {
         return self.file != null;
-    }
-};
-
-const PromptSource = struct {
-    input: PromptInput,
-    cursor: usize = 0,
-
-    fn readLiveByte(self: *PromptSource) !?u8 {
-        const stdin = switch (self.input) {
-            .live => |stdin| stdin,
-            .replay => unreachable,
-        };
-
-        switch (stdin) {
-            .bytes => |bytes| {
-                if (self.cursor >= bytes.len) return null;
-                const byte = bytes[self.cursor];
-                self.cursor += 1;
-                return byte;
-            },
-            .file => |file| {
-                var byte_buf: [1]u8 = undefined;
-                const read_len = try file.read(byte_buf[0..]);
-                if (read_len == 0) return null;
-                return byte_buf[0];
-            },
-        }
-    }
-
-    fn readReplayCommand(self: *PromptSource) !u8 {
-        const script = switch (self.input) {
-            .live => unreachable,
-            .replay => |script| script,
-        };
-        if (self.cursor >= script.len) return error.ReplayScriptExhausted;
-        const command = script[self.cursor];
-        self.cursor += 1;
-        return command;
-    }
-
-    pub fn readCursorAnchor(self: *PromptSource, writer: *std.Io.Writer) !paint_mod.CursorAnchor {
-        switch (self.input) {
-            .live => {},
-            .replay => return error.CursorAnchorUnavailable,
-        }
-
-        try writer.writeAll(CURSOR_POSITION_REQUEST);
-        try writer.flush();
-
-        var buf: [32]u8 = undefined;
-        var len: usize = 0;
-        while (len < buf.len) {
-            const byte = (try self.readLiveByte()) orelse return error.CursorAnchorUnavailable;
-            buf[len] = byte;
-            len += 1;
-            if (byte == 'R') break;
-        }
-        if (len < 6) return error.InvalidCursorAnchorResponse;
-        if (buf[0] != 0x1b or buf[1] != '[' or buf[len - 1] != 'R') {
-            return error.InvalidCursorAnchorResponse;
-        }
-
-        const body = buf[2 .. len - 1];
-        const sep = std.mem.indexOfScalar(u8, body, ';') orelse return error.InvalidCursorAnchorResponse;
-        const row = try std.fmt.parseUnsigned(u16, body[0..sep], 10);
-        const col = try std.fmt.parseUnsigned(u16, body[sep + 1 ..], 10);
-        return .{ .row = row, .col = col };
-    }
-
-    pub fn readTerminalSize(self: *PromptSource, writer: *std.Io.Writer) !paint_mod.TerminalSize {
-        switch (self.input) {
-            .live => {},
-            .replay => return error.TerminalSizeUnavailable,
-        }
-
-        try writer.writeAll(TERMINAL_SIZE_REQUEST);
-        try writer.flush();
-
-        var buf: [32]u8 = undefined;
-        var len: usize = 0;
-        while (len < buf.len) {
-            const byte = (try self.readLiveByte()) orelse return error.TerminalSizeUnavailable;
-            buf[len] = byte;
-            len += 1;
-            if (byte == 't') break;
-        }
-        if (len < 8) return error.InvalidTerminalSizeResponse;
-        if (buf[0] != 0x1b or buf[1] != '[' or buf[len - 1] != 't') {
-            return error.InvalidTerminalSizeResponse;
-        }
-
-        const body = buf[2 .. len - 1];
-        var parts = std.mem.splitScalar(u8, body, ';');
-        const kind = parts.next() orelse return error.InvalidTerminalSizeResponse;
-        if (!std.mem.eql(u8, kind, "8")) return error.InvalidTerminalSizeResponse;
-        const rows_text = parts.next() orelse return error.InvalidTerminalSizeResponse;
-        const cols_text = parts.next() orelse return error.InvalidTerminalSizeResponse;
-        if (parts.next() != null) return error.InvalidTerminalSizeResponse;
-
-        return .{
-            .rows = try std.fmt.parseUnsigned(u16, rows_text, 10),
-            .cols = try std.fmt.parseUnsigned(u16, cols_text, 10),
-        };
-    }
-
-    // Live input is intentionally terse and byte-oriented. The parser boundary
-    // exists so the session core only sees canonical review intents, not
-    // terminal bytes or replay-script quirks.
-    fn readInput(
-        self: *PromptSource,
-        prompt_kind: zdelta_session.SessionPrompt,
-        writer: anytype,
-        echo_live: bool,
-    ) !?PromptCommand {
-        switch (self.input) {
-            .live => {
-                while (true) {
-                    const byte = (try self.readLiveByte()) orelse return null;
-                    switch (parsePromptByte(prompt_kind, byte)) {
-                        .accepted => |accepted| {
-                            if (echo_live) {
-                                try writer.writeByte(accepted.canonical);
-                                try writer.writeAll("\n");
-                                try writer.flush();
-                            }
-                            return .{
-                                .intent = accepted.intent,
-                                .canonical = accepted.canonical,
-                            };
-                        },
-                        .invalid => {
-                            try writer.writeByte(7);
-                            try writer.flush();
-                        },
-                        .interrupt => return error.Interrupted,
-                    }
-                }
-            },
-            .replay => {
-                const command = try self.readReplayCommand();
-                const parsed = parseReplayPrompt(prompt_kind, command) orelse switch (prompt_kind) {
-                    .delta => return error.InvalidReplayDeltaCommand,
-                    .edit => return error.InvalidReplayEditCommand,
-                };
-                return .{
-                    .intent = parsed.intent,
-                    .canonical = parsed.canonical,
-                };
-            },
-        }
     }
 };
 
@@ -490,25 +312,19 @@ fn run(
     var owned_seed = try makeSessionSeed(allocator, selection);
     defer owned_seed.deinit(allocator);
 
-    const settings: zdelta_context.ContextSettings = .{
-        .whole_delta_context_lines = 2,
-        .edit_context_lines = 2,
-    };
-    var prompt = PromptSource{
-        .input = if (parsed_args.replay_script) |script|
-            .{ .replay = script }
-        else
-            .{ .live = stdin },
-    };
-    const prompt_probe = paint_mod.TerminalProbe(*PromptSource){ .context = &prompt };
-    const raw_guard = if (parsed_args.replay_script == null)
-        try RawTerminalGuard.init(stdin)
+    const settings: ContextSettings = .default;
+    var reader = reader_mod.Reader.init(if (parsed_args.replay_script) |script|
+        .{ .replay = script }
     else
-        RawTerminalGuard{};
+        .{ .live = stdin });
+    const raw_guard: RawTerminal = if (parsed_args.replay_script == null)
+        try .init(stdin)
+    else
+        .dummy;
     defer raw_guard.deinit();
     painter.setRawMode(raw_guard.isActive());
 
-    var session = try zdelta_session.ReviewSession.init(allocator, .{
+    var session = try ReviewSession.init(allocator, .{
         .baseline = .{
             .ordinal = selection.revisions[0].ordinal,
             .relative_path = selection.revisions[0].relative_path,
@@ -526,21 +342,45 @@ fn run(
         var snapshot = try session.snapshot();
         defer snapshot.deinit(allocator);
 
-        var interaction_state = try zdelta_context.InteractionState.build(allocator, snapshot, settings);
+        var interaction_state = try InteractionState.build(allocator, snapshot, settings);
         defer interaction_state.deinit();
-        try painter.renderPromptFrame(*PromptSource, prompt_probe, interaction_state);
-
-        while (true) {
-            const input = (try prompt.readInput(snapshot.prompt_kind, stdout_writer, painter.echoesAcceptedCommands())) orelse {
+        if (painter.needsInitialTerminalInfo()) {
+            const terminal_info = (try readInitialTerminalInfo(&reader, stdout_writer)) orelse {
                 session.quitEarly();
                 break :outer;
             };
+            try painter.renderInitialPromptFrame(interaction_state, terminal_info);
+        } else if (painter.supportsInPlaceRepaint()) {
+            try painter.repaintPromptFrame(interaction_state);
+        } else {
+            try painter.renderInitialPromptFrame(interaction_state, null);
+        }
+
+        while (true) {
+            reader.setMode(switch (snapshot.prompt_kind) {
+                .delta => .prompt_delta,
+                .edit => .prompt_edit,
+            });
+
+            const input = input: while (true) {
+                switch (try reader.readEvent(null)) {
+                    .prompt_command => |command| break :input command,
+                    .invalid_input => try painter.writeInvalidInputBell(),
+                    .interrupt => return error.Interrupted,
+                    .eof => {
+                        session.quitEarly();
+                        break :outer;
+                    },
+                    .cursor_anchor, .terminal_size, .help_done => {},
+                }
+            };
+            if (parsed_args.replay_script == null) {
+                try painter.echoAcceptedCommand(input.canonical);
+            }
             if (painter.supportsInPlaceRepaint() and painter.previewIntent(&interaction_state, input.intent)) {
-                try painter.renderPromptFrame(*PromptSource, prompt_probe, interaction_state);
+                try painter.repaintPromptFrame(interaction_state);
             }
-            if (input.canonical) |byte| {
-                if (recorder) |*owned| try owned.recordCommand(byte);
-            }
+            if (recorder) |*owned| try owned.recordCommand(input.canonical);
 
             var outcome = try session.dispatch(input.intent);
             defer outcome.deinit(allocator);
@@ -548,12 +388,12 @@ fn run(
             if (outcome.help_prompt) |prompt_kind| {
                 try painter.writePromptHelp(prompt_kind);
                 if (painter.supportsInPlaceRepaint()) {
-                    _ = (try prompt.readLiveByte()) orelse {
+                    if (!try waitForHelpDismiss(&reader)) {
                         session.quitEarly();
                         break :outer;
-                    };
+                    }
                     try painter.dismissPromptHelp();
-                    try painter.renderPromptFrame(*PromptSource, prompt_probe, interaction_state);
+                    try painter.repaintPromptFrame(interaction_state);
                 }
                 continue;
             }
@@ -575,6 +415,56 @@ fn run(
     );
     if (recorder) |*owned| try owned.ensureSuccessQuit();
     return 0;
+}
+
+fn readInitialTerminalInfo(
+    reader: *Reader,
+    stdout_writer: *std.Io.Writer,
+) !?paint_mod.TerminalInfo {
+    try reader.requestCursorAnchor(stdout_writer);
+    const cursor_anchor = (try waitForCursorAnchor(reader)) orelse return null;
+
+    try reader.requestTerminalSize(stdout_writer);
+    const terminal_size = (try waitForTerminalSize(reader)) orelse return null;
+
+    return .{
+        .cursor_anchor = cursor_anchor,
+        .terminal_size = terminal_size,
+    };
+}
+
+fn waitForCursorAnchor(reader: *Reader) !?reader_mod.CursorAnchor {
+    while (true) {
+        switch (try reader.readEvent(null)) {
+            .cursor_anchor => |anchor| return anchor,
+            .interrupt => return error.Interrupted,
+            .eof => return null,
+            .prompt_command, .terminal_size, .help_done, .invalid_input => {},
+        }
+    }
+}
+
+fn waitForTerminalSize(reader: *Reader) !?reader_mod.TerminalSize {
+    while (true) {
+        switch (try reader.readEvent(null)) {
+            .terminal_size => |size| return size,
+            .interrupt => return error.Interrupted,
+            .eof => return null,
+            .prompt_command, .cursor_anchor, .help_done, .invalid_input => {},
+        }
+    }
+}
+
+fn waitForHelpDismiss(reader: *Reader) !bool {
+    reader.setMode(.help_dismiss);
+    while (true) {
+        switch (try reader.readEvent(null)) {
+            .help_done => return true,
+            .interrupt => return error.Interrupted,
+            .eof => return false,
+            .prompt_command, .cursor_anchor, .terminal_size, .invalid_input => {},
+        }
+    }
 }
 
 fn isHelpArg(arg: []const u8) bool {
@@ -617,10 +507,10 @@ fn parseRevisionOrdinal(text: []const u8) !usize {
 
 fn makeSessionSeed(
     allocator: Allocator,
-    selection: corpus_contract.CorpusSelection,
+    selection: CorpusSelection,
 ) !OwnedSessionSeed {
     const step_count = selection.revisions.len - 1;
-    var steps = try allocator.alloc(zdelta_session.SessionStep, step_count);
+    var steps = try allocator.alloc(SessionStep, step_count);
     errdefer allocator.free(steps);
 
     for (selection.revisions[1..], 0..) |revision, idx| {
@@ -633,42 +523,6 @@ fn makeSessionSeed(
     }
 
     return .{ .steps = steps };
-}
-
-fn parsePromptByte(
-    prompt_kind: zdelta_session.SessionPrompt,
-    byte: u8,
-) PromptParseResult {
-    if (byte == 3) return .interrupt;
-    return if (parseReplayPrompt(prompt_kind, byte)) |parsed|
-        .{ .accepted = parsed }
-    else
-        .invalid;
-}
-
-fn parseReplayPrompt(
-    prompt_kind: zdelta_session.SessionPrompt,
-    command: u8,
-) ?ParsedPrompt {
-    return switch (prompt_kind) {
-        .delta => switch (command) {
-            'y' => .{ .intent = .apply, .canonical = 'y' },
-            'n' => .{ .intent = .skip, .canonical = 'n' },
-            's' => .{ .intent = .split, .canonical = 's' },
-            'q' => .{ .intent = .quit, .canonical = 'q' },
-            '?' => .{ .intent = .help, .canonical = '?' },
-            else => null,
-        },
-        .edit => switch (command) {
-            'y' => .{ .intent = .apply, .canonical = 'y' },
-            'n' => .{ .intent = .skip, .canonical = 'n' },
-            'a' => .{ .intent = .apply_rest, .canonical = 'a' },
-            'd' => .{ .intent = .skip_rest, .canonical = 'd' },
-            'q' => .{ .intent = .quit, .canonical = 'q' },
-            '?' => .{ .intent = .help, .canonical = '?' },
-            else => null,
-        },
-    };
 }
 
 fn formatUtcTimestamp(buffer: []u8, timestamp_secs: u64) ![]const u8 {
@@ -688,163 +542,137 @@ fn formatUtcTimestamp(buffer: []u8, timestamp_secs: u64) ![]const u8 {
 }
 
 test "command line help is sane" {
-    const allocator = std.testing.allocator;
+    const allocator = test_allocator;
     var result = try runForTesting(allocator, &.{ "delta-tool", "--help" }, "", false);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Usage: delta-tool [--replay <script>] <first-revision> <last-revision>"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "--replay <script>"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Revision 0 is the implicit pre-history baseline"));
-    try std.testing.expectEqual(@as(?[]u8, null), result.runs);
+    try expectEqual(@as(u8, 0), result.exit_code);
+    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Usage: delta-tool [--replay <script>] <first-revision> <last-revision>"));
+    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "--replay <script>"));
+    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Revision 0 is the implicit pre-history baseline"));
+    try expectEqual(@as(?[]u8, null), result.runs);
 }
 
 test "range validates 1-based revision ordinals" {
-    const allocator = std.testing.allocator;
+    const allocator = test_allocator;
     var result = try runForTesting(allocator, &.{ "delta-tool", "0", "2" }, "", false);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u8, 1), result.exit_code);
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stderr, 1, "RevisionOrdinalTooSmall"));
+    try expectEqual(@as(u8, 1), result.exit_code);
+    try expect(std.mem.containsAtLeast(u8, result.stderr, 1, "RevisionOrdinalTooSmall"));
 }
 
 test "whole delta application works" {
-    const allocator = std.testing.allocator;
+    const allocator = test_allocator;
     var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "y", false);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "=== revision 1 -> 2"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "[y] apply  [n] skip  [s] split  [q] quit  [?] help > y\n"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "applied deltas: 1"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "quit early: false"));
-    try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nyq", result.runs.?);
+    try expectEqual(@as(u8, 0), result.exit_code);
+    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "=== revision 1 -> 2"));
+    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "[y] apply  [n] skip  [s] split  [q] quit  [?] help > y\n"));
+    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "applied deltas: 1"));
+    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "quit early: false"));
+    try expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nyq", result.runs.?);
 }
 
 test "interactive help key is accepted" {
-    const allocator = std.testing.allocator;
+    const allocator = test_allocator;
     var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "?q", false);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "[y] apply  [n] skip  [s] split  [q] quit  [?] help > ?\n"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "y: apply the whole delta"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "quit early: true"));
-    try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\n?q", result.runs.?);
+    try expectEqual(@as(u8, 0), result.exit_code);
+    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "[y] apply  [n] skip  [s] split  [q] quit  [?] help > ?\n"));
+    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "y: apply the whole delta"));
+    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "quit early: true"));
+    try expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\n?q", result.runs.?);
 }
 
 test "replay script drives the session" {
-    const allocator = std.testing.allocator;
+    const allocator = test_allocator;
     var result = try runForTesting(allocator, &.{ "delta-tool", "--replay", "y", "1", "2" }, "", false);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "applied deltas: 1"));
-    try std.testing.expectEqual(@as(?[]u8, null), result.runs);
+    try expectEqual(@as(u8, 0), result.exit_code);
+    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "applied deltas: 1"));
+    try expectEqual(@as(?[]u8, null), result.runs);
 }
 
 test "replay script exhaustion is reported" {
-    const allocator = std.testing.allocator;
+    const allocator = test_allocator;
     var result = try runForTesting(allocator, &.{ "delta-tool", "--replay", "", "1", "2" }, "", false);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u8, 1), result.exit_code);
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stderr, 1, "ReplayScriptExhausted"));
-    try std.testing.expectEqual(@as(?[]u8, null), result.runs);
+    try expectEqual(@as(u8, 1), result.exit_code);
+    try expect(std.mem.containsAtLeast(u8, result.stderr, 1, "ReplayScriptExhausted"));
+    try expectEqual(@as(?[]u8, null), result.runs);
 }
 
 test "replay script invalid commands fail immediately" {
-    const allocator = std.testing.allocator;
+    const allocator = test_allocator;
     var result = try runForTesting(allocator, &.{ "delta-tool", "--replay", "help", "1", "2" }, "", false);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u8, 1), result.exit_code);
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stderr, 1, "InvalidReplayDeltaCommand"));
-    try std.testing.expectEqual(@as(?[]u8, null), result.runs);
+    try expectEqual(@as(u8, 1), result.exit_code);
+    try expect(std.mem.containsAtLeast(u8, result.stderr, 1, "InvalidReplayDeltaCommand"));
+    try expectEqual(@as(?[]u8, null), result.runs);
 }
 
 test "invalid live input is not logged" {
-    const allocator = std.testing.allocator;
+    const allocator = test_allocator;
     var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "BOGUSq", false);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "\x07"));
-    try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nq", result.runs.?);
+    try expectEqual(@as(u8, 0), result.exit_code);
+    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "\x07"));
+    try expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nq", result.runs.?);
 }
 
 test "uppercase live commands are invalid" {
-    const allocator = std.testing.allocator;
+    const allocator = test_allocator;
     var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "Qq", false);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "\x07"));
-    try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nq", result.runs.?);
+    try expectEqual(@as(u8, 0), result.exit_code);
+    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "\x07"));
+    try expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nq", result.runs.?);
 }
 
 test "user quit is not duplicated in runs log" {
-    const allocator = std.testing.allocator;
+    const allocator = test_allocator;
     var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "q", false);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
-    try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nq", result.runs.?);
+    try expectEqual(@as(u8, 0), result.exit_code);
+    try expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nq", result.runs.?);
 }
 
 test "ctrl c interrupts without synthesizing quit" {
-    const allocator = std.testing.allocator;
+    const allocator = test_allocator;
     var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "\x03", false);
     defer result.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u8, 130), result.exit_code);
-    try std.testing.expect(std.mem.containsAtLeast(u8, result.stderr, 1, "Interrupted"));
-    try std.testing.expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\n", result.runs.?);
-}
-
-test "delta prompt parser accepts lowercase canonical commands only" {
-    try std.testing.expectEqualDeep(
-        PromptParseResult{ .accepted = .{ .intent = .apply, .canonical = 'y' } },
-        parsePromptByte(.delta, 'y'),
-    );
-    try std.testing.expectEqualDeep(
-        PromptParseResult{ .accepted = .{ .intent = .help, .canonical = '?' } },
-        parsePromptByte(.delta, '?'),
-    );
-    try std.testing.expectEqualDeep(
-        PromptParseResult{ .invalid = {} },
-        parsePromptByte(.delta, 'Y'),
-    );
-    try std.testing.expectEqualDeep(
-        PromptParseResult{ .invalid = {} },
-        parsePromptByte(.delta, '\n'),
-    );
-}
-
-test "edit prompt parser accepts lowercase canonical commands only" {
-    try std.testing.expectEqualDeep(
-        PromptParseResult{ .accepted = .{ .intent = .apply_rest, .canonical = 'a' } },
-        parsePromptByte(.edit, 'a'),
-    );
-    try std.testing.expectEqualDeep(
-        PromptParseResult{ .accepted = .{ .intent = .help, .canonical = '?' } },
-        parsePromptByte(.edit, '?'),
-    );
-    try std.testing.expectEqualDeep(
-        PromptParseResult{ .invalid = {} },
-        parsePromptByte(.edit, 'A'),
-    );
-    try std.testing.expectEqualDeep(
-        PromptParseResult{ .invalid = {} },
-        parsePromptByte(.edit, '\n'),
-    );
+    try expectEqual(@as(u8, 130), result.exit_code);
+    try expect(std.mem.containsAtLeast(u8, result.stderr, 1, "Interrupted"));
+    try expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\n", result.runs.?);
 }
 
 const std = @import("std");
 const dmp = @import("dmp.zig");
 const corpus_contract = @import("corpus_contract");
 const paint_mod = @import("dtool/paint.zig");
+const reader_mod = @import("dtool/reader.zig");
 const zdelta_context = @import("zdelta/context.zig");
 const zdelta_session = @import("zdelta/session.zig");
 
 const Allocator = std.mem.Allocator;
+const ContextSettings = zdelta_context.ContextSettings;
+const CorpusSelection = corpus_contract.CorpusSelection;
+const InteractionState = zdelta_context.InteractionState;
+const Reader = reader_mod.Reader;
+const ReviewSession = zdelta_session.ReviewSession;
+const SessionStep = zdelta_session.SessionStep;
+const StdinSource = reader_mod.StdinSource;
+const test_allocator = std.testing.allocator;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const expectEqualStrings = std.testing.expectEqualStrings;

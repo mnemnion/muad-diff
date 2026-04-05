@@ -17,6 +17,11 @@ const DiffContext = dmp.DiffContext;
 pub const ContextSettings = struct {
     whole_delta_context_lines: usize,
     edit_context_lines: usize,
+
+    pub const default: ContextSettings = .{
+        .whole_delta_context_lines = 2,
+        .edit_context_lines = 2,
+    };
 };
 
 pub const ContentProvenance = enum {

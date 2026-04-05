@@ -5,29 +5,10 @@
 //! live repaint policy, help and summary text, diagnostics on stderr, and the
 //! mismatch-review diff shown at clean exit.
 
-pub const CursorAnchor = struct {
-    row: u16,
-    col: u16,
+pub const TerminalInfo = struct {
+    cursor_anchor: reader_mod.CursorAnchor,
+    terminal_size: reader_mod.TerminalSize,
 };
-
-pub const TerminalSize = struct {
-    rows: u16,
-    cols: u16,
-};
-
-pub fn TerminalProbe(comptime T: type) type {
-    return struct {
-        context: T,
-
-        pub fn readCursorAnchor(probe: @This(), writer: *std.Io.Writer) !CursorAnchor {
-            return probe.context.readCursorAnchor(writer);
-        }
-
-        pub fn readTerminalSize(probe: @This(), writer: *std.Io.Writer) !TerminalSize {
-            return probe.context.readTerminalSize(writer);
-        }
-    };
-}
 
 pub const Settings = struct {
     raw_mode: bool,
@@ -65,10 +46,6 @@ pub const Painter = struct {
 
     pub fn supportsInPlaceRepaint(painter: *const Painter) bool {
         return painter.output.supportsInPlaceRepaint();
-    }
-
-    pub fn echoesAcceptedCommands(painter: *const Painter) bool {
-        return !painter.supportsInPlaceRepaint();
     }
 
     pub fn writeUsage(painter: *Painter, exe_name: []const u8) !void {
@@ -114,17 +91,28 @@ pub const Painter = struct {
         if (diagnostics.len != 0) try painter.stderr_writer.flush();
     }
 
-    pub fn renderPromptFrame(
+    pub fn renderInitialPromptFrame(
         painter: *Painter,
-        comptime T: type,
-        probe: TerminalProbe(T),
         state: zdelta_context.InteractionState,
+        terminal_info: ?TerminalInfo,
     ) !void {
-        try painter.render_controller.renderPromptFrame(
-            T,
+        try painter.render_controller.renderInitialPromptFrame(
             painter.output,
             painter.stdout_writer,
-            probe,
+            state,
+            painter.settings.stdout_supports_color,
+            terminal_info,
+        );
+        try painter.stdout_writer.flush();
+    }
+
+    pub fn repaintPromptFrame(
+        painter: *Painter,
+        state: zdelta_context.InteractionState,
+    ) !void {
+        try painter.render_controller.repaintPromptFrame(
+            painter.output,
+            painter.stdout_writer,
             state,
             painter.settings.stdout_supports_color,
         );
@@ -163,6 +151,22 @@ pub const Painter = struct {
         if (!painter.supportsInPlaceRepaint()) return;
         try painter.output.writeControl(painter.stdout_writer, ALT_SCREEN_OFF);
         try painter.stdout_writer.flush();
+    }
+
+    pub fn echoAcceptedCommand(painter: *Painter, canonical: u8) !void {
+        if (painter.supportsInPlaceRepaint()) return;
+        try painter.stdout_writer.writeByte(canonical);
+        try painter.output.writeText(painter.stdout_writer, "\n");
+        try painter.stdout_writer.flush();
+    }
+
+    pub fn writeInvalidInputBell(painter: *Painter) !void {
+        try painter.stdout_writer.writeByte(7);
+        try painter.stdout_writer.flush();
+    }
+
+    pub fn needsInitialTerminalInfo(painter: *const Painter) bool {
+        return painter.output.supportsInPlaceRepaint() and painter.render_controller.anchor == null;
     }
 
     pub fn writeExitReview(
@@ -318,41 +322,53 @@ const OutputClient = struct {
 };
 
 const LiveRenderController = struct {
-    anchor: ?CursorAnchor = null,
+    anchor: ?reader_mod.CursorAnchor = null,
 
     // Raw interactive output is redrawn as one synchronized frame because the
     // terminal transport owns repaint policy, while replay/plain output keeps
     // its append-only transcript shape for tests and captured logs.
-    fn renderPromptFrame(
+    fn renderInitialPromptFrame(
         controller: *LiveRenderController,
-        comptime T: type,
         output: OutputClient,
         writer: *std.Io.Writer,
-        probe: TerminalProbe(T),
         state: zdelta_context.InteractionState,
         use_color: bool,
+        terminal_info: ?TerminalInfo,
     ) !void {
         if (!output.supportsInPlaceRepaint()) {
             try renderPromptContents(output, writer, state, use_color);
             return;
         }
 
-        if (controller.anchor == null) {
-            const start = try probe.readCursorAnchor(writer);
-            const size = try probe.readTerminalSize(writer);
+        if (controller.anchor != null) {
+            try controller.repaintPromptFrame(output, writer, state, use_color);
+            return;
+        }
 
-            var frame_buffer: std.Io.Writer.Allocating = .init(output.allocator);
-            defer frame_buffer.deinit();
-            try renderPromptContents(output, &frame_buffer.writer, state, use_color);
-            const frame = frame_buffer.written();
-            const frame_rows = countRenderedRows(frame, size.cols);
-            const final_row = @as(u32, start.row) + frame_rows - 1;
-            const scroll_rows = final_row -| size.rows;
-            controller.anchor = .{
-                .row = @intCast(@max(1, @as(i32, start.row) - @as(i32, @intCast(scroll_rows)))),
-                .col = 1,
-            };
-            try writer.writeAll(frame);
+        const info = terminal_info orelse return error.LiveRenderTerminalInfoMissing;
+        var frame_buffer: std.Io.Writer.Allocating = .init(output.allocator);
+        defer frame_buffer.deinit();
+        try renderPromptContents(output, &frame_buffer.writer, state, use_color);
+        const frame = frame_buffer.written();
+        const frame_rows = countRenderedRows(frame, info.terminal_size.cols);
+        const final_row = @as(u32, info.cursor_anchor.row) + frame_rows - 1;
+        const scroll_rows = final_row -| info.terminal_size.rows;
+        controller.anchor = .{
+            .row = @intCast(@max(1, @as(i32, info.cursor_anchor.row) - @as(i32, @intCast(scroll_rows)))),
+            .col = 1,
+        };
+        try writer.writeAll(frame);
+    }
+
+    fn repaintPromptFrame(
+        controller: *LiveRenderController,
+        output: OutputClient,
+        writer: *std.Io.Writer,
+        state: zdelta_context.InteractionState,
+        use_color: bool,
+    ) !void {
+        if (!output.supportsInPlaceRepaint()) {
+            try renderPromptContents(output, writer, state, use_color);
             return;
         }
 
@@ -417,7 +433,7 @@ fn recolorVisibleTargetEdits(
     return changed;
 }
 
-fn writeCursorMove(writer: *std.Io.Writer, anchor: CursorAnchor) !void {
+fn writeCursorMove(writer: *std.Io.Writer, anchor: reader_mod.CursorAnchor) !void {
     var buf: [32]u8 = undefined;
     const sequence = try std.fmt.bufPrint(&buf, "{s}{d};{d}H", .{
         CSI,
@@ -947,14 +963,15 @@ test "raw repaint frame uses synchronized updates" {
         .stdout_supports_color = false,
         .use_pager = false,
     });
-    const probe = TerminalProbe(TestTerminalProbe){ .context = .{} };
-
-    try painter.renderPromptFrame(TestTerminalProbe, probe, state);
+    try painter.renderInitialPromptFrame(state, .{
+        .cursor_anchor = .{ .row = 1, .col = 1 },
+        .terminal_size = .{ .rows = 40, .cols = 120 },
+    });
     const first = try allocator.dupe(u8, stdout_buffer.written());
     defer allocator.free(first);
 
     stdout_buffer.clearRetainingCapacity();
-    try painter.renderPromptFrame(TestTerminalProbe, probe, state);
+    try painter.repaintPromptFrame(state);
     const second = stdout_buffer.written();
 
     try std.testing.expect(!std.mem.containsAtLeast(u8, first, 1, SYNC_ON));
@@ -963,16 +980,6 @@ test "raw repaint frame uses synchronized updates" {
     try std.testing.expect(std.mem.containsAtLeast(u8, second, 1, ERASE_TO_SCREEN_END));
     try std.testing.expect(std.mem.containsAtLeast(u8, second, 1, "--- target revision ---"));
 }
-
-const TestTerminalProbe = struct {
-    fn readCursorAnchor(_: TestTerminalProbe, _: *std.Io.Writer) !CursorAnchor {
-        return .{ .row = 1, .col = 1 };
-    }
-
-    fn readTerminalSize(_: TestTerminalProbe, _: *std.Io.Writer) !TerminalSize {
-        return .{ .rows = 40, .cols = 120 };
-    }
-};
 
 test "render document ansi uses obelizmo for annotated lines" {
     const allocator = std.testing.allocator;
@@ -1050,6 +1057,7 @@ test "raw prompt help uses alternate screen" {
 const std = @import("std");
 const dmp = @import("../dmp.zig");
 const obelizmo = @import("obelizmo");
+const reader_mod = @import("reader.zig");
 const zdelta_context = @import("../zdelta/context.zig");
 const zdelta_session = @import("../zdelta/session.zig");
 
