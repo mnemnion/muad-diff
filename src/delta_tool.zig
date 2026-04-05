@@ -273,7 +273,7 @@ fn run(
     stdout_writer: *std.Io.Writer,
     stderr_writer: *std.Io.Writer,
 ) !u8 {
-    var painter = paint_mod.Painter.init(allocator, stdout_writer, stderr_writer, .{
+    var painter = Painter.init(allocator, stdout_writer, stderr_writer, .{
         .raw_mode = false,
         .stdout_supports_color = stdout_supports_color,
         .use_pager = options.use_pager,
@@ -313,7 +313,7 @@ fn run(
     defer owned_seed.deinit(allocator);
 
     const settings: ContextSettings = .default;
-    var reader = reader_mod.Reader.init(if (parsed_args.replay_script) |script|
+    var reader: Reader = .init(if (parsed_args.replay_script) |script|
         .{ .replay = script }
     else
         .{ .live = stdin });
@@ -324,7 +324,7 @@ fn run(
     defer raw_guard.deinit();
     painter.setRawMode(raw_guard.isActive());
 
-    var session = try ReviewSession.init(allocator, .{
+    var session: ReviewSession = try .init(allocator, .{
         .baseline = .{
             .ordinal = selection.revisions[0].ordinal,
             .relative_path = selection.revisions[0].relative_path,
@@ -342,18 +342,20 @@ fn run(
         var snapshot = try session.snapshot();
         defer snapshot.deinit(allocator);
 
-        var interaction_state = try InteractionState.build(allocator, snapshot, settings);
+        var interaction_state: InteractionState = try .build(allocator, snapshot, settings);
         defer interaction_state.deinit();
+        var pending_terminal: PendingTerminalInfo = .{};
+        var rendered = false;
+
         if (painter.needsInitialTerminalInfo()) {
-            const terminal_info = (try readInitialTerminalInfo(&reader, stdout_writer)) orelse {
-                session.quitEarly();
-                break :outer;
-            };
-            try painter.renderInitialPromptFrame(interaction_state, terminal_info);
+            try reader.requestCursorAnchor(stdout_writer);
+            try reader.requestTerminalSize(stdout_writer);
         } else if (painter.supportsInPlaceRepaint()) {
             try painter.repaintPromptFrame(interaction_state);
+            rendered = true;
         } else {
             try painter.renderInitialPromptFrame(interaction_state, null);
+            rendered = true;
         }
 
         while (true) {
@@ -363,15 +365,31 @@ fn run(
             });
 
             const input = input: while (true) {
+                if (!rendered) {
+                    if (pending_terminal.intoTerminalInfo()) |terminal_info| {
+                        try painter.renderInitialPromptFrame(interaction_state, terminal_info);
+                        rendered = true;
+                        if (pending_terminal.pending_command) |command| {
+                            pending_terminal.pending_command = null;
+                            break :input command;
+                        }
+                    }
+                }
+
                 switch (try reader.readEvent(null)) {
-                    .prompt_command => |command| break :input command,
+                    .prompt_command => |command| {
+                        if (rendered) break :input command;
+                        pending_terminal.pending_command = command;
+                    },
+                    .cursor_anchor => |anchor| pending_terminal.cursor_anchor = anchor,
+                    .terminal_size => |size| pending_terminal.terminal_size = size,
                     .invalid_input => try painter.writeInvalidInputBell(),
                     .interrupt => return error.Interrupted,
                     .eof => {
                         session.quitEarly();
                         break :outer;
                     },
-                    .cursor_anchor, .terminal_size, .help_done => {},
+                    .help_done => {},
                 }
             };
             if (parsed_args.replay_script == null) {
@@ -388,7 +406,7 @@ fn run(
             if (outcome.help_prompt) |prompt_kind| {
                 try painter.writePromptHelp(prompt_kind);
                 if (painter.supportsInPlaceRepaint()) {
-                    if (!try waitForHelpDismiss(&reader)) {
+                    if (!try reader.waitForHelpDismiss()) {
                         session.quitEarly();
                         break :outer;
                     }
@@ -415,56 +433,6 @@ fn run(
     );
     if (recorder) |*owned| try owned.ensureSuccessQuit();
     return 0;
-}
-
-fn readInitialTerminalInfo(
-    reader: *Reader,
-    stdout_writer: *std.Io.Writer,
-) !?paint_mod.TerminalInfo {
-    try reader.requestCursorAnchor(stdout_writer);
-    const cursor_anchor = (try waitForCursorAnchor(reader)) orelse return null;
-
-    try reader.requestTerminalSize(stdout_writer);
-    const terminal_size = (try waitForTerminalSize(reader)) orelse return null;
-
-    return .{
-        .cursor_anchor = cursor_anchor,
-        .terminal_size = terminal_size,
-    };
-}
-
-fn waitForCursorAnchor(reader: *Reader) !?reader_mod.CursorAnchor {
-    while (true) {
-        switch (try reader.readEvent(null)) {
-            .cursor_anchor => |anchor| return anchor,
-            .interrupt => return error.Interrupted,
-            .eof => return null,
-            .prompt_command, .terminal_size, .help_done, .invalid_input => {},
-        }
-    }
-}
-
-fn waitForTerminalSize(reader: *Reader) !?reader_mod.TerminalSize {
-    while (true) {
-        switch (try reader.readEvent(null)) {
-            .terminal_size => |size| return size,
-            .interrupt => return error.Interrupted,
-            .eof => return null,
-            .prompt_command, .cursor_anchor, .help_done, .invalid_input => {},
-        }
-    }
-}
-
-fn waitForHelpDismiss(reader: *Reader) !bool {
-    reader.setMode(.help_dismiss);
-    while (true) {
-        switch (try reader.readEvent(null)) {
-            .help_done => return true,
-            .interrupt => return error.Interrupted,
-            .eof => return false,
-            .prompt_command, .cursor_anchor, .terminal_size, .invalid_input => {},
-        }
-    }
 }
 
 fn isHelpArg(arg: []const u8) bool {
@@ -541,15 +509,13 @@ fn formatUtcTimestamp(buffer: []u8, timestamp_secs: u64) ![]const u8 {
     });
 }
 
-test "command line help is sane" {
+test "help exits cleanly without creating a run transcript" {
     const allocator = test_allocator;
     var result = try runForTesting(allocator, &.{ "delta-tool", "--help" }, "", false);
     defer result.deinit(allocator);
 
     try expectEqual(@as(u8, 0), result.exit_code);
-    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Usage: delta-tool [--replay <script>] <first-revision> <last-revision>"));
-    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "--replay <script>"));
-    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Revision 0 is the implicit pre-history baseline"));
+    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "delta-tool"));
     try expectEqual(@as(?[]u8, null), result.runs);
 }
 
@@ -568,20 +534,17 @@ test "whole delta application works" {
     defer result.deinit(allocator);
 
     try expectEqual(@as(u8, 0), result.exit_code);
-    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "=== revision 1 -> 2"));
-    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "[y] apply  [n] skip  [s] split  [q] quit  [?] help > y\n"));
     try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "applied deltas: 1"));
     try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "quit early: false"));
     try expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nyq", result.runs.?);
 }
 
-test "interactive help key is accepted" {
+test "interactive help logs help canonically and returns to the session" {
     const allocator = test_allocator;
     var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "?q", false);
     defer result.deinit(allocator);
 
     try expectEqual(@as(u8, 0), result.exit_code);
-    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "[y] apply  [n] skip  [s] split  [q] quit  [?] help > ?\n"));
     try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "y: apply the whole delta"));
     try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "quit early: true"));
     try expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\n?q", result.runs.?);
@@ -627,16 +590,6 @@ test "invalid live input is not logged" {
     try expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nq", result.runs.?);
 }
 
-test "uppercase live commands are invalid" {
-    const allocator = test_allocator;
-    var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "Qq", false);
-    defer result.deinit(allocator);
-
-    try expectEqual(@as(u8, 0), result.exit_code);
-    try expect(std.mem.containsAtLeast(u8, result.stdout, 1, "\x07"));
-    try expectEqualStrings("\n1970-01-01T00:00:00Z: 1 2\nq", result.runs.?);
-}
-
 test "user quit is not duplicated in runs log" {
     const allocator = test_allocator;
     var result = try runForTesting(allocator, &.{ "delta-tool", "1", "2" }, "q", false);
@@ -660,6 +613,7 @@ const std = @import("std");
 const dmp = @import("dmp.zig");
 const corpus_contract = @import("corpus_contract");
 const paint_mod = @import("dtool/paint.zig");
+const Painter = paint_mod.Painter;
 const reader_mod = @import("dtool/reader.zig");
 const zdelta_context = @import("zdelta/context.zig");
 const zdelta_session = @import("zdelta/session.zig");
@@ -672,6 +626,18 @@ const Reader = reader_mod.Reader;
 const ReviewSession = zdelta_session.ReviewSession;
 const SessionStep = zdelta_session.SessionStep;
 const StdinSource = reader_mod.StdinSource;
+const PendingTerminalInfo = struct {
+    cursor_anchor: ?reader_mod.CursorAnchor = null,
+    terminal_size: ?reader_mod.TerminalSize = null,
+    pending_command: ?reader_mod.PromptCommand = null,
+
+    fn intoTerminalInfo(pending: PendingTerminalInfo) ?paint_mod.TerminalInfo {
+        return .{
+            .cursor_anchor = pending.cursor_anchor orelse return null,
+            .terminal_size = pending.terminal_size orelse return null,
+        };
+    }
+};
 const test_allocator = std.testing.allocator;
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;

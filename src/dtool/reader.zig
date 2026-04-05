@@ -90,6 +90,18 @@ pub const Reader = struct {
         };
     }
 
+    pub fn waitForHelpDismiss(reader: *Reader) !bool {
+        reader.setMode(.help_dismiss);
+        while (true) {
+            switch (try reader.readEvent(null)) {
+                .help_done => return true,
+                .interrupt => return error.Interrupted,
+                .eof => return false,
+                .prompt_command, .cursor_anchor, .terminal_size, .invalid_input => {},
+            }
+        }
+    }
+
     fn readLiveEvent(reader: *Reader) !Event {
         const byte = (try reader.readByte()) orelse return .eof;
         if (byte == 3) return .interrupt;
