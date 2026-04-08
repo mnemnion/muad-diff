@@ -11,8 +11,9 @@ This library has a number of affordances in a mature state:
   to the exact before text of the diff to be effective.  This is where
   the action is.
 
-Whole application of deltas is a solved problem.  Partial application of
-deltas is a barely-attempted and very difficult problem.
+Whole application of deltas is a solved problem.  Partial application
+of deltas is a barely-attempted and very difficult problem.  What does
+exist, does not work, and cannot be expected to.
 
 The purpose of solving this problem is change management.  The goal is
 to be able to record every change to a file, starting from a known-good
