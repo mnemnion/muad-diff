@@ -6,8 +6,8 @@
 //! mismatch-review diff shown at clean exit.
 
 pub const TerminalInfo = struct {
-    cursor_anchor: reader_mod.CursorAnchor,
-    terminal_size: reader_mod.TerminalSize,
+    cursor_anchor: linein_mod.CursorAnchor,
+    terminal_size: linein_mod.TerminalSize,
 };
 
 pub const Settings = struct {
@@ -322,7 +322,7 @@ const OutputClient = struct {
 };
 
 const LiveRenderController = struct {
-    anchor: ?reader_mod.CursorAnchor = null,
+    anchor: ?linein_mod.CursorAnchor = null,
 
     // Raw interactive output is redrawn as one synchronized frame because the
     // terminal transport owns repaint policy, while replay/plain output keeps
@@ -433,7 +433,7 @@ fn recolorVisibleTargetEdits(
     return changed;
 }
 
-fn writeCursorMove(writer: *std.Io.Writer, anchor: reader_mod.CursorAnchor) !void {
+fn writeCursorMove(writer: *std.Io.Writer, anchor: linein_mod.CursorAnchor) !void {
     var buf: [32]u8 = undefined;
     const sequence = try std.fmt.bufPrint(&buf, "{s}{d};{d}H", .{
         CSI,
@@ -1057,7 +1057,7 @@ test "raw prompt help uses alternate screen" {
 const std = @import("std");
 const dmp = @import("../dmp.zig");
 const obelizmo = @import("obelizmo");
-const reader_mod = @import("reader.zig");
+const linein_mod = @import("linein.zig");
 const zdelta_context = @import("../zdelta/context.zig");
 const zdelta_session = @import("../zdelta/session.zig");
 

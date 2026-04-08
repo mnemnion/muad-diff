@@ -1,8 +1,8 @@
-//! Input reader for delta-tool.
+//! Input line reader for delta-tool.
 //!
-//! `Reader` is the only subsystem that consumes stdin bytes. It does not own
+//! `LineIn` is the only subsystem that consumes stdin bytes. It does not own
 //! the tool's interactive control flow; instead, `run` selects a mode and the
-//! reader parses bytes into typed events. Terminal replies are transport noise,
+//! line reader parses bytes into typed events. Terminal replies are transport noise,
 //! not parser state, so they remain recognizable regardless of the current
 //! prompt/help mode.
 
@@ -47,25 +47,25 @@ pub const Event = union(enum) {
     eof,
 };
 
-pub const Reader = struct {
+pub const LineIn = struct {
     source: Source,
     mode: Mode = .prompt_delta,
     cursor: usize = 0,
     pending: [64]u8 = undefined,
     pending_len: usize = 0,
 
-    pub fn init(source: Source) Reader {
+    pub fn init(source: Source) LineIn {
         return .{
             .source = source,
         };
     }
 
-    pub fn setMode(reader: *Reader, mode: Mode) void {
-        reader.mode = mode;
+    pub fn setMode(in: *LineIn, mode: Mode) void {
+        in.mode = mode;
     }
 
-    pub fn requestCursorAnchor(reader: *Reader, writer: *std.Io.Writer) !void {
-        switch (reader.source) {
+    pub fn requestCursorAnchor(in: *LineIn, writer: *std.Io.Writer) !void {
+        switch (in.source) {
             .live => {},
             .replay => return error.CursorAnchorUnavailable,
         }
@@ -73,8 +73,8 @@ pub const Reader = struct {
         try writer.flush();
     }
 
-    pub fn requestTerminalSize(reader: *Reader, writer: *std.Io.Writer) !void {
-        switch (reader.source) {
+    pub fn requestTerminalSize(in: *LineIn, writer: *std.Io.Writer) !void {
+        switch (in.source) {
             .live => {},
             .replay => return error.TerminalSizeUnavailable,
         }
@@ -82,18 +82,18 @@ pub const Reader = struct {
         try writer.flush();
     }
 
-    pub fn readEvent(reader: *Reader, writer: ?*std.Io.Writer) !Event {
+    pub fn readEvent(in: *LineIn, writer: ?*std.Io.Writer) !Event {
         _ = writer;
-        return switch (reader.source) {
-            .live => try reader.readLiveEvent(),
-            .replay => try reader.readReplayEvent(),
+        return switch (in.source) {
+            .live => try in.readLiveEvent(),
+            .replay => try in.readReplayEvent(),
         };
     }
 
-    pub fn waitForHelpDismiss(reader: *Reader) !bool {
-        reader.setMode(.help_dismiss);
+    pub fn waitForHelpDismiss(in: *LineIn) !bool {
+        in.setMode(.help_dismiss);
         while (true) {
-            switch (try reader.readEvent(null)) {
+            switch (try in.readEvent(null)) {
                 .help_done => return true,
                 .interrupt => return error.Interrupted,
                 .eof => return false,
@@ -102,18 +102,18 @@ pub const Reader = struct {
         }
     }
 
-    fn readLiveEvent(reader: *Reader) !Event {
-        const byte = (try reader.readByte()) orelse return .eof;
+    fn readLiveEvent(in: *LineIn) !Event {
+        const byte = (try in.readByte()) orelse return .eof;
         if (byte == 3) return .interrupt;
         if (byte == ESC_BYTE) {
-            if (try reader.readTerminalReply()) |event| return event;
+            if (try in.readTerminalReply()) |event| return event;
         }
-        return reader.parseModeByte(byte);
+        return in.parseModeByte(byte);
     }
 
-    fn readReplayEvent(reader: *Reader) !Event {
-        const command = try reader.readReplayCommand();
-        return switch (reader.mode) {
+    fn readReplayEvent(in: *LineIn) !Event {
+        const command = try in.readReplayCommand();
+        return switch (in.mode) {
             .prompt_delta => .{
                 .prompt_command = parseReplayPrompt(.delta, command) orelse
                     return error.InvalidReplayDeltaCommand,
@@ -126,8 +126,8 @@ pub const Reader = struct {
         };
     }
 
-    fn parseModeByte(reader: *Reader, byte: u8) Event {
-        return switch (reader.mode) {
+    fn parseModeByte(in: *LineIn, byte: u8) Event {
+        return switch (in.mode) {
             .help_dismiss => .help_done,
             .prompt_delta => if (parsePromptByte(.delta, byte)) |command|
                 .{ .prompt_command = command }
@@ -140,24 +140,24 @@ pub const Reader = struct {
         };
     }
 
-    fn readByte(reader: *Reader) !?u8 {
-        if (reader.pending_len != 0) {
-            const byte = reader.pending[0];
-            std.mem.copyForwards(u8, reader.pending[0 .. reader.pending_len - 1], reader.pending[1..reader.pending_len]);
-            reader.pending_len -= 1;
+    fn readByte(in: *LineIn) !?u8 {
+        if (in.pending_len != 0) {
+            const byte = in.pending[0];
+            std.mem.copyForwards(u8, in.pending[0 .. in.pending_len - 1], in.pending[1..in.pending_len]);
+            in.pending_len -= 1;
             return byte;
         }
 
-        const stdin = switch (reader.source) {
+        const stdin = switch (in.source) {
             .live => |stdin| stdin,
             .replay => unreachable,
         };
 
         switch (stdin) {
             .bytes => |bytes| {
-                if (reader.cursor >= bytes.len) return null;
-                const byte = bytes[reader.cursor];
-                reader.cursor += 1;
+                if (in.cursor >= bytes.len) return null;
+                const byte = bytes[in.cursor];
+                in.cursor += 1;
                 return byte;
             },
             .file => |file| {
@@ -169,39 +169,39 @@ pub const Reader = struct {
         }
     }
 
-    fn pushUnread(reader: *Reader, bytes: []const u8) !void {
+    fn pushUnread(in: *LineIn, bytes: []const u8) !void {
         if (bytes.len == 0) return;
-        if (reader.pending_len + bytes.len > reader.pending.len) {
+        if (in.pending_len + bytes.len > in.pending.len) {
             return error.PendingInputOverflow;
         }
 
         std.mem.copyBackwards(
             u8,
-            reader.pending[bytes.len .. bytes.len + reader.pending_len],
-            reader.pending[0..reader.pending_len],
+            in.pending[bytes.len .. bytes.len + in.pending_len],
+            in.pending[0..in.pending_len],
         );
-        std.mem.copyForwards(u8, reader.pending[0..bytes.len], bytes);
-        reader.pending_len += bytes.len;
+        std.mem.copyForwards(u8, in.pending[0..bytes.len], bytes);
+        in.pending_len += bytes.len;
     }
 
-    fn readTerminalReply(reader: *Reader) !?Event {
+    fn readTerminalReply(in: *LineIn) !?Event {
         var buf: [32]u8 = undefined;
         var len: usize = 0;
         buf[len] = ESC_BYTE;
         len += 1;
 
-        const second = (try reader.readByte()) orelse return null;
+        const second = (try in.readByte()) orelse return null;
         buf[len] = second;
         len += 1;
         if (second != '[') {
-            try reader.pushUnread(buf[1..len]);
+            try in.pushUnread(buf[1..len]);
             return null;
         }
 
         var found_final = false;
         while (len < buf.len) {
-            const byte = (try reader.readByte()) orelse {
-                try reader.pushUnread(buf[1..len]);
+            const byte = (try in.readByte()) orelse {
+                try in.pushUnread(buf[1..len]);
                 return null;
             };
             buf[len] = byte;
@@ -212,24 +212,24 @@ pub const Reader = struct {
             }
         }
         if (!found_final) {
-            try reader.pushUnread(buf[1..len]);
+            try in.pushUnread(buf[1..len]);
             return null;
         }
 
         return parseTerminalReply(buf[0..len]) orelse blk: {
-            try reader.pushUnread(buf[1..len]);
+            try in.pushUnread(buf[1..len]);
             break :blk null;
         };
     }
 
-    fn readReplayCommand(reader: *Reader) !u8 {
-        const script = switch (reader.source) {
+    fn readReplayCommand(in: *LineIn) !u8 {
+        const script = switch (in.source) {
             .live => unreachable,
             .replay => |script| script,
         };
-        if (reader.cursor >= script.len) return error.ReplayScriptExhausted;
-        const command = script[reader.cursor];
-        reader.cursor += 1;
+        if (in.cursor >= script.len) return error.ReplayScriptExhausted;
+        const command = script[in.cursor];
+        in.cursor += 1;
         return command;
     }
 };
@@ -304,83 +304,83 @@ const CURSOR_POSITION_REQUEST = CSI ++ "6n";
 const TERMINAL_SIZE_REQUEST = CSI ++ "18t";
 
 test "delta prompt parser accepts lowercase canonical commands only" {
-    var reader = Reader.init(.{ .live = .{ .bytes = "y?Y\n" } });
-    reader.setMode(.prompt_delta);
+    var in = LineIn.init(.{ .live = .{ .bytes = "y?Y\n" } });
+    in.setMode(.prompt_delta);
 
     try std.testing.expectEqualDeep(
         Event{ .prompt_command = .{ .intent = .apply, .canonical = 'y' } },
-        try reader.readEvent(null),
+        try in.readEvent(null),
     );
     try std.testing.expectEqualDeep(
         Event{ .prompt_command = .{ .intent = .help, .canonical = '?' } },
-        try reader.readEvent(null),
+        try in.readEvent(null),
     );
-    try std.testing.expectEqualDeep(Event.invalid_input, try reader.readEvent(null));
-    try std.testing.expectEqualDeep(Event.invalid_input, try reader.readEvent(null));
+    try std.testing.expectEqualDeep(Event.invalid_input, try in.readEvent(null));
+    try std.testing.expectEqualDeep(Event.invalid_input, try in.readEvent(null));
 }
 
 test "edit prompt parser accepts lowercase canonical commands only" {
-    var reader = Reader.init(.{ .live = .{ .bytes = "a?A\n" } });
-    reader.setMode(.prompt_edit);
+    var in = LineIn.init(.{ .live = .{ .bytes = "a?A\n" } });
+    in.setMode(.prompt_edit);
 
     try std.testing.expectEqualDeep(
         Event{ .prompt_command = .{ .intent = .apply_rest, .canonical = 'a' } },
-        try reader.readEvent(null),
+        try in.readEvent(null),
     );
     try std.testing.expectEqualDeep(
         Event{ .prompt_command = .{ .intent = .help, .canonical = '?' } },
-        try reader.readEvent(null),
+        try in.readEvent(null),
     );
-    try std.testing.expectEqualDeep(Event.invalid_input, try reader.readEvent(null));
-    try std.testing.expectEqualDeep(Event.invalid_input, try reader.readEvent(null));
+    try std.testing.expectEqualDeep(Event.invalid_input, try in.readEvent(null));
+    try std.testing.expectEqualDeep(Event.invalid_input, try in.readEvent(null));
 }
 
 test "ctrl c emits interrupt" {
-    var reader = Reader.init(.{ .live = .{ .bytes = "\x03" } });
-    reader.setMode(.prompt_delta);
+    var in = LineIn.init(.{ .live = .{ .bytes = "\x03" } });
+    in.setMode(.prompt_delta);
 
-    try std.testing.expectEqualDeep(Event.interrupt, try reader.readEvent(null));
+    try std.testing.expectEqualDeep(Event.interrupt, try in.readEvent(null));
 }
 
 test "cursor replies are recognized regardless of mode" {
-    var reader = Reader.init(.{ .live = .{ .bytes = "\x1b[12;34R" } });
-    reader.setMode(.help_dismiss);
+    var in = LineIn.init(.{ .live = .{ .bytes = "\x1b[12;34R" } });
+    in.setMode(.help_dismiss);
 
     try std.testing.expectEqualDeep(
         Event{ .cursor_anchor = .{ .row = 12, .col = 34 } },
-        try reader.readEvent(null),
+        try in.readEvent(null),
     );
 }
 
 test "terminal size replies are recognized regardless of mode" {
-    var reader = Reader.init(.{ .live = .{ .bytes = "\x1b[8;40;120t" } });
-    reader.setMode(.prompt_delta);
+    var in = LineIn.init(.{ .live = .{ .bytes = "\x1b[8;40;120t" } });
+    in.setMode(.prompt_delta);
 
     try std.testing.expectEqualDeep(
         Event{ .terminal_size = .{ .rows = 40, .cols = 120 } },
-        try reader.readEvent(null),
+        try in.readEvent(null),
     );
 }
 
 test "help dismiss mode turns any ordinary key into help done" {
-    var reader = Reader.init(.{ .live = .{ .bytes = "q" } });
-    reader.setMode(.help_dismiss);
+    var in = LineIn.init(.{ .live = .{ .bytes = "q" } });
+    in.setMode(.help_dismiss);
 
-    try std.testing.expectEqualDeep(Event.help_done, try reader.readEvent(null));
+    try std.testing.expectEqualDeep(Event.help_done, try in.readEvent(null));
 }
 
 test "invalid replay command fails immediately" {
-    var reader = Reader.init(.{ .replay = "help" });
-    reader.setMode(.prompt_delta);
+    var in = LineIn.init(.{ .replay = "help" });
+    in.setMode(.prompt_delta);
 
-    try std.testing.expectError(error.InvalidReplayDeltaCommand, reader.readEvent(null));
+    try std.testing.expectError(error.InvalidReplayDeltaCommand, in.readEvent(null));
 }
 
 test "replay exhaustion is reported" {
-    var reader = Reader.init(.{ .replay = "" });
-    reader.setMode(.prompt_delta);
+    var in = LineIn.init(.{ .replay = "" });
+    in.setMode(.prompt_delta);
 
-    try std.testing.expectError(error.ReplayScriptExhausted, reader.readEvent(null));
+    try std.testing.expectError(error.ReplayScriptExhausted, in.readEvent(null));
 }
 
 const std = @import("std");

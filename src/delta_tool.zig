@@ -313,7 +313,7 @@ fn run(
     defer owned_seed.deinit(allocator);
 
     const settings: ContextSettings = .default;
-    var reader: Reader = .init(if (parsed_args.replay_script) |script|
+    var in: LineIn = .init(if (parsed_args.replay_script) |script|
         .{ .replay = script }
     else
         .{ .live = stdin });
@@ -348,8 +348,8 @@ fn run(
         var rendered = false;
 
         if (painter.needsInitialTerminalInfo()) {
-            try reader.requestCursorAnchor(stdout_writer);
-            try reader.requestTerminalSize(stdout_writer);
+            try in.requestCursorAnchor(stdout_writer);
+            try in.requestTerminalSize(stdout_writer);
         } else if (painter.supportsInPlaceRepaint()) {
             try painter.repaintPromptFrame(interaction_state);
             rendered = true;
@@ -359,7 +359,7 @@ fn run(
         }
 
         while (true) {
-            reader.setMode(switch (snapshot.prompt_kind) {
+            in.setMode(switch (snapshot.prompt_kind) {
                 .delta => .prompt_delta,
                 .edit => .prompt_edit,
             });
@@ -376,7 +376,7 @@ fn run(
                     }
                 }
 
-                switch (try reader.readEvent(null)) {
+                switch (try in.readEvent(null)) {
                     .prompt_command => |command| {
                         if (rendered) break :input command;
                         pending_terminal.pending_command = command;
@@ -406,7 +406,7 @@ fn run(
             if (outcome.help_prompt) |prompt_kind| {
                 try painter.writePromptHelp(prompt_kind);
                 if (painter.supportsInPlaceRepaint()) {
-                    if (!try reader.waitForHelpDismiss()) {
+                    if (!try in.waitForHelpDismiss()) {
                         session.quitEarly();
                         break :outer;
                     }
@@ -614,7 +614,7 @@ const dmp = @import("dmp.zig");
 const corpus_contract = @import("corpus_contract");
 const paint_mod = @import("dtool/paint.zig");
 const Painter = paint_mod.Painter;
-const reader_mod = @import("dtool/reader.zig");
+const linein_mod = @import("dtool/linein.zig");
 const zdelta_context = @import("zdelta/context.zig");
 const zdelta_session = @import("zdelta/session.zig");
 
@@ -622,14 +622,14 @@ const Allocator = std.mem.Allocator;
 const ContextSettings = zdelta_context.ContextSettings;
 const CorpusSelection = corpus_contract.CorpusSelection;
 const InteractionState = zdelta_context.InteractionState;
-const Reader = reader_mod.Reader;
+const LineIn = linein_mod.LineIn;
 const ReviewSession = zdelta_session.ReviewSession;
 const SessionStep = zdelta_session.SessionStep;
-const StdinSource = reader_mod.StdinSource;
+const StdinSource = linein_mod.StdinSource;
 const PendingTerminalInfo = struct {
-    cursor_anchor: ?reader_mod.CursorAnchor = null,
-    terminal_size: ?reader_mod.TerminalSize = null,
-    pending_command: ?reader_mod.PromptCommand = null,
+    cursor_anchor: ?linein_mod.CursorAnchor = null,
+    terminal_size: ?linein_mod.TerminalSize = null,
+    pending_command: ?linein_mod.PromptCommand = null,
 
     fn intoTerminalInfo(pending: PendingTerminalInfo) ?paint_mod.TerminalInfo {
         return .{
