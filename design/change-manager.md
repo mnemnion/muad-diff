@@ -3,18 +3,17 @@
 Created: `2026-04-08T20:42:24Z`
 Git HEAD: `c45c2070995a1ff22a764cb79689d3c17c222dd1`
 
-This is the replacement design note for the old span-tree sketch.  It is the
-concrete implementation spec for the next back-end iteration of selectable
-zdelta application.
+This is the concrete implementation spec for the next back-end iteration
+of selectable zdelta application.
 
 The old model centered on mutating an "effective" delta and replaying skipped
 history into later deltas.  That model is retired here.  The new source of
-truth is immutable history plus an immutable translation tree at each decision
+truth is immutable history plus an immutable correction tree at each decision
 point.
 
 ## Purpose
 
-The purpose of `ChangeManager` is to let us:
+The purpose of `DeltaGuidanceSystem` is to let us:
 
 - attach a raw `ZDelta` without rewriting it
 - review its edits one at a time or in bulk
@@ -24,12 +23,13 @@ The purpose of `ChangeManager` is to let us:
 - carry forward skipped-edit anomalies into later revisions without replaying a
   transcript of harmonization hacks
 
-This note elaborates the concepts in [change-management.md](./change-management.md)
-and supersedes the obsolete "forward projection" description.  "Forward
-projection" is not the right center of gravity; the thing we actually need is a
-persistent translation surface rooted in immutable history.
+This note elaborates the concepts in [Change
+Management](./change-management.md) and supersedes the entire
+implementation of partial application found in zdelta.  Spoiler alert:
+the missile knows where it is?  Is profoundly correct.  Funny how that
+works.
 
-## Rejected model
+## Rejected Model
 
 The current `effective.zig` / `apply_manager.zig` approach is wrong in three
 ways:
@@ -51,55 +51,88 @@ The replacement design therefore forbids:
 - replay harmonization against later deltas
 - suffix-based "active skipped" bookkeeping
 - mutable replacement of remaining delta ops
-- treating accepted edits as invisible to the translation surface
+- treating accepted edits as invisible to the correction surface
 
-The distinction between ZDelta and EffectiveZDelta is preserved in case some additional metadata is necessary, not because the scope of work here expects that it will be.
+The distinction between `ZDelta` and `EffectiveZDelta` is no longer useful.
+We will use `ZDelta` directly unless or until we discover that we must
+make changes in the service of this implementation.
 
-## Vocabulary
+## Comments
 
-The terminology in [change-management.md](./change-management.md) remains in
-force.
+Text in markdown comments is only actionable in later
+implementation. **Not** this one.  It should neither be acted against,
+nor acted upon.
 
+## Glossary
+
+This is the most important section of this document.  The implementation
+here documented has acquired variation: it isn't where it is, and knows
+where it wasn't.  This variation is error, and subject to correction,
+under the guidance of the vocabulary.
+
+- `span`
+  Any contiguous amount of text.  Span width is
+    - `expected`
+      The span according to the corpus text.
+    - `effective`
+      The span as it actually is.  Absent skips, these are the same.
 - `skip`
   A reviewed edit which was not applied.
-- `decline`
-  A skipped insert.
-- `rescue`
-  A skipped delete.
-- `evacuation`
-  A region present in corpus space but absent in realized space.
-- `imposition`
-  A region present in realized space but absent in corpus space.
+  - `decline`
+    A skipped insert.
+  - `rescue`
+    A skipped delete.
+- `region`
+  A span having a single characteristic.  These do not necessarily have
+  width.
 - `anomaly`
-  A divergence created by a skip.  Every anomaly has a durable record.
+  A divergence created by a skip.
+  - `evacuation`
+    A region present in corpus space but absent in realized space.
+    Consequence of a `decline`.
+  - `imposition`
+    A region present in realized space but absent in corpus space.
+    Consequence of a `rescue`.
 - `pristine`
   A region whose mapping is still a single continuous deviation, which may be 0.
+- `bifurcation`
+  A shared location beween a pristine region and an anomalous one, and
+  vice versa.
 - `deviation`
   The numeric difference between corpus-space and realized-space position,
   accumulated from each bifurcation encountered on the path through the
-  translation tree.  Not referred to as:
+  correction tree.  Not referred to as:
 - `translation`
   A future semantic pairing between delete and insert.  Not implemented in the
-  first pass.
-
-This note adds two implementation terms:
-
+  first pass.  This is a **reserved word**.
+- `target`
+  The location or region where a delta expects to have effect.  Varieties are
+  expounded upon later in this text.
+- `correction`
+  The act of accounting for deviation, guiding the delta from where it wasn't
+  to where it will be.
 - `decision`
   A reviewed apply or skip action.  Every decision creates a new immutable
-  step.
-- `translation tree`
+  step.  There are four decisions: `insert` and `delete` are accepts, and
+  `decline` and `rescue` are skips. <!-- Complex decisions are
+  decomposed, left to right, into a series of simple decisions.  These
+  are tracked as a single action, for undo and redo purposes. -->
+- `correction tree`
   The persistent interval-tree representation of how the active corpus axis maps
   to realized text at one exact step.
 
-Undo/redo history in this revision is a single path.  Moving backward and
-forward along that path is non-destructive.  Taking a new decision from a prior
-step destroys the old future and releases its resources.
+Undo/redo history in this revision is a single path.  Moving backward
+and forward along that path is non-destructive.  Taking a new decision
+from a prior step destroys the old future and releases its resources.
+The future of the correction tree, notably _not_ the `ZDelta`s it was
+based on, which must be preserved for application in the next future
+created.
 
 ## Design summary
 
-`ChangeManager` owns the realized text plus a pointer to the current immutable
-step.  Each step owns a translation tree and records the single decision that
-produced it from its prior step.
+`DeltaGuidanceSystem` owns the text buffer plus a pointer to the current
+immutable step.  Each step owns a correction tree and records the single
+decision that produced it from its prior step.
 
 Skipped edits create both:
 
@@ -110,52 +143,51 @@ Accepted edits create only:
 
 - a `DecisionRecord`
 
-But accepted edits still update the translation tree.  They matter because they
-change where later things are, and because undo must restore the exact prior
-translation surface, not merely the prior bytes.  There is an aspect of the
-command pattern here, because undoing an insert is deleting its span, and a
-deletion must keep the deleted insert it on undo.  Terminology is consistent
-in using 'do' terms (or 'did' terms), not 'undo' terms, in building the record.
+But accepted edits still update the correction tree.  They matter
+because they change where later things are, and because undo must
+restore the exact prior correction surface, not merely the prior bytes.
+There is an aspect of the command pattern here, because undoing an
+insert is deleting its span, and a deletion must keep the deleted
+region, to insert it on undo.  Terminology is consistent in using 'do'
+terms (or 'did' terms), not 'undo' terms, in building the record.
 
 The raw `ZDelta` for the currently attached step remains immutable.  The
 manager never rewrites it.  Instead, the manager derives ephemeral
-`ProjectedOp`s by querying the current step's translation tree against the raw
+`ProjectedOp`s by querying the current step's correction tree against the raw
 delta's before-text axis.
 
 At step finish, the manager promotes the current step from the step's before
 axis to the next revision's corpus axis.  That promotion absorbs accepted
 changes into the new baseline while preserving skipped anomalies.
 
-## Coordinate model
-
-There are always two axes in play:
-
-1. `corpus` axis
-   The active source-of-truth revision axis for the current step.
-2. `realized` axis
-   The actual current text the operator has constructed.
-
-During an open step there is a third important notion:
-
-3. `step-before` axis
-   The before-text axis of the attached raw delta.  At `openStep`, this is the
-   same as the current step's corpus axis.  As decisions are taken, the
-   translation tree continues to answer queries from this axis into realized
-   text until `finishStep` promotes the current step to the next revision axis.
+## Spans and Insertions
 
 All spans are half-open: `[start, end)`.
 
-Insertions are positions, not positive-width spans.  Insert queries must inspect
-the status on both sides of a boundary; a point between two regions is not
-adequately described by pretending it belongs to one region.
+Insertions occur at positions, not across positive-width spans.  Insert
+queries must inspect the status on both sides of a boundary; a point
+between two regions is not adequately described by pretending it belongs
+to one region.
 
 ## Core types
 
-The exact field layout may shift a little in implementation, but the following
-types are the intended public shape of the design.
+What follows is a sketch of the types to be used in this rewrite.  What
+matters is the _vocabulary_ and the _shape_.  As you read this, your
+primary purpose is to refine these types into a shape I am satisfied
+will produce the correct implementation.
+
+In particular, take note of types which allow contradictory information
+to be represented, and modify them so this is impossible by construction.
+
+Do not be too quick to decide some field is redundant: it may have a
+purpose, just not an obvious one.
+
+Another note: `realized` is not in the glossary, but is all over the
+documentation and type system.  It should not be.  Projection is another
+mistake: that is mechanism, not policy.
 
 ```zig
-pub const ChangeManager = struct {
+pub const DeltaGuidanceSystem = struct {
     allocator: Allocator,
     buffer: []u8,
     start: u32,
@@ -166,6 +198,7 @@ pub const ChangeManager = struct {
     current_step: *Step,
     attached_step: ?AttachedStepState,
 
+    // These are referenced by index, pointers would be unstable
     decisions: std.ArrayListUnmanaged(DecisionRecord),
     anomalies: std.ArrayListUnmanaged(AnomalyRecord),
 };
@@ -173,12 +206,13 @@ pub const ChangeManager = struct {
 pub const Step = struct {
     prior: ?*Step,
     next: ?*Step,
-    projection_root: *ProjectionNode,
+    correction_root: *CorrectionNode,
 
     realized_len: u32,
     corpus_len: u32,
 
-    decision: ?DecisionRecord,
+    decision: DecisionIndex,
+    anomaly: ?AnomalyIndex,
     anomaly_count: u32,
     decision_count: u32,
 };
@@ -203,7 +237,7 @@ pub const DecisionRecord = struct {
     realized_site_before: Site,
     realized_site_after: Site,
 
-    anomaly_id: ?u32,
+    anomaly_id: ?AnomalyIndex,
 };
 
 pub const AnomalyRecord = struct {
@@ -212,10 +246,10 @@ pub const AnomalyRecord = struct {
     text: []u8,
     corpus_site: Site,
     realized_site: Site,
-    created_by_decision: u32,
+    created_by_decision: DecisionIndex,
 };
 
-pub const ProjectedOp = struct {
+pub const CorrectedOp = struct {
     raw_op_index: u32,
     corpus_site: Site,
     realized: RealizedProjection,
@@ -223,6 +257,9 @@ pub const ProjectedOp = struct {
     touched_anomaly_ids: []const u32,
     available_resolutions: []const ApplyResolution,
 };
+
+pub const DecisionIndex = enum(u32) {_}; // newtype pattern
+pub const AnomalyIndex = enum(u32) {_};
 ```
 
 ### Supporting enums and shapes
@@ -233,28 +270,28 @@ pub const DecisionKind = enum {
     skip,
 };
 
-pub const EffectKind = enum {
+pub const AcceptKind = enum {
     insert,
     delete,
 };
 
-pub const AnomalyKind = enum {
+pub const RejectKind = enum {
     decline,
     rescue,
 };
 
-pub const ApplyResolution = enum {
-    mechanical,
-    delete_whole,
-    delete_corpus_only,
+pub const AnomalyKind = enum {
+    evacuation,
+    imposition,
 };
 
-pub const ProjectedClass = enum {
+pub const TargetClass = enum {
     pure,
     overlaid,
     clipped,
     composite,
-    blocked,
+    stranded,
+    complex,
 };
 
 pub const Site = union(enum) {
@@ -265,19 +302,18 @@ pub const Site = union(enum) {
     },
 };
 
-pub const RealizedProjection = union(enum) {
+pub const CorrectedTarget = union(enum) {
     point: u32,
     span: struct {
         start: u32,
         end: u32,
     },
-    blocked,
 };
 
 pub const LeafKind = enum {
-    pristine,
     evacuation,
     imposition,
+    pristine,
 };
 
 pub const IdRange = struct {
@@ -285,20 +321,21 @@ pub const IdRange = struct {
     end: u32,
 };
 
-pub const ProjectionNode = union(enum) {
-    internal: struct {
-        split_at: u32,
-        deviation_delta: i32,
-        left: *ProjectionNode,
-        right: *ProjectionNode,
+pub const CorrectionNode = union(enum) {
+    span: struct {
+        width: u32,
+        deviation: i32,
+        pivot: u32, // left-or-right in deviation-corrected terms
+        left: *CorrectionNode,
+        right: *CorrectionNode,
     },
-    leaf: ProjectionLeaf,
+    region: CorrectionLeaf,
 };
 ```
 
-## Translation tree
+## Correction tree
 
-The translation tree is the full translation logic of the current step.  It is
+The correction tree is the full correction logic of the current step.  It is
 persistent and immutable.  A new decision creates a new root which shares
 unchanged subtrees with its prior step.
 
@@ -337,18 +374,19 @@ Therefore each leaf carries provenance, but not an absolute realized offset:
    Which anomaly ids, if any, make this geometry review-dangerous.
 
 Accepted edits are thus "lightly tracked": they influence geometry and undo,
-but they do not become user-facing anomalies.
+but they do not become user-facing anomalies.  The text of a deletion must
+be cached for undo, that of an insertion need not be.
 
 ### Intended leaf shape
 
 ```zig
-pub const ProjectionLeaf = struct {
+pub const CorrectionLeaf = struct {
     kind: LeafKind,
 
     corpus_start: u32,
     corpus_end: u32,
 
-    realized_width: u32,
+    width: u32,
 
     decision_ids: IdRange,
     anomaly_ids: IdRange,
@@ -364,42 +402,20 @@ step share prior structure without rewriting every downstream leaf.
 The exact storage may use packed arrays or side tables, but the semantics above
 are the contract.
 
-### Query rules
-
-The tree must support three query modes:
-
-1. map a corpus span to realized text
-2. inspect an insertion boundary from both sides
-3. enumerate touched anomaly ids across an arbitrary query
-
-Querying the tree means descending from the current root while accumulating
-deviation.  By the time the query reaches a leaf, it has both:
-
-- the leaf's local geometry
-- the total deviation induced by the path taken to reach it
-
-Realized coordinates are produced from that combination.
-
-A query is mechanically safe only when:
-
-- its mapping is continuous
-- its geometry is representable by the effect being projected
-- its touched anomaly set allows a well-defined operation
-
-Otherwise the result is `blocked` or `composite`.
-
 ## Decision semantics
 
 Every reviewed action creates a new step.
 
 ### Skip decision
 
-Skipping a raw delta op does two things:
+Deciding a raw delta op does two things:
 
 1. create a new `DecisionRecord`
-2. if the skip is a divergence, create a new `AnomalyRecord`
+2. If this is a skip, create a new `AnomalyRecord`
 
-Then it produces a new translation root.
+Then it produces a new correction root.  Span is updated in reference
+to the realized text, deviation in (inverse) reference to the corpus.
+The root deviation is always zero.
 
 Rules:
 
@@ -415,7 +431,7 @@ Rules:
 Applying a raw delta op creates:
 
 1. a new `DecisionRecord`
-2. a new translation root
+2. a new correction root
 
 It does not create an anomaly record.
 
@@ -430,12 +446,13 @@ Rules:
 
 This is the key answer to the undo concern: accepted edits are not anomalies,
 but they are absolutely part of history because they visibly move the
-translation surface.
+correction surface.  In terms of the tree, they increase or decrease spans,
+but introduce no additional deviation.
 
 ## Projected op semantics
 
 `previewNext()` derives a `ProjectedOp` for the current raw op index by querying
-the current translation tree.
+the current correction tree.
 
 ### Classification rules
 
@@ -446,10 +463,11 @@ the current translation tree.
   The op crosses one anomaly but still has a well-defined apply semantics.
 - `clipped`
   The op is partly in a pristine region and partly in an anomaly region.
-- `composite`
-  The op spans multiple partitions and cannot be summarized as one simple case.
-- `blocked`
-  No mechanically safe action exists without extra operator intent.
+- `stranded`
+  The op lies wholly within an anomaly.
+- `complex`
+  Any target across a number and type of spans such that we have not made a
+  case to handle it.
 
 ### Delete-over-imposition
 
@@ -471,18 +489,18 @@ end must own the distinction.
 The intended backend surface is:
 
 ```zig
-pub fn openStep(manager: *ChangeManager, raw_delta: *const ZDelta, target_revision: usize) !void
-pub fn previewNext(manager: *const ChangeManager) !?ProjectedOp
-pub fn applyNext(manager: *ChangeManager, resolution: ApplyResolution) !bool
-pub fn skipNext(manager: *ChangeManager) !bool
-pub fn applyRest(manager: *ChangeManager, default_resolution: ApplyResolution) !usize
-pub fn skipRest(manager: *ChangeManager) !usize
-pub fn finishStep(manager: *ChangeManager) !void
-pub fn undo(manager: *ChangeManager) !bool
-pub fn redo(manager: *ChangeManager) !bool
-pub fn currentText(manager: *const ChangeManager) []const u8
-pub fn anomalies(manager: *const ChangeManager) []const AnomalyRecord
-pub fn recentDecisions(manager: *const ChangeManager) []const DecisionRecord
+pub fn openStep(manager: *DeltaGuidanceSystem, raw_delta: *const ZDelta, target_revision: usize) !void;
+pub fn previewNext(manager: *const DeltaGuidanceSystem) !?ProjectedOp;
+pub fn applyNext(manager: *DeltaGuidanceSystem, resolution: ApplyResolution) !bool;
+pub fn skipNext(manager: *DeltaGuidanceSystem) !bool;
+pub fn applyRest(manager: *DeltaGuidanceSystem, default_resolution: ApplyResolution) !usize;
+pub fn skipRest(manager: *DeltaGuidanceSystem) !usize;
+pub fn finishStep(manager: *DeltaGuidanceSystem) !void;
+pub fn undo(manager: *DeltaGuidanceSystem) !bool;
+pub fn redo(manager: *DeltaGuidanceSystem) !bool;
+pub fn currentText(manager: *const DeltaGuidanceSystem) []const u8;
+pub fn anomalies(manager: *const DeltaGuidanceSystem) []const AnomalyRecord;
+pub fn recentDecisions(manager: *const DeltaGuidanceSystem) []const DecisionRecord;
 ```
 
 ### API intent
@@ -519,7 +537,7 @@ The step lifecycle is:
    The manager attaches an immutable raw delta.  The current step and the
    step-before axis are identical here.
 2. `previewNext`
-   The manager projects the next raw op through the current translation tree.
+   The manager projects the next raw op through the current correction tree.
 3. decision
    `applyNext` or `skipNext` create a new immutable step and update the
    realized text buffer.
@@ -532,7 +550,7 @@ The step lifecycle is:
 
 Promotion is the only place where accepted edits stop appearing as temporary
 evacuation/imposition geometry.  Before promotion they must remain visible in
-the translation tree because later ops in the same step depend on the
+the correction tree because later ops in the same step depend on the
 deviation
 they create.
 
@@ -566,7 +584,7 @@ the chain reachable from `current_step` by walking `prior` and `next` is the
 live history.
 
 The choice of a double-linked list serves to preserve the option of a
-more complex total history, the single-path fact of this goal should not
+more complex total history.  The single-path fact of this goal should not
 be over-optimized for.
 
 ## Session integration
@@ -581,7 +599,7 @@ But the snapshot data changes materially.
 
 ### Session rules
 
-- the session must read anomalies directly from `ChangeManager`
+- the session must read anomalies directly from `DeltaGuidanceSystem`
 - there is no suffix-derived "active skipped" concept
 - the visible anomaly list is the full anomaly set reachable from the current
   step
@@ -599,10 +617,10 @@ The implementation must preserve these invariants.
 1. The raw `ZDelta` attached to an open step is immutable.
 2. Every reviewed decision creates exactly one new step.
 3. Every skipped divergence creates exactly one anomaly record.
-4. Accepted edits alter the translation tree, but not the anomaly log.
+4. Accepted edits alter the correction tree, but not the anomaly log.
 5. The realized buffer and `current_step.projection_root` always describe the
    same state.
-6. Undo restores both text and translation surface.
+6. Undo restores both text and correction surface.
 7. Step finish absorbs accepted edits into the next corpus baseline without
    replaying history.
 8. Later deltas are queried against the current tree; they are never rewritten
@@ -610,8 +628,7 @@ The implementation must preserve these invariants.
 
 ## Implementation notes
 
-The first implementation should aim for correctness and clarity before clever
-packing.
+The first implementation should aim for correctness, clarity, and fidelity.
 
 Practical preferences:
 
@@ -627,7 +644,11 @@ buffer mechanics only.  Its harmonization model should not survive.
 
 ## Test plan
 
-### Translation tree geometry
+Tests use a combination of geometric strings (`"XXXXXAAAXXXXX"`) and
+phrases / sentences as test data.  ZDeltas should be constructed by
+diffing strings rather than directly from parts.
+
+### Correction tree geometry
 
 - declined insert creates an anomalous evacuation and downstream negative
   deviation
@@ -647,6 +668,9 @@ buffer mechanics only.  Its harmonization model should not survive.
   `delete_corpus_only`
 - composite edits gather all touched anomaly ids
 - blocked edits do not pretend to be simple rewritten spans
+  - there is no such thing as a 'blocked' edit in a sense where it would
+    be impossible to act on it.  this concept stands in for 'the possible
+    decisions for this edit are beyond what we happen to currently provide'.
 
 ### Step behavior
 

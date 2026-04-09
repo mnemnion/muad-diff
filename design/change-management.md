@@ -67,19 +67,36 @@ and we may posit that, in making the decision to accept or reject the
 insert, those positions between two regions may call for different
 display from those wholly enclosed within one.
 
+Thus, there is a position, or region, where an edit may affect the text,
+pending the decision to do so.  This we call, the `target`.
+
 The number and nature of regions crossed by a single edit is unbounded,
 such that every variation cannot be named.  But certain ones must be:
 we call an edit lying wholly within a pristine region `pure`, one rooted
-on both sides in pristine regions, but crossing one anomoly, we call
-`overlaid`, one with a foot in each status is `clipped`.
+on both sides in pristine regions, but crossing one anomaly, we call
+`overlaid`, one with a foot in each status is `clipped`.  One wholly
+within a single anomaly is `stranded`, anything more complex, is
+`composite.`
 
 To apply a delete which overlays an evacuation is well-formed: simply,
 we delete such text as still exists, and similarly, if skipped, such
-text as still remains becomes rescued.  An insertion wholly within an
+text as still remains becomes rescued.  An insertion stranded within an
 evacuation has no effect if declined, and ramifies matters if applied,
 but is similarly well-formed as its inverse.
 
 A delete overlaying an imposition is more complex, as the user may wish
 to apply the delete wholly, that is, to include the rescue, or in part,
 deleting that which was but leaving that which wasn't but now is.
+
+An insertion stranded within an evacuation may surely be applied, and
+the effect itself is simple: the text appears between the borders of
+the evacuation.  But the consequences are not simple: we must continue
+to track the evacuation, which no longer has extent, but has phantom
+location on one or both sides of the insertion, within which later
+edits may expect to appear.
+
+A deletion stranded within an evacuation is automatic, but with
+cognate effect to the prior case: the shape of the evacuation
+shrinks, but in such a manner as to translate the senseward side
+of the text, requiring a bifurcation.
 
