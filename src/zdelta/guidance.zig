@@ -169,6 +169,16 @@ pub const AnomalyRecord = union(enum) {
     },
 };
 
+pub const Error = OOM || error{
+    BadZDeltaNumber,
+    GuidanceTextTooLarge,
+    MissingZDelta,
+    StepAlreadyOpen,
+    UnfinishedZDelta,
+    UnresolvedZDeltaOp,
+    ZDeltaTextLengthMismatch,
+};
+
 /// Preview result for the next actionable raw op in an attached step.
 pub const EffectiveEdit = struct {
     raw_op_index: u32,
@@ -393,7 +403,7 @@ pub const DeltaGuidanceSystem = struct {
     pub const growth_fudge: comptime_int = 16;
 
     /// Allocates a guidance system on the heap and seeds it from initial text.
-    pub fn createWithText(allocator: Allocator, text: []const u8) !*DeltaGuidanceSystem {
+    pub fn createWithText(allocator: Allocator, text: []const u8) Error!*DeltaGuidanceSystem {
         const gs = try allocator.create(DeltaGuidanceSystem);
         errdefer allocator.destroy(gs);
         gs.* = try initText(allocator, text);
@@ -408,7 +418,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Creates a guidance system from initial text and seeds the synthetic genesis step.
-    pub fn initText(allocator: Allocator, text: []const u8) !DeltaGuidanceSystem {
+    pub fn initText(allocator: Allocator, text: []const u8) Error!DeltaGuidanceSystem {
         const text_len = try checkedGuidanceTextLen(text.len);
         const extra_slack = try initialGuidanceSlack(text.len);
         const head_room = extra_slack / 2;
@@ -509,7 +519,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Attaches a raw delta as the next review step against the current expected text.
-    pub fn openStep(gs: *DeltaGuidanceSystem, raw_delta: *ZDelta, target_revision: usize) !void {
+    pub fn openStep(gs: *DeltaGuidanceSystem, raw_delta: *ZDelta, target_revision: usize) Error!void {
         errdefer raw_delta.destroy(gs.allocator);
         if (gs.attached_step != null) return error.StepAlreadyOpen;
         if (gs.current_step.ex_len != raw_delta.originalBeforeLength()) return error.ZDeltaTextLengthMismatch;
@@ -536,13 +546,13 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Returns the next actionable edit, skipping raw equal operations on the way.
-    pub fn previewNext(gs: *DeltaGuidanceSystem) !?EffectiveEdit {
+    pub fn previewNext(gs: *DeltaGuidanceSystem) Error!?EffectiveEdit {
         const scanned = try gs.scanNextEdit() orelse return null;
         return scanned.edit;
     }
 
     /// Accepts the next actionable edit and advances the open step by one decision.
-    pub fn applyNext(gs: *DeltaGuidanceSystem, resolution: ?ApplyResolution) !bool {
+    pub fn applyNext(gs: *DeltaGuidanceSystem, resolution: ?ApplyResolution) Error!bool {
         const scanned = try gs.scanNextEdit() orelse return false;
         if (scanned.edit.class == .complex) return error.UnresolvedZDeltaOp;
 
@@ -559,7 +569,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Declines or rescues the next actionable edit and advances the open step.
-    pub fn skipNext(gs: *DeltaGuidanceSystem) !bool {
+    pub fn skipNext(gs: *DeltaGuidanceSystem) Error!bool {
         const scanned = try gs.scanNextEdit() orelse return false;
         if (scanned.edit.class == .complex) return error.UnresolvedZDeltaOp;
 
@@ -575,21 +585,21 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Applies every remaining actionable edit in the attached delta.
-    pub fn applyRest(gs: *DeltaGuidanceSystem, default_resolution: ?ApplyResolution) !usize {
+    pub fn applyRest(gs: *DeltaGuidanceSystem, default_resolution: ?ApplyResolution) Error!usize {
         var count: usize = 0;
         while (try gs.applyNext(default_resolution)) count += 1;
         return count;
     }
 
     /// Skips every remaining actionable edit in the attached delta.
-    pub fn skipRest(gs: *DeltaGuidanceSystem) !usize {
+    pub fn skipRest(gs: *DeltaGuidanceSystem) Error!usize {
         var count: usize = 0;
         while (try gs.skipNext()) count += 1;
         return count;
     }
 
     /// Promotes the completed correction surface onto the next revision's expected axis.
-    pub fn finishStep(gs: *DeltaGuidanceSystem) !void {
+    pub fn finishStep(gs: *DeltaGuidanceSystem) Error!void {
         const attached = gs.attached_step orelse return error.MissingZDelta;
         if (try gs.scanNextEdit()) |_| return error.UnfinishedZDelta;
 
@@ -654,7 +664,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Moves back one decided step and restores buffer contents plus preview cursor state.
-    pub fn undo(gs: *DeltaGuidanceSystem) !bool {
+    pub fn undo(gs: *DeltaGuidanceSystem) Error!bool {
         const current = gs.current_step;
         const prior = current.prior orelse return false;
 
@@ -668,7 +678,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Replays the next step on the active history path and restores preview cursor state.
-    pub fn redo(gs: *DeltaGuidanceSystem) !bool {
+    pub fn redo(gs: *DeltaGuidanceSystem) Error!bool {
         const next = gs.current_step.next orelse return false;
         try gs.redoDecision(next.decision);
         gs.current_step = next;
@@ -685,22 +695,22 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Enlarges the buffer when upcoming edits exceed the current slack budget.
-    fn growForNeed(gs: *DeltaGuidanceSystem, need: u32) !void {
+    fn growForNeed(gs: *DeltaGuidanceSystem, need: u32) Error!void {
         try apply_base.growForNeed(gs, growth_fudge, need);
     }
 
     /// Ensures there is enough slack before the text for a front-biased edit.
-    fn ensureHeadRoom(gs: *DeltaGuidanceSystem, need: u32) !void {
+    fn ensureHeadRoom(gs: *DeltaGuidanceSystem, need: u32) Error!void {
         try apply_base.ensureHeadRoom(gs, growth_fudge, need);
     }
 
     /// Ensures there is enough slack after the text for a tail-biased edit.
-    fn ensureTailRoom(gs: *DeltaGuidanceSystem, need: u32) !void {
+    fn ensureTailRoom(gs: *DeltaGuidanceSystem, need: u32) Error!void {
         try apply_base.ensureTailRoom(gs, growth_fudge, need);
     }
 
     /// Inserts bytes into the effective buffer at the requested effective offset.
-    fn insert(gs: *DeltaGuidanceSystem, at: u32, new_text: []const u8) !void {
+    fn insert(gs: *DeltaGuidanceSystem, at: u32, new_text: []const u8) Error!void {
         dbgassert(new_text.len <= std.math.maxInt(u32));
         const new_len: u32 = @intCast(new_text.len);
         dbgassert(at <= gs.textLen());
@@ -751,7 +761,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Walks forward from the attachment cursor until the next actionable raw op.
-    fn scanNextEdit(gs: *DeltaGuidanceSystem) !?ScannedEdit {
+    fn scanNextEdit(gs: *DeltaGuidanceSystem) Error!?ScannedEdit {
         const attached = gs.attached_step orelse return error.MissingZDelta;
         var raw_index = attached.raw_index_next;
         var expected_cursor = attached.expected_cursor_next;
@@ -787,7 +797,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Classifies an insertion against the current correction surface.
-    fn previewInsert(gs: *DeltaGuidanceSystem, raw_index: u32, expected_at: u32, insert_len: u32) !EffectiveEdit {
+    fn previewInsert(gs: *DeltaGuidanceSystem, raw_index: u32, expected_at: u32, insert_len: u32) Error!EffectiveEdit {
         _ = insert_len;
         gs.preview_anomalies.clearRetainingCapacity();
 
@@ -826,7 +836,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Classifies a deletion against the current correction surface.
-    fn previewDelete(gs: *DeltaGuidanceSystem, raw_index: u32, expected_start: u32, len: u32) !EffectiveEdit {
+    fn previewDelete(gs: *DeltaGuidanceSystem, raw_index: u32, expected_start: u32, len: u32) Error!EffectiveEdit {
         gs.preview_anomalies.clearRetainingCapacity();
 
         const expected = Span{ .start = expected_start, .end = expected_start + len };
@@ -943,7 +953,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Chooses the concrete apply resolution for a previewed edit.
-    fn resolveApply(gs: *DeltaGuidanceSystem, edit: *const EffectiveEdit, resolution: ?ApplyResolution) !?ApplyResolution {
+    fn resolveApply(gs: *DeltaGuidanceSystem, edit: *const EffectiveEdit, resolution: ?ApplyResolution) Error!?ApplyResolution {
         _ = gs;
         if (edit.available_resolutions.len == 0) return null;
         if (resolution) |chosen| {
@@ -956,7 +966,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Accepts a raw insert, mutating the buffer and adding an imposition region.
-    fn applyInsert(gs: *DeltaGuidanceSystem, scanned: ScannedEdit, span: DeltaSpan, resolution: ?ApplyResolution) !void {
+    fn applyInsert(gs: *DeltaGuidanceSystem, scanned: ScannedEdit, span: DeltaSpan, resolution: ?ApplyResolution) Error!void {
         _ = resolution;
         dbgassert(scanned.edit.class == .pure);
 
@@ -1027,7 +1037,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Declines a raw insert, recording an evacuation anomaly without changing text.
-    fn skipInsert(gs: *DeltaGuidanceSystem, scanned: ScannedEdit, span: DeltaSpan) !void {
+    fn skipInsert(gs: *DeltaGuidanceSystem, scanned: ScannedEdit, span: DeltaSpan) Error!void {
         dbgassert(scanned.edit.class == .pure);
 
         const attached = &gs.attached_step.?;
@@ -1094,7 +1104,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Accepts a raw delete, storing removed bytes in residue for undo.
-    fn applyDelete(gs: *DeltaGuidanceSystem, scanned: ScannedEdit, len: u32, resolution: ?ApplyResolution) !void {
+    fn applyDelete(gs: *DeltaGuidanceSystem, scanned: ScannedEdit, len: u32, resolution: ?ApplyResolution) Error!void {
         const expected = scanned.edit.expected_target.delete;
         const effective = scanned.edit.effective_target.delete;
         const attached = &gs.attached_step.?;
@@ -1164,7 +1174,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Rescues a raw delete, preserving the effective text as an imposition anomaly.
-    fn skipDelete(gs: *DeltaGuidanceSystem, scanned: ScannedEdit, len: u32) !void {
+    fn skipDelete(gs: *DeltaGuidanceSystem, scanned: ScannedEdit, len: u32) Error!void {
         if (scanned.edit.class != .pure) return error.UnresolvedZDeltaOp;
         const expected = scanned.edit.expected_target.delete;
         const effective = scanned.edit.effective_target.delete;
@@ -1251,7 +1261,7 @@ pub const DeltaGuidanceSystem = struct {
         anomaly: ?AnomalyIndex,
         raw_index_next: u32,
         expected_cursor_next: u32,
-    ) !void {
+    ) Error!void {
         if (gs.current_step.next) |future| gs.freeFutureFrom(future);
         gs.current_step.next = null;
 
@@ -1281,7 +1291,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Reverses the text effects of a single recorded decision.
-    fn undoDecision(gs: *DeltaGuidanceSystem, decision: DecisionIndex) !void {
+    fn undoDecision(gs: *DeltaGuidanceSystem, decision: DecisionIndex) Error!void {
         switch (gs.decisions.items[decisionToInt(decision)]) {
             .insert => |r| gs.delete(r.effective_at_before, r.residue_len),
             .delete => |r| try gs.insert(r.effective_before.start, gs.residueSlice(.{
@@ -1293,7 +1303,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Reapplies the text effects of a single recorded decision.
-    fn redoDecision(gs: *DeltaGuidanceSystem, decision: DecisionIndex) !void {
+    fn redoDecision(gs: *DeltaGuidanceSystem, decision: DecisionIndex) Error!void {
         switch (gs.decisions.items[decisionToInt(decision)]) {
             .insert => |r| try gs.insert(r.effective_at_before, gs.residueSlice(.{
                 .off = r.residue_off,
@@ -1305,25 +1315,25 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Slices the attached delta's insert-text payload for one raw insert op.
-    fn deltaInsertText(gs: *const DeltaGuidanceSystem, span: DeltaSpan) ![]const u8 {
+    fn deltaInsertText(gs: *const DeltaGuidanceSystem, span: DeltaSpan) Error![]const u8 {
         const attached = gs.attached_step orelse return error.MissingZDelta;
         return attached.raw_delta.insert_text[span.offset..][0..span.len];
     }
 
     /// Appends a decision record and returns its stable global id.
-    fn appendDecision(gs: *DeltaGuidanceSystem, record: DecisionRecord) !DecisionIndex {
+    fn appendDecision(gs: *DeltaGuidanceSystem, record: DecisionRecord) Error!DecisionIndex {
         try gs.decisions.append(gs.allocator, record);
         return decisionIndex(gs.decisions.items.len - 1);
     }
 
     /// Appends an anomaly record and returns its stable global id.
-    fn appendAnomaly(gs: *DeltaGuidanceSystem, record: AnomalyRecord) !AnomalyIndex {
+    fn appendAnomaly(gs: *DeltaGuidanceSystem, record: AnomalyRecord) Error!AnomalyIndex {
         try gs.anomalies.append(gs.allocator, record);
         return anomalyIndex(gs.anomalies.items.len - 1);
     }
 
     /// Copies undo-relevant bytes into the shared residue store.
-    fn appendResidue(gs: *DeltaGuidanceSystem, bytes: []const u8) !ProvenanceRef {
+    fn appendResidue(gs: *DeltaGuidanceSystem, bytes: []const u8) Error!ProvenanceRef {
         const off = try checkedU32(gs.residue.items.len);
         try gs.residue.appendSlice(gs.allocator, bytes);
         return .{ .off = off, .len = try checkedU32(bytes.len) };
@@ -1337,21 +1347,21 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Appends decision ids to the provenance side table and returns their range.
-    fn appendDecisionProvenance(gs: *DeltaGuidanceSystem, values: []const DecisionIndex) !ProvenanceRef {
+    fn appendDecisionProvenance(gs: *DeltaGuidanceSystem, values: []const DecisionIndex) Error!ProvenanceRef {
         const off = try checkedU32(gs.decision_provenance.items.len);
         try gs.decision_provenance.appendSlice(gs.allocator, values);
         return .{ .off = off, .len = try checkedU32(values.len) };
     }
 
     /// Appends anomaly ids to the provenance side table and returns their range.
-    fn appendAnomalyProvenance(gs: *DeltaGuidanceSystem, values: []const AnomalyIndex) !ProvenanceRef {
+    fn appendAnomalyProvenance(gs: *DeltaGuidanceSystem, values: []const AnomalyIndex) Error!ProvenanceRef {
         const off = try checkedU32(gs.anomaly_provenance.items.len);
         try gs.anomaly_provenance.appendSlice(gs.allocator, values);
         return .{ .off = off, .len = try checkedU32(values.len) };
     }
 
     /// Extends an existing decision provenance range with one additional decision id.
-    fn combineDecisionRefs(gs: *DeltaGuidanceSystem, base: ProvenanceRef, extra: DecisionIndex) !ProvenanceRef {
+    fn combineDecisionRefs(gs: *DeltaGuidanceSystem, base: ProvenanceRef, extra: DecisionIndex) Error!ProvenanceRef {
         const start: usize = base.off;
         const len: usize = base.len;
         var scratch = std.ArrayListUnmanaged(DecisionIndex).empty;
@@ -1362,14 +1372,14 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Copies anomaly ids into preview scratch space for the current classification result.
-    fn appendPreviewAnomalies(gs: *DeltaGuidanceSystem, ref: ProvenanceRef) !void {
+    fn appendPreviewAnomalies(gs: *DeltaGuidanceSystem, ref: ProvenanceRef) Error!void {
         const start: usize = ref.off;
         const len: usize = ref.len;
         try gs.preview_anomalies.appendSlice(gs.allocator, gs.anomaly_provenance.items[start..][0..len]);
     }
 
     /// Collects anomaly ids touching or containing an expected insertion boundary.
-    fn appendInsertPointAnomalies(gs: *DeltaGuidanceSystem, point: u32) !void {
+    fn appendInsertPointAnomalies(gs: *DeltaGuidanceSystem, point: u32) Error!void {
         for (gs.current_step.regions) |region| {
             switch (region) {
                 .evacuation => |r| {
@@ -1393,7 +1403,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Converts builder-style regions into absolute coordinates owned by a new step.
-    fn normalizeAndOwnRegions(gs: *DeltaGuidanceSystem, raw_regions: []const CorrectionRegion) ![]CorrectionRegion {
+    fn normalizeAndOwnRegions(gs: *DeltaGuidanceSystem, raw_regions: []const CorrectionRegion) Error![]CorrectionRegion {
         var normalized = std.ArrayListUnmanaged(CorrectionRegion).empty;
         defer normalized.deinit(gs.allocator);
 
@@ -1423,12 +1433,12 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Materializes the public correction tree from a normalized region slice.
-    fn buildTree(gs: *DeltaGuidanceSystem, regions: []const CorrectionRegion) !*CorrectionNode {
+    fn buildTree(gs: *DeltaGuidanceSystem, regions: []const CorrectionRegion) Error!*CorrectionNode {
         return gs.buildTreeRange(regions, 0, regions.len);
     }
 
     /// Builds one balanced tree node covering a contiguous subrange of regions.
-    fn buildTreeRange(gs: *DeltaGuidanceSystem, regions: []const CorrectionRegion, start: usize, end: usize) !*CorrectionNode {
+    fn buildTreeRange(gs: *DeltaGuidanceSystem, regions: []const CorrectionRegion, start: usize, end: usize) Error!*CorrectionNode {
         dbgassert(start < end);
         const node = try gs.allocator.create(CorrectionNode);
         if (end - start == 1) {
@@ -1481,7 +1491,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Splits any expected-spanning regions that straddle the requested expected point.
-    fn splitRegionsAtExpected(gs: *DeltaGuidanceSystem, regions: []const CorrectionRegion, point: u32) ![]CorrectionRegion {
+    fn splitRegionsAtExpected(gs: *DeltaGuidanceSystem, regions: []const CorrectionRegion, point: u32) Error![]CorrectionRegion {
         var out = std.ArrayListUnmanaged(CorrectionRegion).empty;
         defer out.deinit(gs.allocator);
 
@@ -1535,7 +1545,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Returns indices of regions touched by an expected-axis delete target.
-    fn collectTouchedRegions(gs: *DeltaGuidanceSystem, expected: Span) !std.ArrayListUnmanaged(usize) {
+    fn collectTouchedRegions(gs: *DeltaGuidanceSystem, expected: Span) Error!std.ArrayListUnmanaged(usize) {
         var out = std.ArrayListUnmanaged(usize).empty;
         for (gs.current_step.regions, 0..) |region, idx| {
             if (expectedSpansOverlap(region, expected) or isImpositionInside(region, expected)) {
@@ -1580,7 +1590,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Maps an expected insertion point onto the effective axis.
-    fn effectiveInsertPoint(gs: *const DeltaGuidanceSystem, point: u32) !u32 {
+    fn effectiveInsertPoint(gs: *const DeltaGuidanceSystem, point: u32) Error!u32 {
         var fallback: ?u32 = null;
         var after_impositions: ?u32 = null;
         for (gs.current_step.regions) |region| {
@@ -1605,7 +1615,7 @@ pub const DeltaGuidanceSystem = struct {
     }
 
     /// Maps an expected delete boundary onto the effective axis.
-    fn effectiveDeleteBoundary(gs: *const DeltaGuidanceSystem, point: u32) !u32 {
+    fn effectiveDeleteBoundary(gs: *const DeltaGuidanceSystem, point: u32) Error!u32 {
         var fallback: ?u32 = null;
         for (gs.current_step.regions) |region| {
             switch (region) {
@@ -1719,37 +1729,37 @@ fn decisionToInt(value: DecisionIndex) usize {
 }
 
 /// Narrows a usize to u32 using the shared zdelta checked conversion.
-fn checkedU32(value: usize) !u32 {
+fn checkedU32(value: usize) Error!u32 {
     return zdelta_mod.checkedU32(value);
 }
 
 /// Narrows initial text length to the supported in-memory guidance range.
-fn checkedGuidanceTextLen(value: usize) !u32 {
+fn checkedGuidanceTextLen(value: usize) Error!u32 {
     return checkedU32(value) catch error.GuidanceTextTooLarge;
 }
 
 /// Computes the initial slack budget for guidance startup.
-fn initialGuidanceSlack(text_len: usize) !usize {
+fn initialGuidanceSlack(text_len: usize) Error!usize {
     return apply_base.initialSlack(text_len) catch error.GuidanceTextTooLarge;
 }
 
 /// Computes the backing buffer length for the initial text plus startup slack.
-fn totalGuidanceBufferLen(text_len: usize, extra_slack: usize) !usize {
+fn totalGuidanceBufferLen(text_len: usize, extra_slack: usize) Error!usize {
     return std.math.add(usize, text_len, extra_slack) catch error.GuidanceTextTooLarge;
 }
 
 /// Adds two u32 values using the shared zdelta checked addition helper.
-fn addU32(a: u32, b: u32) !u32 {
+fn addU32(a: u32, b: u32) Error!u32 {
     return zdelta_mod.addU32(a, b);
 }
 
 /// Test helper asserting the current effective text.
-fn expectText(expected: []const u8, gs: *const DeltaGuidanceSystem) !void {
+fn expectText(expected: []const u8, gs: *const DeltaGuidanceSystem) TestError!void {
     try testing.expectEqualStrings(expected, gs.currentText());
 }
 
 /// Test helper that diffs two texts and decodes the result into an owned `ZDelta`.
-fn makeOwnedZDelta(allocator: Allocator, before: []const u8, after: []const u8) !*ZDelta {
+fn makeOwnedZDelta(allocator: Allocator, before: []const u8, after: []const u8) TestError!*ZDelta {
     var diff: dmp.Diff = .default;
     defer diff.deinit(allocator);
     _ = try diff.diff(allocator, before, after);
@@ -1765,7 +1775,7 @@ fn makeOwnedZDelta(allocator: Allocator, before: []const u8, after: []const u8) 
 //| Test
 
 /// Runs the non-`test` guidance checks from the root `zdelta.zig` test surface.
-pub fn runRuntimeChecks() !void {
+pub fn runRuntimeChecks() TestError!void {
     try guidanceInitGenesis();
     try guidancePreviewPureInsert();
     try guidanceDeclineInsert();
@@ -1777,7 +1787,7 @@ pub fn runRuntimeChecks() !void {
 }
 
 /// Verifies genesis-step setup for a freshly initialized guidance system.
-fn guidanceInitGenesis() !void {
+fn guidanceInitGenesis() TestError!void {
     var gs = try DeltaGuidanceSystem.initText(testing.allocator, "abcd");
     defer gs.deinit();
 
@@ -1788,7 +1798,7 @@ fn guidanceInitGenesis() !void {
 }
 
 /// Verifies pure insertion preview on an untouched pristine surface.
-fn guidancePreviewPureInsert() !void {
+fn guidancePreviewPureInsert() TestError!void {
     const allocator = testing.allocator;
     var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
     defer gs.deinit();
@@ -1802,7 +1812,7 @@ fn guidancePreviewPureInsert() !void {
 }
 
 /// Verifies that declining an insert creates evacuation residue without text mutation.
-fn guidanceDeclineInsert() !void {
+fn guidanceDeclineInsert() TestError!void {
     const allocator = testing.allocator;
     var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
     defer gs.deinit();
@@ -1816,7 +1826,7 @@ fn guidanceDeclineInsert() !void {
 }
 
 /// Verifies that rescuing a delete creates an imposition anomaly without residue bytes.
-fn guidanceRescueDelete() !void {
+fn guidanceRescueDelete() TestError!void {
     const allocator = testing.allocator;
     var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
     defer gs.deinit();
@@ -1830,7 +1840,7 @@ fn guidanceRescueDelete() !void {
 }
 
 /// Verifies accepted-delete residue storage together with undo and redo.
-fn guidanceAcceptDeleteUndoRedo() !void {
+fn guidanceAcceptDeleteUndoRedo() TestError!void {
     const allocator = testing.allocator;
     var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
     defer gs.deinit();
@@ -1847,7 +1857,7 @@ fn guidanceAcceptDeleteUndoRedo() !void {
 }
 
 /// Verifies finish-step promotion and later `delete_whole` over an imposition.
-fn guidanceFinishRescueThenDeleteWhole() !void {
+fn guidanceFinishRescueThenDeleteWhole() TestError!void {
     const allocator = testing.allocator;
     var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
     defer gs.deinit();
@@ -1869,7 +1879,7 @@ fn guidanceFinishRescueThenDeleteWhole() !void {
 }
 
 /// Verifies that making a new decision after undo clears the redo branch.
-fn guidanceUndoClearsRedo() !void {
+fn guidanceUndoClearsRedo() TestError!void {
     const allocator = testing.allocator;
     var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
     defer gs.deinit();
@@ -1883,7 +1893,7 @@ fn guidanceUndoClearsRedo() !void {
 }
 
 /// Verifies that inserts landing inside anomalous evacuations preview as stranded.
-fn guidancePreviewStrandedInsert() !void {
+fn guidancePreviewStrandedInsert() TestError!void {
     const allocator = testing.allocator;
     var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
     defer gs.deinit();
@@ -2065,6 +2075,13 @@ test "DeltaGuidanceSystem previewNext marks inserts inside evacuations as strand
 const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
+const OOM = std.mem.Allocator.Error;
+const TestError = Error || zdelta_mod.ZDeltaError || error{
+    TestExpectedEqual,
+    TestExpectedError,
+    TestUnexpectedError,
+    TestUnexpectedResult,
+};
 const apply_base = @import("apply_base.zig");
 const common_apply = @import("common.zig");
 const zdelta_mod = @import("../zdelta.zig");
