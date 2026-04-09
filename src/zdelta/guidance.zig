@@ -1866,22 +1866,115 @@ fn makeOwnedZDelta(allocator: Allocator, before: []const u8, after: []const u8) 
     return zdelta;
 }
 
-//| Test
+/// Declarative action to take for one actionable preview during a test case.
+const DeclarativeDecision = union(enum) {
+    accept,
+    decline,
+    rescue,
+    accept_with: ApplyResolution,
+};
 
-/// Runs the non-`test` guidance checks from the root `zdelta.zig` test surface.
-pub fn runRuntimeChecks() TestError!void {
-    try guidanceInitGenesis();
-    try guidancePreviewPureInsert();
-    try guidanceDeclineInsert();
-    try guidanceRescueDelete();
-    try guidanceAcceptDeleteUndoRedo();
-    try guidanceFinishRescueThenDeleteWhole();
-    try guidanceUndoClearsRedo();
-    try guidancePreviewStrandedInsert();
+/// Minimal declarative spec for one guidance test scenario.
+const DeclarativeGuidanceCase = struct {
+    before: []const u8,
+    after: []const u8,
+    decisions: []const DeclarativeDecision,
+    effective_after: []const u8,
+    finish_step: bool = false,
+    target_revision: usize = 1,
+    dump_diff: bool = false,
+};
+
+/// Runs one declarative guidance scenario and returns the live guidance system for inspection.
+fn runDeclarativeGuidanceCase(
+    allocator: Allocator,
+    case: DeclarativeGuidanceCase,
+) TestError!DeltaGuidanceSystem {
+    var gs = try DeltaGuidanceSystem.initText(allocator, case.before);
+    errdefer gs.deinit();
+
+    const zdelta = try makeOwnedZDelta(allocator, case.before, case.after);
+    if (case.dump_diff) {
+        dumpZDeltaDiff(case.before, zdelta);
+        return error.SkipZigTest;
+    }
+    try gs.openStep(zdelta, case.target_revision);
+
+    for (case.decisions) |decision| {
+        switch (decision) {
+            .accept => try testing.expect(try gs.applyNext(null)),
+            .decline => try testing.expect(try gs.skipNext()),
+            .rescue => try testing.expect(try gs.skipNext()),
+            .accept_with => |resolution| try testing.expect(try gs.applyNext(resolution)),
+        }
+    }
+
+    try testing.expectEqual(@as(?EffectiveEdit, null), try gs.previewNext());
+    if (case.finish_step) try gs.finishStep();
+    try expectText(case.effective_after, &gs);
+    return gs;
 }
 
-/// Verifies genesis-step setup for a freshly initialized guidance system.
-fn guidanceInitGenesis() TestError!void {
+/// Prints one decoded zdelta op per line using plain diff-style markers.
+fn dumpZDeltaDiff(before: []const u8, zdelta: *const ZDelta) void {
+    var before_cursor: usize = 0;
+
+    std.debug.print("decoded zdelta for declarative case:\n", .{});
+    for (zdelta.ops) |op| {
+        switch (op) {
+            .equal => |len| {
+                const slice = before[before_cursor..][0..len];
+                before_cursor += len;
+                std.debug.print("  {s}\n", .{slice});
+            },
+            .delete => |len| {
+                const slice = before[before_cursor..][0..len];
+                before_cursor += len;
+                std.debug.print("- {s}\n", .{slice});
+            },
+            .insert => |span| {
+                const slice = zdelta.insert_text[span.offset..][0..span.len];
+                std.debug.print("+ {s}\n", .{slice});
+            },
+        }
+    }
+}
+
+/// Collects the terminal regions of a correction tree for test assertions.
+fn collectTestRegions(
+    allocator: Allocator,
+    root: *const CorrectionNode,
+) TestError![]CorrectionRegion {
+    var out = std.ArrayListUnmanaged(CorrectionRegion).empty;
+    defer out.deinit(allocator);
+    try appendTestRegions(allocator, &out, root);
+    return try out.toOwnedSlice(allocator);
+}
+
+/// Appends terminal regions from left to right for test-only inspection.
+fn appendTestRegions(
+    allocator: Allocator,
+    out: *std.ArrayListUnmanaged(CorrectionRegion),
+    node: *const CorrectionNode,
+) TestError!void {
+    switch (node.*) {
+        .region => |region| try out.append(allocator, region),
+        .span => |span| {
+            try appendTestRegions(allocator, out, span.left);
+            try appendTestRegions(allocator, out, span.right);
+        },
+    }
+}
+
+/// Counts non-terminal span nodes in a correction tree.
+fn countSpanNodes(node: *const CorrectionNode) usize {
+    return switch (node.*) {
+        .region => 0,
+        .span => |span| 1 + countSpanNodes(span.left) + countSpanNodes(span.right),
+    };
+}
+
+test "initText creates a synthetic genesis step" {
     var gs = try DeltaGuidanceSystem.initText(testing.allocator, "abcd");
     defer gs.deinit();
 
@@ -1891,22 +1984,36 @@ fn guidanceInitGenesis() TestError!void {
     try expectText("abcd", &gs);
 }
 
-/// Verifies pure insertion preview on an untouched pristine surface.
-fn guidancePreviewPureInsert() TestError!void {
+test "openStep rejects expected-length mismatch and duplicate opens" {
+    const allocator = testing.allocator;
+    var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
+    defer gs.deinit();
+
+    const wrong = try makeOwnedZDelta(allocator, "abc", "abc");
+    try testing.expectError(error.ZDeltaTextLengthMismatch, gs.openStep(wrong, 1));
+
+    const okay = try makeOwnedZDelta(allocator, "abcd", "abXd");
+    try gs.openStep(okay, 1);
+    const second = try makeOwnedZDelta(allocator, "abcd", "abcd");
+    try testing.expectError(error.StepAlreadyOpen, gs.openStep(second, 2));
+}
+
+test "previewNext skips equals and previews a pure insert" {
     const allocator = testing.allocator;
     var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
     defer gs.deinit();
 
     const zdelta = try makeOwnedZDelta(allocator, "abcd", "abXcd");
     try gs.openStep(zdelta, 1);
+
     const preview = (try gs.previewNext()).?;
     try testing.expectEqual(TargetClass.pure, preview.class);
+    try testing.expectEqual(@as(u32, 1), preview.raw_op_index);
     try testing.expectEqual(@as(u32, 2), preview.expected_target.insert_at);
     try testing.expectEqual(@as(u32, 2), preview.effective_target.insert_at);
 }
 
-/// Verifies that declining an insert creates evacuation residue without text mutation.
-fn guidanceDeclineInsert() TestError!void {
+test "skipNext decline creates evacuation residue and leaves text unchanged" {
     const allocator = testing.allocator;
     var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
     defer gs.deinit();
@@ -1914,13 +2021,16 @@ fn guidanceDeclineInsert() TestError!void {
     const zdelta = try makeOwnedZDelta(allocator, "abcd", "abXcd");
     try gs.openStep(zdelta, 1);
     try testing.expect(try gs.skipNext());
+
     try expectText("abcd", &gs);
+    try testing.expectEqual(@as(usize, 2), gs.decisions.items.len);
+    try testing.expectEqual(@as(usize, 1), gs.anomalies.items.len);
     try testing.expectEqualStrings("X", gs.residue.items);
     try testing.expectEqual(@as(u32, 5), gs.current_step.ex_len);
+    try testing.expectEqual(@as(u32, 4), gs.current_step.ef_len);
 }
 
-/// Verifies that rescuing a delete creates an imposition anomaly without residue bytes.
-fn guidanceRescueDelete() TestError!void {
+test "skipNext rescue creates an imposition without storing duplicate bytes" {
     const allocator = testing.allocator;
     var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
     defer gs.deinit();
@@ -1928,13 +2038,15 @@ fn guidanceRescueDelete() TestError!void {
     const zdelta = try makeOwnedZDelta(allocator, "abcd", "ad");
     try gs.openStep(zdelta, 1);
     try testing.expect(try gs.skipNext());
+
     try expectText("abcd", &gs);
+    try testing.expectEqual(@as(usize, 1), gs.anomalies.items.len);
     try testing.expectEqual(@as(usize, 0), gs.residue.items.len);
     try testing.expectEqual(@as(u32, 2), gs.current_step.ex_len);
+    try testing.expectEqual(@as(u32, 4), gs.current_step.ef_len);
 }
 
-/// Verifies accepted-delete residue storage together with undo and redo.
-fn guidanceAcceptDeleteUndoRedo() TestError!void {
+test "applyNext accepts delete and undo restores residue-backed bytes" {
     const allocator = testing.allocator;
     var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
     defer gs.deinit();
@@ -1942,6 +2054,7 @@ fn guidanceAcceptDeleteUndoRedo() TestError!void {
     const zdelta = try makeOwnedZDelta(allocator, "abcd", "ad");
     try gs.openStep(zdelta, 1);
     try testing.expect(try gs.applyNext(null));
+
     try expectText("ad", &gs);
     try testing.expectEqualStrings("bc", gs.residue.items);
     try testing.expect(try gs.undo());
@@ -1950,8 +2063,24 @@ fn guidanceAcceptDeleteUndoRedo() TestError!void {
     try expectText("ad", &gs);
 }
 
-/// Verifies finish-step promotion and later `delete_whole` over an imposition.
-fn guidanceFinishRescueThenDeleteWhole() TestError!void {
+test "applyNext accepts insert and undo removes it" {
+    const allocator = testing.allocator;
+    var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
+    defer gs.deinit();
+
+    const zdelta = try makeOwnedZDelta(allocator, "abcd", "abXcd");
+    try gs.openStep(zdelta, 1);
+    try testing.expect(try gs.applyNext(null));
+
+    try expectText("abXcd", &gs);
+    try testing.expectEqualStrings("X", gs.residue.items);
+    try testing.expect(try gs.undo());
+    try expectText("abcd", &gs);
+    try testing.expect(try gs.redo());
+    try expectText("abXcd", &gs);
+}
+
+test "finishStep promotes rescued deletes into later impositions" {
     const allocator = testing.allocator;
     var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
     defer gs.deinit();
@@ -1962,18 +2091,39 @@ fn guidanceFinishRescueThenDeleteWhole() TestError!void {
     try testing.expectEqual(null, try gs.previewNext());
     try gs.finishStep();
 
+    try testing.expectEqual(@as(u32, 2), gs.current_step.ex_len);
+    try testing.expectEqual(@as(u32, 4), gs.current_step.ef_len);
+    try expectText("abcd", &gs);
+
     const second = try makeOwnedZDelta(allocator, "ad", "");
     try gs.openStep(second, 2);
     const preview = (try gs.previewNext()).?;
     try testing.expectEqual(TargetClass.overlaid, preview.class);
     try testing.expectEqual(@as(usize, 1), preview.available_resolutions.len);
     try testing.expectEqual(ApplyResolution.delete_whole, preview.available_resolutions[0]);
+
     try testing.expect(try gs.applyNext(.delete_whole));
     try expectText("", &gs);
 }
 
-/// Verifies that making a new decision after undo clears the redo branch.
-fn guidanceUndoClearsRedo() TestError!void {
+test "complex classification defers insertions adjacent to anomalous evacuations" {
+    const allocator = testing.allocator;
+    var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
+    defer gs.deinit();
+
+    const first = try makeOwnedZDelta(allocator, "abcd", "abXcd");
+    try gs.openStep(first, 1);
+    try testing.expect(try gs.skipNext());
+    try gs.finishStep();
+
+    const second = try makeOwnedZDelta(allocator, "abXcd", "abXYcd");
+    try gs.openStep(second, 2);
+    const preview = (try gs.previewNext()).?;
+    try testing.expectEqual(TargetClass.complex, preview.class);
+    try testing.expectEqual(EffectiveTarget.complex, preview.effective_target);
+}
+
+test "new decision after undo clears redo history" {
     const allocator = testing.allocator;
     var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
     defer gs.deinit();
@@ -1986,8 +2136,7 @@ fn guidanceUndoClearsRedo() TestError!void {
     try testing.expect(!(try gs.redo()));
 }
 
-/// Verifies that inserts landing inside anomalous evacuations preview as stranded.
-fn guidancePreviewStrandedInsert() TestError!void {
+test "previewNext marks inserts inside evacuations as stranded" {
     const allocator = testing.allocator;
     var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
     defer gs.deinit();
@@ -2006,164 +2155,134 @@ fn guidancePreviewStrandedInsert() TestError!void {
     try testing.expectError(error.UnresolvedZDeltaOp, gs.skipNext());
 }
 
-test "DeltaGuidanceSystem initText creates a synthetic genesis step" {
-    try guidanceInitGenesis();
-}
-
-test "DeltaGuidanceSystem openStep rejects expected-length mismatch and duplicate opens" {
+test "declarative cases can inspect a fragmented mixed-insert surface" {
     const allocator = testing.allocator;
-    var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
+    var gs = try runDeclarativeGuidanceCase(allocator, .{
+        .before = "abcdef",
+        .after = "abXcdeYf",
+        .decisions = &.{ .accept, .decline },
+        .effective_after = "abXcdef",
+    });
     defer gs.deinit();
 
-    const wrong = try makeOwnedZDelta(allocator, "abc", "abc");
-    try testing.expectError(error.ZDeltaTextLengthMismatch, gs.openStep(wrong, 1));
+    const regions = try collectTestRegions(allocator, gs.current_step.correction_root);
+    defer allocator.free(regions);
 
-    const okay = try makeOwnedZDelta(allocator, "abcd", "abXd");
-    try gs.openStep(okay, 1);
-    const second = try makeOwnedZDelta(allocator, "abcd", "abcd");
-    try testing.expectError(error.StepAlreadyOpen, gs.openStep(second, 2));
+    try testing.expectEqual(@as(u32, 7), gs.current_step.ex_len);
+    try testing.expectEqual(@as(u32, 7), gs.current_step.ef_len);
+    try testing.expectEqual(@as(usize, 5), regions.len);
+    try testing.expectEqual(@as(usize, 4), countSpanNodes(gs.current_step.correction_root));
+    try testing.expectEqual(treeExWid(gs.current_step.correction_root), gs.current_step.ex_len);
+    try testing.expectEqual(treeEfWid(gs.current_step.correction_root), gs.current_step.ef_len);
+    try testing.expectEqualStrings("XY", gs.residue.items);
+    try testing.expectEqual(DecisionKind.insert, gs.decisions.items[1].kind());
+    try testing.expectEqual(DecisionKind.decline, gs.decisions.items[2].kind());
+    try testing.expectEqual(@as(u32, 2), regions[0].pristine.wid);
+    try testing.expectEqual(@as(u32, 1), regions[1].imposition.ef_wid);
+    try testing.expectEqual(@as(u32, 3), regions[2].pristine.wid);
+    try testing.expectEqual(@as(u32, 1), regions[3].evacuation.ex_wid);
+    try testing.expectEqual(@as(u32, 1), regions[4].pristine.wid);
+    try testing.expect(regions[3].evacuation.anomalies != null);
 }
 
-test "DeltaGuidanceSystem previewNext skips equals and previews a pure insert" {
+test "declarative cases preserve distinct impositions from rescue and insert" {
     const allocator = testing.allocator;
-    var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
+    var gs = try runDeclarativeGuidanceCase(allocator, .{
+        .before = "abcdef",
+        .after = "abefX",
+        .decisions = &.{ .rescue, .accept },
+        .effective_after = "abcdefX",
+    });
     defer gs.deinit();
 
-    const zdelta = try makeOwnedZDelta(allocator, "abcd", "abXcd");
-    try gs.openStep(zdelta, 1);
+    const regions = try collectTestRegions(allocator, gs.current_step.correction_root);
+    defer allocator.free(regions);
 
-    const preview = (try gs.previewNext()).?;
-    try testing.expectEqual(TargetClass.pure, preview.class);
-    try testing.expectEqual(@as(u32, 1), preview.raw_op_index);
-    try testing.expectEqual(@as(u32, 2), preview.expected_target.insert_at);
-    try testing.expectEqual(@as(u32, 2), preview.effective_target.insert_at);
-}
-
-test "DeltaGuidanceSystem skipNext decline creates evacuation residue and leaves text unchanged" {
-    const allocator = testing.allocator;
-    var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
-    defer gs.deinit();
-
-    const zdelta = try makeOwnedZDelta(allocator, "abcd", "abXcd");
-    try gs.openStep(zdelta, 1);
-    try testing.expect(try gs.skipNext());
-
-    try expectText("abcd", &gs);
-    try testing.expectEqual(@as(usize, 2), gs.decisions.items.len);
+    try testing.expectEqual(@as(u32, 4), gs.current_step.ex_len);
+    try testing.expectEqual(@as(u32, 7), gs.current_step.ef_len);
+    try testing.expectEqual(@as(usize, 4), regions.len);
+    try testing.expectEqual(@as(usize, 3), countSpanNodes(gs.current_step.correction_root));
     try testing.expectEqual(@as(usize, 1), gs.anomalies.items.len);
+    try testing.expectEqual(@as(usize, 1), gs.residue.items.len);
     try testing.expectEqualStrings("X", gs.residue.items);
-    try testing.expectEqual(@as(u32, 5), gs.current_step.ex_len);
-    try testing.expectEqual(@as(u32, 4), gs.current_step.ef_len);
+    try testing.expectEqual(DecisionKind.rescue, gs.decisions.items[1].kind());
+    try testing.expectEqual(DecisionKind.insert, gs.decisions.items[2].kind());
+    try testing.expectEqual(@as(u32, 2), regions[0].pristine.wid);
+    try testing.expectEqual(@as(u32, 2), regions[1].imposition.ef_wid);
+    try testing.expect(regions[1].imposition.anomalies != null);
+    try testing.expectEqual(@as(u32, 2), regions[2].pristine.wid);
+    try testing.expectEqual(@as(u32, 1), regions[3].imposition.ef_wid);
+    try testing.expectEqual(@as(?ProvenanceRef, null), regions[3].imposition.anomalies);
 }
 
-test "DeltaGuidanceSystem skipNext rescue creates an imposition without storing duplicate bytes" {
+test "declarative cases build a deep sentence surface from alternating insert decisions" {
     const allocator = testing.allocator;
-    var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
+    const before = "The guide folds the map at dawn.";
+    const after = "The patient guide carefully folds the old map at dawn today.";
+    var gs = try runDeclarativeGuidanceCase(allocator, .{
+        .before = before,
+        .after = after,
+        .decisions = &.{ .accept, .decline, .accept, .decline },
+        .effective_after = "The patient guide folds the old map at dawn.",
+    });
     defer gs.deinit();
 
-    const zdelta = try makeOwnedZDelta(allocator, "abcd", "ad");
-    try gs.openStep(zdelta, 1);
-    try testing.expect(try gs.skipNext());
+    const regions = try collectTestRegions(allocator, gs.current_step.correction_root);
+    defer allocator.free(regions);
 
-    try expectText("abcd", &gs);
+    try testing.expectEqual(@as(u32, @intCast(after.len - "patient ".len - "old ".len)), gs.current_step.ex_len);
+    try testing.expectEqual(@as(u32, @intCast("The patient guide folds the old map at dawn.".len)), gs.current_step.ef_len);
+    try testing.expectEqual(@as(usize, 9), regions.len);
+    try testing.expectEqual(@as(usize, 8), countSpanNodes(gs.current_step.correction_root));
+    try testing.expectEqual(@as(usize, 2), gs.anomalies.items.len);
+    try testing.expectEqual(DecisionKind.insert, gs.decisions.items[1].kind());
+    try testing.expectEqual(DecisionKind.decline, gs.decisions.items[2].kind());
+    try testing.expectEqual(DecisionKind.insert, gs.decisions.items[3].kind());
+    try testing.expectEqual(DecisionKind.decline, gs.decisions.items[4].kind());
+    try testing.expectEqual(@as(u32, @intCast("The ".len)), regions[0].pristine.wid);
+    try testing.expectEqual(@as(u32, @intCast("patient ".len)), regions[1].imposition.ef_wid);
+    try testing.expectEqual(@as(u32, @intCast("guide ".len)), regions[2].pristine.wid);
+    try testing.expectEqual(@as(u32, @intCast("carefully ".len)), regions[3].evacuation.ex_wid);
+    try testing.expect(regions[3].evacuation.anomalies != null);
+    try testing.expectEqual(@as(u32, @intCast("folds the ".len)), regions[4].pristine.wid);
+    try testing.expectEqual(@as(u32, @intCast("old ".len)), regions[5].imposition.ef_wid);
+    try testing.expectEqual(@as(u32, @intCast("map at dawn".len)), regions[6].pristine.wid);
+    try testing.expectEqual(@as(u32, @intCast(" today".len)), regions[7].evacuation.ex_wid);
+    try testing.expect(regions[7].evacuation.anomalies != null);
+    try testing.expectEqual(@as(u32, @intCast(".".len)), regions[8].pristine.wid);
+}
+
+test "declarative cases mix rescued and accepted sentence edits into a deeper tree" {
+    const allocator = testing.allocator;
+    const before = "The guide folds the small paper map before sunrise";
+    var gs = try runDeclarativeGuidanceCase(allocator, .{
+        .before = before,
+        .after = "The guide folds the map before bright sunrise again",
+        .decisions = &.{ .rescue, .accept, .accept },
+        .effective_after = "The guide folds the small paper map before bright sunrise again",
+    });
+    defer gs.deinit();
+
+    const regions = try collectTestRegions(allocator, gs.current_step.correction_root);
+    defer allocator.free(regions);
+
+    try testing.expectEqual(@as(u32, @intCast(before.len - "small paper ".len)), gs.current_step.ex_len);
+    try testing.expectEqual(@as(u32, @intCast("The guide folds the small paper map before bright sunrise again".len)), gs.current_step.ef_len);
+    try testing.expectEqual(@as(usize, 6), regions.len);
+    try testing.expectEqual(@as(usize, 5), countSpanNodes(gs.current_step.correction_root));
     try testing.expectEqual(@as(usize, 1), gs.anomalies.items.len);
-    try testing.expectEqual(@as(usize, 0), gs.residue.items.len);
-    try testing.expectEqual(@as(u32, 2), gs.current_step.ex_len);
-    try testing.expectEqual(@as(u32, 4), gs.current_step.ef_len);
-}
-
-test "DeltaGuidanceSystem applyNext accepts delete and undo restores residue-backed bytes" {
-    const allocator = testing.allocator;
-    var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
-    defer gs.deinit();
-
-    const zdelta = try makeOwnedZDelta(allocator, "abcd", "ad");
-    try gs.openStep(zdelta, 1);
-    try testing.expect(try gs.applyNext(null));
-
-    try expectText("ad", &gs);
-    try testing.expectEqualStrings("bc", gs.residue.items);
-    try testing.expect(try gs.undo());
-    try expectText("abcd", &gs);
-    try testing.expect(try gs.redo());
-    try expectText("ad", &gs);
-}
-
-test "DeltaGuidanceSystem applyNext accepts insert and undo removes it" {
-    const allocator = testing.allocator;
-    var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
-    defer gs.deinit();
-
-    const zdelta = try makeOwnedZDelta(allocator, "abcd", "abXcd");
-    try gs.openStep(zdelta, 1);
-    try testing.expect(try gs.applyNext(null));
-
-    try expectText("abXcd", &gs);
-    try testing.expectEqualStrings("X", gs.residue.items);
-    try testing.expect(try gs.undo());
-    try expectText("abcd", &gs);
-    try testing.expect(try gs.redo());
-    try expectText("abXcd", &gs);
-}
-
-test "DeltaGuidanceSystem finishStep promotes rescued deletes into later impositions" {
-    const allocator = testing.allocator;
-    var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
-    defer gs.deinit();
-
-    const first = try makeOwnedZDelta(allocator, "abcd", "ad");
-    try gs.openStep(first, 1);
-    try testing.expect(try gs.skipNext());
-    try testing.expectEqual(null, try gs.previewNext());
-    try gs.finishStep();
-
-    try testing.expectEqual(@as(u32, 2), gs.current_step.ex_len);
-    try testing.expectEqual(@as(u32, 4), gs.current_step.ef_len);
-    try expectText("abcd", &gs);
-
-    const second = try makeOwnedZDelta(allocator, "ad", "");
-    try gs.openStep(second, 2);
-    const preview = (try gs.previewNext()).?;
-    try testing.expectEqual(TargetClass.overlaid, preview.class);
-    try testing.expectEqual(@as(usize, 1), preview.available_resolutions.len);
-    try testing.expectEqual(ApplyResolution.delete_whole, preview.available_resolutions[0]);
-
-    try testing.expect(try gs.applyNext(.delete_whole));
-    try expectText("", &gs);
-}
-
-test "DeltaGuidanceSystem complex classification defers insertions adjacent to anomalous evacuations" {
-    const allocator = testing.allocator;
-    var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
-    defer gs.deinit();
-
-    const first = try makeOwnedZDelta(allocator, "abcd", "abXcd");
-    try gs.openStep(first, 1);
-    try testing.expect(try gs.skipNext());
-    try gs.finishStep();
-
-    const second = try makeOwnedZDelta(allocator, "abXcd", "abXYcd");
-    try gs.openStep(second, 2);
-    const preview = (try gs.previewNext()).?;
-    try testing.expectEqual(TargetClass.complex, preview.class);
-    try testing.expectEqual(EffectiveTarget.complex, preview.effective_target);
-}
-
-test "DeltaGuidanceSystem new decision after undo clears redo history" {
-    const allocator = testing.allocator;
-    var gs = try DeltaGuidanceSystem.initText(allocator, "abcd");
-    defer gs.deinit();
-
-    const zdelta = try makeOwnedZDelta(allocator, "abcd", "abXcd");
-    try gs.openStep(zdelta, 1);
-    try testing.expect(try gs.applyNext(null));
-    try testing.expect(try gs.undo());
-    try testing.expect(try gs.skipNext());
-    try testing.expect(!(try gs.redo()));
-}
-
-test "DeltaGuidanceSystem previewNext marks inserts inside evacuations as stranded" {
-    try guidancePreviewStrandedInsert();
+    try testing.expectEqual(DecisionKind.rescue, gs.decisions.items[1].kind());
+    try testing.expectEqual(DecisionKind.insert, gs.decisions.items[2].kind());
+    try testing.expectEqual(DecisionKind.insert, gs.decisions.items[3].kind());
+    try testing.expectEqual(@as(u32, @intCast("The guide folds the ".len)), regions[0].pristine.wid);
+    try testing.expectEqual(@as(u32, @intCast("small paper ".len)), regions[1].imposition.ef_wid);
+    try testing.expect(regions[1].imposition.anomalies != null);
+    try testing.expectEqual(@as(u32, @intCast("map before ".len)), regions[2].pristine.wid);
+    try testing.expectEqual(@as(u32, @intCast("bright ".len)), regions[3].imposition.ef_wid);
+    try testing.expectEqual(@as(?ProvenanceRef, null), regions[3].imposition.anomalies);
+    try testing.expectEqual(@as(u32, @intCast("sunrise".len)), regions[4].pristine.wid);
+    try testing.expectEqual(@as(u32, @intCast(" again".len)), regions[5].imposition.ef_wid);
+    try testing.expectEqual(@as(?ProvenanceRef, null), regions[5].imposition.anomalies);
 }
 
 const std = @import("std");
@@ -2171,6 +2290,7 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const OOM = std.mem.Allocator.Error;
 const TestError = Error || zdelta_mod.ZDeltaError || error{
+    SkipZigTest,
     TestExpectedEqual,
     TestExpectedError,
     TestUnexpectedError,

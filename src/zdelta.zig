@@ -1135,10 +1135,6 @@ test "zdelta guidance declarations compile" {
     testing.refAllDecls(guidance_mod);
 }
 
-test "zdelta guidance runtime checks" {
-    try guidance_mod.runRuntimeChecks();
-}
-
 const TestEdit = struct {
     operation: Operation,
     owned: bool,
