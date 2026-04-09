@@ -19,7 +19,7 @@ The purpose of `DeltaGuidanceSystem` is to let us:
 - review its edits one at a time or in bulk
 - record both applied and skipped decisions
 - preserve a full, exact undo history
-- expose a faithful model of where the corpus text now maps into realized text
+- expose a faithful model of where expected text now maps into effective text
 - carry forward skipped-edit anomalies into later revisions without replaying a
   transcript of harmonization hacks
 
@@ -71,11 +71,7 @@ where it wasn't.  This variation is error, and subject to correction,
 under the guidance of the vocabulary.
 
 - `span`
-  Any contiguous amount of text.  Span width is
-    - `expected`
-      The span according to the corpus text.
-    - `effective`
-      The span as it actually is.  Absent skips, these are the same.
+  A contiguous amount of text on a particular axis.
 - `skip`
   A reviewed edit which was not applied.
   - `decline`
@@ -83,15 +79,16 @@ under the guidance of the vocabulary.
   - `rescue`
     A skipped delete.
 - `region`
-  A span having a single characteristic.  These do not necessarily have
-  width.
+  A contiguous portion of the correction surface having one qualitative status.
+  A region may occupy expected space, effective space, or both, and therefore
+  does not necessarily have width on every axis.
 - `anomaly`
   A divergence created by a skip.
   - `evacuation`
-    A region present in corpus space but absent in realized space.
+    A region present in expected space but absent in effective space.
     Consequence of a `decline`.
   - `imposition`
-    A region present in realized space but absent in corpus space.
+    A region present in effective space but absent in expected space.
     Consequence of a `rescue`.
 - `pristine`
   A region whose mapping is still a single continuous deviation, which may be 0.
@@ -99,7 +96,7 @@ under the guidance of the vocabulary.
   A shared location beween a pristine region and an anomalous one, and
   vice versa.
 - `deviation`
-  The numeric difference between corpus-space and realized-space position,
+  The numeric difference between expected-space and effective-space position,
   accumulated from each bifurcation encountered on the path through the
   correction tree.  Not referred to as:
 - `translation`
@@ -118,8 +115,8 @@ under the guidance of the vocabulary.
   decomposed, left to right, into a series of simple decisions.  These
   are tracked as a single action, for undo and redo purposes. -->
 - `correction tree`
-  The persistent interval-tree representation of how the active corpus axis maps
-  to realized text at one exact step.
+  The persistent interval-tree representation of how the active expected axis
+  maps to effective text at one exact step.
 
 Undo/redo history in this revision is a single path.  Moving backward
 and forward along that path is non-destructive.  Taking a new decision
@@ -153,11 +150,11 @@ terms (or 'did' terms), not 'undo' terms, in building the record.
 
 The raw `ZDelta` for the currently attached step remains immutable.  The
 manager never rewrites it.  Instead, the manager derives ephemeral
-`ProjectedOp`s by querying the current step's correction tree against the raw
-delta's before-text axis.
+`EffectiveEdit`s by querying the current step's correction tree against the raw
+delta's expected axis.
 
 At step finish, the manager promotes the current step from the step's before
-axis to the next revision's corpus axis.  That promotion absorbs accepted
+axis to the next revision's expected axis.  That promotion absorbs accepted
 changes into the new baseline while preserving skipped anomalies.
 
 ## Spans and Insertions
@@ -182,9 +179,8 @@ to be represented, and modify them so this is impossible by construction.
 Do not be too quick to decide some field is redundant: it may have a
 purpose, just not an obvious one.
 
-Another note: `realized` is not in the glossary, but is all over the
-documentation and type system.  It should not be.  Projection is another
-mistake: that is mechanism, not policy.
+Another note: `realized` and `projected` are not the vocabulary here.
+The axes are `expected` and `effective`, and the act is `correction`.
 
 ```zig
 pub const DeltaGuidanceSystem = struct {
@@ -201,6 +197,7 @@ pub const DeltaGuidanceSystem = struct {
     // These are referenced by index, pointers would be unstable
     decisions: std.ArrayListUnmanaged(DecisionRecord),
     anomalies: std.ArrayListUnmanaged(AnomalyRecord),
+    residue: std.ArrayListUnmanaged(u8),
 };
 
 pub const Step = struct {
@@ -208,9 +205,10 @@ pub const Step = struct {
     next: ?*Step,
     correction_root: *CorrectionNode,
 
-    realized_len: u32,
-    corpus_len: u32,
+    effective_len: u32,
+    expected_len: u32,
 
+    // DecisionIndex(0) is the synthetic genesis insert of the initial text.
     decision: DecisionIndex,
     anomaly: ?AnomalyIndex,
     anomaly_count: u32,
@@ -221,40 +219,68 @@ pub const AttachedStepState = struct {
     raw_delta: *const ZDelta,
     target_revision: usize,
     raw_index: u32,
-    before_len: u32,
+    expected_len: u32,
 };
 
-pub const DecisionRecord = struct {
-    id: u32,
-    revision_ordinal: usize,
+pub const DecisionRecord = union(enum) {
+    insert: struct {
+        id: DecisionIndex,
+        revision_ordinal: usize,
+        raw_op_index: u32,
+        expected_at: u32,
+        effective_at_before: u32,
+        effective_at_after: u32,
+    },
+    delete: struct {
+        id: DecisionIndex,
+        revision_ordinal: usize,
+        raw_op_index: u32,
+        expected: Span,
+        effective_before: Span,
+        effective_after: Span,
+        residue_off: u32,
+        residue_len: u32,
+        resolution: ?ApplyResolution,
+    },
+    decline: struct {
+        id: DecisionIndex,
+        revision_ordinal: usize,
+        raw_op_index: u32,
+        expected_at: u32,
+        anomaly: AnomalyIndex,
+    },
+    rescue: struct {
+        id: DecisionIndex,
+        revision_ordinal: usize,
+        raw_op_index: u32,
+        expected: Span,
+        anomaly: AnomalyIndex,
+        resolution: ?ApplyResolution,
+    },
+};
+
+pub const AnomalyRecord = union(enum) {
+    evacuation: struct {
+        id: AnomalyIndex,
+        created_by: DecisionIndex,
+        expected: Span,
+        residue_off: u32,
+        residue_len: u32,
+    },
+    imposition: struct {
+        id: AnomalyIndex,
+        created_by: DecisionIndex,
+        expected_at: u32,
+        ef_wid: u32,
+    },
+};
+
+pub const EffectiveEdit = struct {
     raw_op_index: u32,
-
-    kind: DecisionKind,
-    effect_kind: EffectKind,
-    resolution: ApplyResolution,
-
-    corpus_site: Site,
-    realized_site_before: Site,
-    realized_site_after: Site,
-
-    anomaly_id: ?AnomalyIndex,
-};
-
-pub const AnomalyRecord = struct {
-    id: u32,
-    kind: AnomalyKind,
-    text: []u8,
-    corpus_site: Site,
-    realized_site: Site,
-    created_by_decision: DecisionIndex,
-};
-
-pub const CorrectedOp = struct {
-    raw_op_index: u32,
-    corpus_site: Site,
-    realized: RealizedProjection,
-    class: ProjectedClass,
-    touched_anomaly_ids: []const u32,
+    expected_target: ExpectedTarget,
+    effective_target: EffectiveTarget,
+    class: TargetClass,
+    touched_anomalies: ProvenanceRef,
     available_resolutions: []const ApplyResolution,
 };
 
@@ -265,24 +291,9 @@ pub const AnomalyIndex = enum(u32) {_};
 ### Supporting enums and shapes
 
 ```zig
-pub const DecisionKind = enum {
-    apply,
-    skip,
-};
-
-pub const AcceptKind = enum {
-    insert,
-    delete,
-};
-
-pub const RejectKind = enum {
-    decline,
-    rescue,
-};
-
-pub const AnomalyKind = enum {
-    evacuation,
-    imposition,
+pub const Span = struct {
+    start: u32,
+    end: u32,
 };
 
 pub const TargetClass = enum {
@@ -294,42 +305,37 @@ pub const TargetClass = enum {
     complex,
 };
 
-pub const Site = union(enum) {
-    point: u32,
-    span: struct {
-        start: u32,
-        end: u32,
-    },
+pub const ExpectedTarget = union(enum) {
+    insert_at: u32,
+    delete: Span,
 };
 
-pub const CorrectedTarget = union(enum) {
-    point: u32,
-    span: struct {
-        start: u32,
-        end: u32,
-    },
+pub const EffectiveTarget = union(enum) {
+    insert_at: u32,
+    delete: Span,
+    complex,
 };
 
-pub const LeafKind = enum {
-    evacuation,
-    imposition,
-    pristine,
+pub const ApplyResolution = enum {
+    delete_whole,
+    delete_corpus_only,
 };
 
-pub const IdRange = struct {
-    start: u32,
-    end: u32,
+pub const ProvenanceRef = struct {
+    off: u32,
+    len: u32,
 };
 
 pub const CorrectionNode = union(enum) {
     span: struct {
-        width: u32,
+        ex_wid: u32,
+        ef_wid: u32,
         deviation: i32,
-        pivot: u32, // left-or-right in deviation-corrected terms
+        pivot: u32,
         left: *CorrectionNode,
         right: *CorrectionNode,
     },
-    region: CorrectionLeaf,
+    region: CorrectionRegion,
 };
 ```
 
@@ -339,25 +345,37 @@ The correction tree is the full correction logic of the current step.  It is
 persistent and immutable.  A new decision creates a new root which shares
 unchanged subtrees with its prior step.
 
-The tree is keyed by the active corpus axis.  Its leaves describe local
-geometry and status, while realized-space placement is derived by accumulating
-deviation along the path from the current root to the leaf.
+The tree is an interval tree.  Every node covers a contiguous interval on both
+the expected and effective axes.  Terminal nodes are regions: contiguous
+stretches sharing one qualitative status over that paired surface.  Corrected
+placement is derived by accumulating deviation along the path from the current
+root.
 
-The fundamental geometric leaf kinds are:
+The fundamental region kinds are:
 
 - `pristine`
-  A positive-width corpus span which maps to realized text by one continuous
+  A positive-width expected span which maps to effective text by one continuous
   deviation.
 - `evacuation`
-  A positive-width corpus span whose text is absent in realized text.
+  A positive-width expected span whose text is absent in effective text.
 - `imposition`
-  Realized text anchored at a corpus boundary, with zero corpus width and
-  positive realized width.
+  Effective text anchored at an expected boundary, with zero expected width and
+  positive effective width.
+
+All region kinds have a position on both axes.  They differ in where they have
+width:
+
+- `pristine`
+  Has width on both axes.
+- `evacuation`
+  Has width only on the expected axis.
+- `imposition`
+  Has width only on the effective axis.
 
 The important refinements are:
 
 1. geometry and anomaly status are not the same thing
-2. absolute realized placement is not a leaf-local fact
+2. absolute placement on either axis is not a region-local fact
 
 - A skipped insert creates an anomalous `evacuation`.
 - A skipped delete creates an anomalous `imposition`.
@@ -366,7 +384,7 @@ The important refinements are:
 - An accepted insert may temporarily create imposition geometry during an open
   step, but it is not an anomaly.
 
-Therefore each leaf carries provenance, but not an absolute realized offset:
+Therefore each region carries provenance, but not an absolute effective offset:
 
 1. structural provenance
    Which decision ids produced this geometry.
@@ -374,30 +392,44 @@ Therefore each leaf carries provenance, but not an absolute realized offset:
    Which anomaly ids, if any, make this geometry review-dangerous.
 
 Accepted edits are thus "lightly tracked": they influence geometry and undo,
-but they do not become user-facing anomalies.  The text of a deletion must
-be cached for undo, that of an insertion need not be.
+but they do not become user-facing anomalies.  `residue` holds any text needed
+for undo purposes: this includes evacuated text and the payload of accepted
+deletes.  Impositions need not carry text, because their bytes can be recovered
+from the effective text of the appropriate step.
 
-### Intended leaf shape
+### Intended region shape
 
 ```zig
-pub const CorrectionLeaf = struct {
-    kind: LeafKind,
-
-    corpus_start: u32,
-    corpus_end: u32,
-
-    width: u32,
-
-    decision_ids: IdRange,
-    anomaly_ids: IdRange,
+pub const CorrectionRegion = union(enum) {
+    pristine: struct {
+        expected: Span,
+        effective: Span,
+        wid: u32,
+        decisions: ProvenanceRef,
+    },
+    evacuation: struct {
+        expected: Span,
+        effective_at: u32,
+        ex_wid: u32,
+        decisions: ProvenanceRef,
+        anomalies: ?ProvenanceRef,
+    },
+    imposition: struct {
+        expected_at: u32,
+        effective: Span,
+        ef_wid: u32,
+        decisions: ProvenanceRef,
+        anomalies: ?ProvenanceRef,
+    },
 };
 ```
 
-Leaves do not store an absolute deviation record.  That is intentional.  A leaf
-describes local geometry, while realized coordinates are derived by summing
-deviation from each bifurcation on the path from the current root.  This is not
-primarily an efficiency trick; it is a correctness property which lets each new
-step share prior structure without rewriting every downstream leaf.
+Regions do not store an absolute deviation record.  That is intentional.  A
+region describes local geometry, while absolute coordinates are derived by
+summing deviation from each bifurcation on the path from the current root.
+This is not primarily an efficiency trick; it is a correctness property which
+lets each new step share prior structure without rewriting every downstream
+region.
 
 The exact storage may use packed arrays or side tables, but the semantics above
 are the contract.
@@ -414,17 +446,17 @@ Deciding a raw delta op does two things:
 2. If this is a skip, create a new `AnomalyRecord`
 
 Then it produces a new correction root.  Span is updated in reference
-to the realized text, deviation in (inverse) reference to the corpus.
+to the effective text, deviation in (inverse) reference to the expected.
 The root deviation is always zero.
 
 Rules:
 
 - skipped insert
-  Creates an anomalous evacuation over the insert's corpus-side contribution
-  and contributes negative deviation to later realized positions
+  Creates an anomalous evacuation over the insert's expected-side contribution
+  and contributes negative deviation to later effective positions
 - skipped delete
   Creates an anomalous imposition containing the rescued text and contributes
-  positive deviation to later realized positions
+  positive deviation to later effective positions
 
 ### Apply decision
 
@@ -439,26 +471,26 @@ Rules:
 
 - accepted insert
   Creates non-anomalous imposition geometry until step finish and contributes
-  positive deviation to later realized positions
+  positive deviation to later effective positions
 - accepted delete
   Creates non-anomalous evacuation geometry until step finish and contributes
-  negative deviation to later realized positions
+  negative deviation to later effective positions
 
 This is the key answer to the undo concern: accepted edits are not anomalies,
 but they are absolutely part of history because they visibly move the
 correction surface.  In terms of the tree, they increase or decrease spans,
 but introduce no additional deviation.
 
-## Projected op semantics
+## Effective edit semantics
 
-`previewNext()` derives a `ProjectedOp` for the current raw op index by querying
+`previewNext()` derives an `EffectiveEdit` for the current raw op index by querying
 the current correction tree.
 
 ### Classification rules
 
 - `pure`
-  The op lies wholly within one pristine mapping and has a single mechanical
-  realization.
+  The op lies wholly within one pristine mapping and has a single direct
+  correction.
 - `overlaid`
   The op crosses one anomaly but still has a well-defined apply semantics.
 - `clipped`
@@ -471,7 +503,7 @@ the current correction tree.
 
 ### Delete-over-imposition
 
-This case must not be collapsed to "blocked until later".  The first design
+This case must not be collapsed to `complex` prematurely.  The first design
 must explicitly support both resolution modes:
 
 - `delete_whole`
@@ -490,10 +522,10 @@ The intended backend surface is:
 
 ```zig
 pub fn openStep(manager: *DeltaGuidanceSystem, raw_delta: *const ZDelta, target_revision: usize) !void;
-pub fn previewNext(manager: *const DeltaGuidanceSystem) !?ProjectedOp;
-pub fn applyNext(manager: *DeltaGuidanceSystem, resolution: ApplyResolution) !bool;
+pub fn previewNext(manager: *const DeltaGuidanceSystem) !?EffectiveEdit;
+pub fn applyNext(manager: *DeltaGuidanceSystem, resolution: ?ApplyResolution) !bool;
 pub fn skipNext(manager: *DeltaGuidanceSystem) !bool;
-pub fn applyRest(manager: *DeltaGuidanceSystem, default_resolution: ApplyResolution) !usize;
+pub fn applyRest(manager: *DeltaGuidanceSystem, default_resolution: ?ApplyResolution) !usize;
 pub fn skipRest(manager: *DeltaGuidanceSystem) !usize;
 pub fn finishStep(manager: *DeltaGuidanceSystem) !void;
 pub fn undo(manager: *DeltaGuidanceSystem) !bool;
@@ -509,7 +541,7 @@ pub fn recentDecisions(manager: *const DeltaGuidanceSystem) []const DecisionReco
   Attach a raw delta and initialize `AttachedStepState`.  Reject if another
   step is still open.
 - `previewNext`
-  Return the next unresolved or review-relevant projected op, never a rewritten
+  Return the next unresolved or review-relevant effective edit, never a rewritten
   delta stream.
 - `applyNext`
   Apply the focused op with the requested resolution and advance `raw_index`.
@@ -524,7 +556,7 @@ pub fn recentDecisions(manager: *const DeltaGuidanceSystem) []const DecisionReco
 - `finishStep`
   Promote the current step from the step-before axis to the next revision axis.
 - `undo`
-  Move `current_step` to `prior` and restore the realized buffer state for that
+  Move `current_step` to `prior` and restore the effective buffer state for that
   step.
 - `redo`
   Move `current_step` to `next` if it still exists.
@@ -537,10 +569,10 @@ The step lifecycle is:
    The manager attaches an immutable raw delta.  The current step and the
    step-before axis are identical here.
 2. `previewNext`
-   The manager projects the next raw op through the current correction tree.
+   The manager corrects the next raw op through the current correction tree.
 3. decision
    `applyNext` or `skipNext` create a new immutable step and update the
-   realized text buffer.
+   effective text buffer.
 4. repeat
    Continue preview and decision until the raw delta is exhausted.
 5. `finishStep`
@@ -557,7 +589,7 @@ they create.
 ## Undo and redo
 
 Undo is not a replay algorithm.  Undo is moving `current_step` to `prior` and
-restoring the realized text and projection root corresponding to that step.
+restoring the effective text and correction root corresponding to that step.
 
 Redo is moving `current_step` to `next` along the preserved future path.
 Moving around is non-destructive.
@@ -603,11 +635,11 @@ But the snapshot data changes materially.
 - there is no suffix-derived "active skipped" concept
 - the visible anomaly list is the full anomaly set reachable from the current
   step
-- focus metadata comes from `ProjectedOp`
+- focus metadata comes from `EffectiveEdit`
 - if multiple apply resolutions exist, the session must surface them
 
 The session does not need a top-to-bottom workflow redesign in the first pass.
-It does need to stop depending on `skip_index`, `blocked marker` hacks, or
+It does need to stop depending on `skip_index`, ad hoc marker hacks, or
 tail-rewrite bookkeeping.
 
 ## Invariants
@@ -618,10 +650,10 @@ The implementation must preserve these invariants.
 2. Every reviewed decision creates exactly one new step.
 3. Every skipped divergence creates exactly one anomaly record.
 4. Accepted edits alter the correction tree, but not the anomaly log.
-5. The realized buffer and `current_step.projection_root` always describe the
+5. The effective buffer and `current_step.correction_root` always describe the
    same state.
 6. Undo restores both text and correction surface.
-7. Step finish absorbs accepted edits into the next corpus baseline without
+7. Step finish absorbs accepted edits into the next expected baseline without
    replaying history.
 8. Later deltas are queried against the current tree; they are never rewritten
    by replaying a skip transcript.
@@ -635,9 +667,9 @@ Practical preferences:
 - keep the existing slack-buffer text storage from `apply_base.zig`
 - build the first tree with obvious immutable node sharing, not heroic
   compression
-- keep anomaly text payloads only in `AnomalyRecord`
-- let tree leaves and decision records carry ids, not duplicated text
-- derive `ProjectedOp` ephemerally; do not store a mutable analyzed-op stream
+- keep undo-relevant text only in `residue`
+- let tree regions and decision records carry ids, not duplicated text
+- derive `EffectiveEdit` ephemerally; do not store a mutable analyzed-op stream
 
 The current `DeltaManager` can serve as a temporary staging area for the text
 buffer mechanics only.  Its harmonization model should not survive.
@@ -660,22 +692,22 @@ diffing strings rather than directly from parts.
   deviation during the open step
 - multiple decisions partition the axis correctly and preserve provenance
 
-### Projection behavior
+### Correction behavior
 
-- pure edits project mechanically
+- pure edits correct directly
 - deletes over evacuations remain well-formed
 - deletes over impositions expose both `delete_whole` and
   `delete_corpus_only`
 - composite edits gather all touched anomaly ids
-- blocked edits do not pretend to be simple rewritten spans
-  - there is no such thing as a 'blocked' edit in a sense where it would
-    be impossible to act on it.  this concept stands in for 'the possible
-    decisions for this edit are beyond what we happen to currently provide'.
+- complex edits do not pretend to be simple effective targets
+  - there is no such thing as a `complex` edit in a sense where it would
+    be impossible to act on it.  This concept stands in for "the possible
+    decisions for this edit are beyond what we happen to currently provide."
 
 ### Step behavior
 
 - every decision creates a new immutable step
-- undo restores both bytes and projection root
+- undo restores both bytes and correction root
 - redo follows the preserved forward path
 - a new decision after undo clears redo
 
