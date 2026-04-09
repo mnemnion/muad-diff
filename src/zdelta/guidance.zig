@@ -13,10 +13,9 @@
 //!
 //! - The text buffer logic is copied from `whole_apply` in spirit and reused
 //!   from `apply_base` directly.
-//! - The public "correction tree" is backed internally by a normalized region
-//!   slice.  We still materialize `CorrectionNode` trees for each step so the
-//!   step state matches the design, but the region slice is the authoritative
-//!   query surface in this commit.
+//! - The correction surface is authoritative as a tree. Some update paths still
+//!   flatten it into a temporary in-order region list before rebuilding the next
+//!   version, but persistent step state lives in `CorrectionNode`s.
 //! - The code is heavily commented on purpose.  This file is the puzzle board
 //!   for the new model, and comments carry part of the design load.
 
@@ -356,7 +355,6 @@ pub const Step = struct {
     prior: ?*Step,
     next: ?*Step,
     correction_root: *CorrectionNode,
-    regions: []CorrectionRegion,
 
     ef_len: u32,
     ex_len: u32,
@@ -376,6 +374,7 @@ pub const Step = struct {
 /// Review-capable delta engine owning text, history, anomalies, and provenance.
 pub const DeltaGuidanceSystem = struct {
     allocator: Allocator,
+    arena: std.heap.ArenaAllocator,
     buffer: []u8,
     start: u32,
     end: u32,
@@ -427,8 +426,12 @@ pub const DeltaGuidanceSystem = struct {
         errdefer allocator.free(buffer);
         @memcpy(buffer[head_room..][0..text.len], text);
 
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+
         var gs = DeltaGuidanceSystem{
             .allocator = allocator,
+            .arena = arena,
             .buffer = buffer,
             .start = try checkedU32(head_room),
             .end = try addU32(try checkedU32(head_room), text_len),
@@ -450,6 +453,7 @@ pub const DeltaGuidanceSystem = struct {
             gs.residue.deinit(gs.allocator);
             gs.anomalies.deinit(gs.allocator);
             gs.decisions.deinit(gs.allocator);
+            gs.arena.deinit();
         }
 
         const genesis_decision = try gs.appendDecision(.{ .insert = .{
@@ -471,17 +475,14 @@ pub const DeltaGuidanceSystem = struct {
             .wid = text_len,
             .decisions = decision_ref,
         } }});
-        errdefer allocator.free(regions);
         const root = try gs.buildTree(regions);
-        errdefer gs.freeTree(root);
+        defer allocator.free(regions);
 
-        const step = try allocator.create(Step);
-        errdefer allocator.destroy(step);
+        const step = try gs.arena.allocator().create(Step);
         step.* = .{
             .prior = null,
             .next = null,
             .correction_root = root,
-            .regions = regions,
             .ef_len = text_len,
             .ex_len = text_len,
             .decision = genesis_decision,
@@ -504,11 +505,7 @@ pub const DeltaGuidanceSystem = struct {
         gs.residue.deinit(gs.allocator);
         gs.anomalies.deinit(gs.allocator);
         gs.decisions.deinit(gs.allocator);
-        if (@intFromPtr(gs.current_step) != 0) {
-            var head = gs.current_step;
-            while (head.prior) |prior| head = prior;
-            gs.freeStepChain(head);
-        }
+        gs.arena.deinit();
         if (gs.buffer.len != 0) gs.allocator.free(gs.buffer);
         gs.* = undefined;
     }
@@ -608,51 +605,12 @@ pub const DeltaGuidanceSystem = struct {
         // which axis that last decided correction surface is keyed against.
         var promoted_builder = std.ArrayListUnmanaged(CorrectionRegion).empty;
         defer promoted_builder.deinit(gs.allocator);
-
-        for (gs.current_step.regions) |region| {
-            switch (region) {
-                .pristine => |r| try promoted_builder.append(gs.allocator, .{ .pristine = .{
-                    .expected = r.expected,
-                    .effective = r.effective,
-                    .wid = r.wid,
-                    .decisions = r.decisions,
-                } }),
-                .evacuation => |r| {
-                    if (r.anomalies != null) try promoted_builder.append(gs.allocator, .{ .evacuation = .{
-                        .expected = r.expected,
-                        .effective_at = r.effective_at,
-                        .ex_wid = r.ex_wid,
-                        .decisions = r.decisions,
-                        .anomalies = r.anomalies,
-                    } });
-                },
-                .imposition => |r| {
-                    if (r.anomalies) |anoms| {
-                        try promoted_builder.append(gs.allocator, .{ .imposition = .{
-                            .expected_at = r.expected_at,
-                            .effective = r.effective,
-                            .ef_wid = r.ef_wid,
-                            .decisions = r.decisions,
-                            .anomalies = anoms,
-                        } });
-                    } else {
-                        try promoted_builder.append(gs.allocator, .{ .pristine = .{
-                            .expected = .{ .start = 0, .end = 0 },
-                            .effective = .{ .start = 0, .end = 0 },
-                            .wid = r.ef_wid,
-                            .decisions = r.decisions,
-                        } });
-                    }
-                },
-            }
-        }
+        try gs.appendPromotedRegions(&promoted_builder, gs.current_step.correction_root);
 
         const new_regions = try gs.normalizeAndOwnRegions(promoted_builder.items);
+        defer gs.allocator.free(new_regions);
         const new_root = try gs.buildTree(new_regions);
-        gs.freeTree(gs.current_step.correction_root);
-        gs.allocator.free(gs.current_step.regions);
         gs.current_step.correction_root = new_root;
-        gs.current_step.regions = new_regions;
         gs.current_step.ex_len = computeExpectedLen(new_regions);
         gs.current_step.ef_len = computeEffectiveLen(new_regions);
         gs.current_step.raw_index_next = 0;
@@ -800,21 +758,21 @@ pub const DeltaGuidanceSystem = struct {
     fn previewInsert(gs: *DeltaGuidanceSystem, raw_index: u32, expected_at: u32, insert_len: u32) Error!EffectiveEdit {
         _ = insert_len;
         gs.preview_anomalies.clearRetainingCapacity();
+        var info = InsertPointInfo{};
+        try gs.inspectInsertPoint(gs.current_step.correction_root, 0, 0, expected_at, &info);
+        const effective_at = info.after_impositions orelse info.exact orelse info.fallback orelse gs.current_step.ef_len;
 
-        const state = gs.boundaryState(expected_at);
-        if (state.inside_anomalous_evacuation) {
-            try gs.appendInsertPointAnomalies(expected_at);
+        if (info.state.inside_anomalous_evacuation) {
             return .{
                 .raw_op_index = raw_index,
                 .expected_target = .{ .insert_at = expected_at },
-                .effective_target = .{ .insert_at = try gs.effectiveInsertPoint(expected_at) },
+                .effective_target = .{ .insert_at = effective_at },
                 .class = .stranded,
                 .touched_anomalies = .{ .off = 0, .len = try checkedU32(gs.preview_anomalies.items.len) },
                 .available_resolutions = no_resolutions[0..],
             };
         }
-        if (state.has_imposition_here or state.has_anomalous_neighbor) {
-            try gs.appendInsertPointAnomalies(expected_at);
+        if (info.state.has_imposition_here or info.state.has_anomalous_neighbor) {
             return .{
                 .raw_op_index = raw_index,
                 .expected_target = .{ .insert_at = expected_at },
@@ -828,7 +786,7 @@ pub const DeltaGuidanceSystem = struct {
         return .{
             .raw_op_index = raw_index,
             .expected_target = .{ .insert_at = expected_at },
-            .effective_target = .{ .insert_at = try gs.effectiveInsertPoint(expected_at) },
+            .effective_target = .{ .insert_at = effective_at },
             .class = .pure,
             .touched_anomalies = .{ .off = 0, .len = 0 },
             .available_resolutions = no_resolutions[0..],
@@ -838,9 +796,8 @@ pub const DeltaGuidanceSystem = struct {
     /// Classifies a deletion against the current correction surface.
     fn previewDelete(gs: *DeltaGuidanceSystem, raw_index: u32, expected_start: u32, len: u32) Error!EffectiveEdit {
         gs.preview_anomalies.clearRetainingCapacity();
-
         const expected = Span{ .start = expected_start, .end = expected_start + len };
-        var touching = try gs.collectTouchedRegions(expected);
+        var touching = try gs.collectTouchedRegions(gs.current_step.correction_root, expected);
         defer touching.deinit(gs.allocator);
 
         if (touching.items.len == 0) {
@@ -861,8 +818,7 @@ pub const DeltaGuidanceSystem = struct {
         var pristine_count: usize = 0;
         var has_imposition = false;
 
-        for (touching.items) |idx| {
-            const region = gs.current_step.regions[idx];
+        for (touching.items) |region| {
             switch (region) {
                 .pristine => pristine_count += 1,
                 .evacuation => |r| {
@@ -988,7 +944,7 @@ pub const DeltaGuidanceSystem = struct {
         } });
 
         const decision_ref = try gs.appendDecisionProvenance(&.{decision});
-        const split = try gs.splitRegionsAtExpected(gs.current_step.regions, scanned.expected_cursor);
+        const split = try gs.splitTreeAtExpected(gs.current_step.correction_root, scanned.expected_cursor);
         defer gs.allocator.free(split);
 
         var builder = std.ArrayListUnmanaged(CorrectionRegion).empty;
@@ -1061,7 +1017,7 @@ pub const DeltaGuidanceSystem = struct {
 
         const decision_ref = try gs.appendDecisionProvenance(&.{decision});
         const anomaly_ref = try gs.appendAnomalyProvenance(&.{anomaly});
-        const split = try gs.splitRegionsAtExpected(gs.current_step.regions, scanned.expected_cursor);
+        const split = try gs.splitTreeAtExpected(gs.current_step.correction_root, scanned.expected_cursor);
         defer gs.allocator.free(split);
 
         var builder = std.ArrayListUnmanaged(CorrectionRegion).empty;
@@ -1126,7 +1082,7 @@ pub const DeltaGuidanceSystem = struct {
             .resolution = resolution,
         } });
 
-        const split_once = try gs.splitRegionsAtExpected(gs.current_step.regions, expected.start);
+        const split_once = try gs.splitTreeAtExpected(gs.current_step.correction_root, expected.start);
         defer gs.allocator.free(split_once);
         const split = try gs.splitRegionsAtExpected(split_once, expected.end);
         defer gs.allocator.free(split);
@@ -1197,7 +1153,7 @@ pub const DeltaGuidanceSystem = struct {
 
         const decision_ref = try gs.appendDecisionProvenance(&.{decision});
         const anomaly_ref = try gs.appendAnomalyProvenance(&.{anomaly});
-        const split_once = try gs.splitRegionsAtExpected(gs.current_step.regions, expected.start);
+        const split_once = try gs.splitTreeAtExpected(gs.current_step.correction_root, expected.start);
         defer gs.allocator.free(split_once);
         const split = try gs.splitRegionsAtExpected(split_once, expected.end);
         defer gs.allocator.free(split);
@@ -1262,17 +1218,16 @@ pub const DeltaGuidanceSystem = struct {
         raw_index_next: u32,
         expected_cursor_next: u32,
     ) Error!void {
-        if (gs.current_step.next) |future| gs.freeFutureFrom(future);
         gs.current_step.next = null;
 
         const regions = try gs.normalizeAndOwnRegions(raw_regions);
+        defer gs.allocator.free(regions);
         const root = try gs.buildTree(regions);
-        const step = try gs.allocator.create(Step);
+        const step = try gs.arena.allocator().create(Step);
         step.* = .{
             .prior = gs.current_step,
             .next = null,
             .correction_root = root,
-            .regions = regions,
             .ef_len = computeEffectiveLen(regions),
             .ex_len = computeExpectedLen(regions),
             .decision = decision,
@@ -1378,30 +1333,6 @@ pub const DeltaGuidanceSystem = struct {
         try gs.preview_anomalies.appendSlice(gs.allocator, gs.anomaly_provenance.items[start..][0..len]);
     }
 
-    /// Collects anomaly ids touching or containing an expected insertion boundary.
-    fn appendInsertPointAnomalies(gs: *DeltaGuidanceSystem, point: u32) Error!void {
-        for (gs.current_step.regions) |region| {
-            switch (region) {
-                .evacuation => |r| {
-                    if (r.anomalies) |ref| {
-                        if ((point > r.expected.start and point < r.expected.end) or
-                            point == r.expected.start or
-                            point == r.expected.end)
-                        {
-                            try gs.appendPreviewAnomalies(ref);
-                        }
-                    }
-                },
-                .imposition => |r| {
-                    if (r.anomalies) |ref| {
-                        if (r.expected_at == point) try gs.appendPreviewAnomalies(ref);
-                    }
-                },
-                .pristine => {},
-            }
-        }
-    }
-
     /// Converts builder-style regions into absolute coordinates owned by a new step.
     fn normalizeAndOwnRegions(gs: *DeltaGuidanceSystem, raw_regions: []const CorrectionRegion) Error![]CorrectionRegion {
         var normalized = std.ArrayListUnmanaged(CorrectionRegion).empty;
@@ -1440,16 +1371,14 @@ pub const DeltaGuidanceSystem = struct {
     /// Builds one balanced tree node covering a contiguous subrange of regions.
     fn buildTreeRange(gs: *DeltaGuidanceSystem, regions: []const CorrectionRegion, start: usize, end: usize) Error!*CorrectionNode {
         dbgassert(start < end);
-        const node = try gs.allocator.create(CorrectionNode);
+        const node = try gs.arena.allocator().create(CorrectionNode);
         if (end - start == 1) {
             node.* = .{ .region = regions[start] };
             return node;
         }
         const mid = start + (end - start) / 2;
         const left = try gs.buildTreeRange(regions, start, mid);
-        errdefer gs.freeTree(left);
         const right = try gs.buildTreeRange(regions, mid, end);
-        errdefer gs.freeTree(right);
         node.* = .{ .span = .{
             .ex_wid = treeExWid(left),
             .ef_wid = treeEfWid(left),
@@ -1461,36 +1390,64 @@ pub const DeltaGuidanceSystem = struct {
         return node;
     }
 
-    /// Recursively frees a correction tree.
-    fn freeTree(gs: *DeltaGuidanceSystem, node: *CorrectionNode) void {
+    /// Appends promoted regions by walking the current tree in order.
+    fn appendPromotedRegions(
+        gs: *DeltaGuidanceSystem,
+        out: *std.ArrayListUnmanaged(CorrectionRegion),
+        node: *const CorrectionNode,
+    ) Error!void {
         switch (node.*) {
-            .span => |span| {
-                gs.freeTree(span.left);
-                gs.freeTree(span.right);
+            .region => |region| switch (region) {
+                .pristine => |r| try out.append(gs.allocator, .{ .pristine = .{
+                    .expected = r.expected,
+                    .effective = r.effective,
+                    .wid = r.wid,
+                    .decisions = r.decisions,
+                } }),
+                .evacuation => |r| {
+                    if (r.anomalies != null) try out.append(gs.allocator, .{ .evacuation = .{
+                        .expected = r.expected,
+                        .effective_at = r.effective_at,
+                        .ex_wid = r.ex_wid,
+                        .decisions = r.decisions,
+                        .anomalies = r.anomalies,
+                    } });
+                },
+                .imposition => |r| {
+                    if (r.anomalies) |anoms| {
+                        try out.append(gs.allocator, .{ .imposition = .{
+                            .expected_at = r.expected_at,
+                            .effective = r.effective,
+                            .ef_wid = r.ef_wid,
+                            .decisions = r.decisions,
+                            .anomalies = anoms,
+                        } });
+                    } else {
+                        try out.append(gs.allocator, .{ .pristine = .{
+                            .expected = .{ .start = 0, .end = 0 },
+                            .effective = .{ .start = 0, .end = 0 },
+                            .wid = r.ef_wid,
+                            .decisions = r.decisions,
+                        } });
+                    }
+                },
             },
-            .region => {},
-        }
-        gs.allocator.destroy(node);
-    }
-
-    /// Frees a linked run of steps together with each step's owned tree and regions.
-    fn freeStepChain(gs: *DeltaGuidanceSystem, step: *Step) void {
-        var cursor: ?*Step = step;
-        while (cursor) |current| {
-            const next = current.next;
-            gs.freeTree(current.correction_root);
-            gs.allocator.free(current.regions);
-            gs.allocator.destroy(current);
-            cursor = next;
+            .span => |span| {
+                try gs.appendPromotedRegions(out, span.left);
+                try gs.appendPromotedRegions(out, span.right);
+            },
         }
     }
 
-    /// Frees redo history starting from the given future step.
-    fn freeFutureFrom(gs: *DeltaGuidanceSystem, step: *Step) void {
-        gs.freeStepChain(step);
+    /// Splits expected-spanning leaves at the requested point while walking the tree.
+    fn splitTreeAtExpected(gs: *DeltaGuidanceSystem, root: *const CorrectionNode, point: u32) Error![]CorrectionRegion {
+        var out = std.ArrayListUnmanaged(CorrectionRegion).empty;
+        defer out.deinit(gs.allocator);
+        try gs.appendSplitRegionsAtExpected(&out, root, point);
+        return try out.toOwnedSlice(gs.allocator);
     }
 
-    /// Splits any expected-spanning regions that straddle the requested expected point.
+    /// Splits an already collected region slice at the requested expected point.
     fn splitRegionsAtExpected(gs: *DeltaGuidanceSystem, regions: []const CorrectionRegion, point: u32) Error![]CorrectionRegion {
         var out = std.ArrayListUnmanaged(CorrectionRegion).empty;
         defer out.deinit(gs.allocator);
@@ -1544,98 +1501,220 @@ pub const DeltaGuidanceSystem = struct {
         return try out.toOwnedSlice(gs.allocator);
     }
 
-    /// Returns indices of regions touched by an expected-axis delete target.
-    fn collectTouchedRegions(gs: *DeltaGuidanceSystem, expected: Span) Error!std.ArrayListUnmanaged(usize) {
-        var out = std.ArrayListUnmanaged(usize).empty;
-        for (gs.current_step.regions, 0..) |region, idx| {
-            if (expectedSpansOverlap(region, expected) or isImpositionInside(region, expected)) {
-                try out.append(gs.allocator, idx);
-            }
+    /// Appends in-order regions, splitting any touched leaf at the requested point.
+    fn appendSplitRegionsAtExpected(
+        gs: *DeltaGuidanceSystem,
+        out: *std.ArrayListUnmanaged(CorrectionRegion),
+        node: *const CorrectionNode,
+        point: u32,
+    ) Error!void {
+        switch (node.*) {
+            .region => |region| switch (region) {
+                .pristine => |r| {
+                    if (point <= r.expected.start or point >= r.expected.end) {
+                        try out.append(gs.allocator, region);
+                    } else {
+                        const left_wid = point - r.expected.start;
+                        const right_wid = r.expected.end - point;
+                        try out.append(gs.allocator, .{ .pristine = .{
+                            .expected = .{ .start = r.expected.start, .end = point },
+                            .effective = .{ .start = r.effective.start, .end = r.effective.start + left_wid },
+                            .wid = left_wid,
+                            .decisions = r.decisions,
+                        } });
+                        try out.append(gs.allocator, .{ .pristine = .{
+                            .expected = .{ .start = point, .end = r.expected.end },
+                            .effective = .{ .start = r.effective.end - right_wid, .end = r.effective.end },
+                            .wid = right_wid,
+                            .decisions = r.decisions,
+                        } });
+                    }
+                },
+                .evacuation => |r| {
+                    if (point <= r.expected.start or point >= r.expected.end) {
+                        try out.append(gs.allocator, region);
+                    } else {
+                        try out.append(gs.allocator, .{ .evacuation = .{
+                            .expected = .{ .start = r.expected.start, .end = point },
+                            .effective_at = r.effective_at,
+                            .ex_wid = point - r.expected.start,
+                            .decisions = r.decisions,
+                            .anomalies = r.anomalies,
+                        } });
+                        try out.append(gs.allocator, .{ .evacuation = .{
+                            .expected = .{ .start = point, .end = r.expected.end },
+                            .effective_at = r.effective_at,
+                            .ex_wid = r.expected.end - point,
+                            .decisions = r.decisions,
+                            .anomalies = r.anomalies,
+                        } });
+                    }
+                },
+                .imposition => try out.append(gs.allocator, region),
+            },
+            .span => |span| {
+                try gs.appendSplitRegionsAtExpected(out, span.left, point);
+                try gs.appendSplitRegionsAtExpected(out, span.right, point);
+            },
         }
+    }
+
+    /// Collects only regions that may affect a delete over the given expected span.
+    fn collectTouchedRegions(
+        gs: *DeltaGuidanceSystem,
+        root: *const CorrectionNode,
+        expected: Span,
+    ) Error!std.ArrayListUnmanaged(CorrectionRegion) {
+        var out = std.ArrayListUnmanaged(CorrectionRegion).empty;
+        errdefer out.deinit(gs.allocator);
+        try gs.appendTouchedRegions(&out, root, 0, expected);
         return out;
+    }
+
+    /// Descends the tree and appends leaves overlapping or anchored inside the expected span.
+    fn appendTouchedRegions(
+        gs: *DeltaGuidanceSystem,
+        out: *std.ArrayListUnmanaged(CorrectionRegion),
+        node: *const CorrectionNode,
+        ex_base: u32,
+        expected: Span,
+    ) Error!void {
+        if (!subtreeMayTouchExpected(node, ex_base, expected)) return;
+        switch (node.*) {
+            .region => |region| {
+                if (expectedSpansOverlap(region, expected) or isImpositionInside(region, expected)) {
+                    try out.append(gs.allocator, region);
+                }
+            },
+            .span => |span| {
+                try gs.appendTouchedRegions(out, span.left, ex_base, expected);
+                try gs.appendTouchedRegions(out, span.right, ex_base + span.ex_wid, expected);
+            },
+        }
     }
 
     /// Reports whether an expected point lies strictly inside an anomalous evacuation.
     fn insideAnomalousEvacuation(gs: *const DeltaGuidanceSystem, point: u32) bool {
-        for (gs.current_step.regions) |region| {
-            switch (region) {
-                .evacuation => |r| {
-                    if (r.anomalies != null and point > r.expected.start and point < r.expected.end) return true;
-                },
-                else => {},
-            }
-        }
-        return false;
+        return gs.pointInsideAnomalousEvacuation(gs.current_step.correction_root, 0, point);
     }
 
-    /// Summarizes anomaly and imposition state around an expected insertion boundary.
-    fn boundaryState(gs: *const DeltaGuidanceSystem, point: u32) BoundaryState {
-        var state = BoundaryState{};
-        for (gs.current_step.regions) |region| {
-            switch (region) {
-                .evacuation => |r| {
-                    if (r.anomalies != null and point > r.expected.start and point < r.expected.end) state.inside_anomalous_evacuation = true;
-                    if (r.anomalies != null and (point == r.expected.start or point == r.expected.end)) state.has_anomalous_neighbor = true;
-                },
-                .imposition => |r| {
-                    if (r.expected_at == point) {
-                        state.has_imposition_here = true;
-                        if (r.anomalies != null) state.has_anomalous_neighbor = true;
-                    }
-                },
-                else => {},
-            }
-        }
-        return state;
-    }
-
-    /// Maps an expected insertion point onto the effective axis.
-    fn effectiveInsertPoint(gs: *const DeltaGuidanceSystem, point: u32) Error!u32 {
-        var fallback: ?u32 = null;
-        var after_impositions: ?u32 = null;
-        for (gs.current_step.regions) |region| {
-            switch (region) {
-                .pristine => |r| {
-                    if (point >= r.expected.start and point <= r.expected.end) {
-                        return r.effective.start + (point - r.expected.start);
-                    }
-                    if (point < r.expected.start and fallback == null) fallback = r.effective.start;
-                },
-                .evacuation => |r| {
-                    if (point >= r.expected.start and point <= r.expected.end) return r.effective_at;
-                    if (point < r.expected.start and fallback == null) fallback = r.effective_at;
-                },
-                .imposition => |r| {
-                    if (r.expected_at == point) after_impositions = r.effective.end;
-                    if (r.expected_at > point and fallback == null) fallback = r.effective.start;
-                },
-            }
-        }
-        return after_impositions orelse fallback orelse gs.current_step.ef_len;
+    /// Descends to determine whether a point falls inside missing-but-anomalous expected text.
+    fn pointInsideAnomalousEvacuation(
+        gs: *const DeltaGuidanceSystem,
+        node: *const CorrectionNode,
+        ex_base: u32,
+        point: u32,
+    ) bool {
+        return switch (node.*) {
+            .region => |region| switch (region) {
+                .evacuation => |r| r.anomalies != null and point > ex_base and point < ex_base + r.ex_wid,
+                else => false,
+            },
+            .span => |span| blk: {
+                const split_ex = ex_base + span.ex_wid;
+                if (point < split_ex) break :blk gs.pointInsideAnomalousEvacuation(span.left, ex_base, point);
+                if (point > split_ex) break :blk gs.pointInsideAnomalousEvacuation(span.right, split_ex, point);
+                break :blk gs.pointInsideAnomalousEvacuation(span.left, ex_base, point) or
+                    gs.pointInsideAnomalousEvacuation(span.right, split_ex, point);
+            },
+        };
     }
 
     /// Maps an expected delete boundary onto the effective axis.
     fn effectiveDeleteBoundary(gs: *const DeltaGuidanceSystem, point: u32) Error!u32 {
-        var fallback: ?u32 = null;
-        for (gs.current_step.regions) |region| {
-            switch (region) {
+        return gs.lookupDeleteBoundary(gs.current_step.correction_root, 0, 0, point) orelse gs.current_step.ef_len;
+    }
+
+    /// Descends to the insertion boundary and records local anomaly state plus effective placement.
+    fn inspectInsertPoint(
+        gs: *DeltaGuidanceSystem,
+        node: *const CorrectionNode,
+        ex_base: u32,
+        ef_base: u32,
+        point: u32,
+        info: *InsertPointInfo,
+    ) Error!void {
+        switch (node.*) {
+            .region => |region| switch (region) {
                 .pristine => |r| {
-                    if (point >= r.expected.start and point <= r.expected.end) {
-                        return r.effective.start + (point - r.expected.start);
-                    }
-                    if (point < r.expected.start and fallback == null) fallback = r.effective.start;
+                    const end = ex_base + r.wid;
+                    if (point >= ex_base and point <= end) info.exact = ef_base + (point - ex_base);
+                    if (point < ex_base and info.fallback == null) info.fallback = ef_base;
                 },
                 .evacuation => |r| {
-                    if (point >= r.expected.start and point <= r.expected.end) return r.effective_at;
-                    if (point < r.expected.start and fallback == null) fallback = r.effective_at;
+                    const end = ex_base + r.ex_wid;
+                    if (r.anomalies) |ref| {
+                        if (point > ex_base and point < end) {
+                            info.state.inside_anomalous_evacuation = true;
+                            try gs.appendPreviewAnomalies(ref);
+                        }
+                        if (point == ex_base or point == end) {
+                            info.state.has_anomalous_neighbor = true;
+                            try gs.appendPreviewAnomalies(ref);
+                        }
+                    }
+                    if (point >= ex_base and point <= end and info.exact == null) info.exact = ef_base;
+                    if (point < ex_base and info.fallback == null) info.fallback = ef_base;
                 },
                 .imposition => |r| {
-                    if (r.expected_at == point) return r.effective.start;
-                    if (r.expected_at > point and fallback == null) fallback = r.effective.start;
+                    if (point == ex_base) {
+                        info.state.has_imposition_here = true;
+                        info.after_impositions = ef_base + r.ef_wid;
+                        if (r.anomalies) |ref| {
+                            info.state.has_anomalous_neighbor = true;
+                            try gs.appendPreviewAnomalies(ref);
+                        }
+                    }
+                    if (point < ex_base and info.fallback == null) info.fallback = ef_base;
                 },
-            }
+            },
+            .span => |span| {
+                const split_ex = ex_base + span.ex_wid;
+                const split_ef = ef_base + span.ef_wid;
+                if (point <= split_ex) try gs.inspectInsertPoint(span.left, ex_base, ef_base, point, info);
+                if (point >= split_ex) try gs.inspectInsertPoint(span.right, split_ex, split_ef, point, info);
+            },
         }
-        return fallback orelse gs.current_step.ef_len;
+    }
+
+    /// Descends to the delete boundary and returns the effective cursor at that boundary.
+    fn lookupDeleteBoundary(
+        gs: *const DeltaGuidanceSystem,
+        node: *const CorrectionNode,
+        ex_base: u32,
+        ef_base: u32,
+        point: u32,
+    ) ?u32 {
+        return switch (node.*) {
+            .region => |region| switch (region) {
+                .pristine => |r| blk: {
+                    const end = ex_base + r.wid;
+                    if (point >= ex_base and point <= end) break :blk ef_base + (point - ex_base);
+                    if (point < ex_base) break :blk ef_base;
+                    break :blk null;
+                },
+                .evacuation => |r| blk: {
+                    const end = ex_base + r.ex_wid;
+                    if (point >= ex_base and point <= end) break :blk ef_base;
+                    if (point < ex_base) break :blk ef_base;
+                    break :blk null;
+                },
+                .imposition => |r| blk: {
+                    if (point == ex_base) break :blk ef_base;
+                    if (point < ex_base) break :blk ef_base;
+                    _ = r;
+                    break :blk null;
+                },
+            },
+            .span => |span| blk: {
+                const split_ex = ex_base + span.ex_wid;
+                const split_ef = ef_base + span.ef_wid;
+                if (point < split_ex) break :blk gs.lookupDeleteBoundary(span.left, ex_base, ef_base, point);
+                if (point > split_ex) break :blk gs.lookupDeleteBoundary(span.right, split_ex, split_ef, point);
+                break :blk gs.lookupDeleteBoundary(span.right, split_ex, split_ef, point) orelse
+                    gs.lookupDeleteBoundary(span.left, ex_base, ef_base, point);
+            },
+        };
     }
 };
 
@@ -1654,8 +1733,23 @@ const BoundaryState = struct {
     has_anomalous_neighbor: bool = false,
 };
 
+/// Accumulates everything needed to classify and place an insertion boundary.
+const InsertPointInfo = struct {
+    state: BoundaryState = .{},
+    fallback: ?u32 = null,
+    exact: ?u32 = null,
+    after_impositions: ?u32 = null,
+};
+
 const no_resolutions = [_]ApplyResolution{};
 const delete_whole_only = [_]ApplyResolution{.delete_whole};
+
+/// Reports whether a subtree could contain any region relevant to the expected span.
+fn subtreeMayTouchExpected(node: *const CorrectionNode, ex_base: u32, expected: Span) bool {
+    const ex_wid = treeExWid(node);
+    if (ex_wid == 0) return expected.start <= ex_base and ex_base < expected.end;
+    return ex_base < expected.end and expected.start < ex_base + ex_wid;
+}
 
 /// Reports whether a region with expected width overlaps the given expected span.
 fn expectedSpansOverlap(region: CorrectionRegion, expected: Span) bool {
