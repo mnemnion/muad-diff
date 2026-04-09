@@ -189,6 +189,11 @@ pub const EffectiveEdit = struct {
 };
 
 /// Terminal qualitative region of the correction surface.
+///
+/// Region coordinates are local to the subtree root that owns them. Traversal
+/// code derives absolute expected/effective positions from the running expected
+/// base plus authoritative deviation; the stored coordinates act as local
+/// shape descriptors and debug-time checks.
 pub const CorrectionRegion = union(enum) {
     pristine: struct {
         expected: Span,
@@ -229,42 +234,6 @@ pub const CorrectionRegion = union(enum) {
         };
     }
 
-    /// Returns the region's expected-axis start position.
-    fn expectedStart(region: CorrectionRegion) u32 {
-        return switch (region) {
-            .pristine => |r| r.expected.start,
-            .evacuation => |r| r.expected.start,
-            .imposition => |r| r.expected_at,
-        };
-    }
-
-    /// Returns the region's expected-axis end position.
-    fn expectedEnd(region: CorrectionRegion) u32 {
-        return switch (region) {
-            .pristine => |r| r.expected.end,
-            .evacuation => |r| r.expected.end,
-            .imposition => |r| r.expected_at,
-        };
-    }
-
-    /// Returns the region's effective-axis start position.
-    fn effectiveStart(region: CorrectionRegion) u32 {
-        return switch (region) {
-            .pristine => |r| r.effective.start,
-            .evacuation => |r| r.effective_at,
-            .imposition => |r| r.effective.start,
-        };
-    }
-
-    /// Returns the region's effective-axis end position.
-    fn effectiveEnd(region: CorrectionRegion) u32 {
-        return switch (region) {
-            .pristine => |r| r.effective.end,
-            .evacuation => |r| r.effective_at,
-            .imposition => |r| r.effective.end,
-        };
-    }
-
     /// Returns the decision provenance attached to the region.
     fn decisionRef(region: CorrectionRegion) ProvenanceRef {
         return switch (region) {
@@ -286,45 +255,6 @@ pub const CorrectionRegion = union(enum) {
     /// Reports whether the region carries anomaly provenance.
     fn isAnomalous(region: CorrectionRegion) bool {
         return region.anomalyRef() != null;
-    }
-
-    /// Rewrites a region so its coordinates are absolute on both axes.
-    fn normalize(region: CorrectionRegion, expected_cursor: *u32, effective_cursor: *u32) CorrectionRegion {
-        return switch (region) {
-            .pristine => |r| pristine: {
-                const start_e = expected_cursor.*;
-                const start_f = effective_cursor.*;
-                expected_cursor.* += r.wid;
-                effective_cursor.* += r.wid;
-                break :pristine .{ .pristine = .{
-                    .expected = .{ .start = start_e, .end = expected_cursor.* },
-                    .effective = .{ .start = start_f, .end = effective_cursor.* },
-                    .wid = r.wid,
-                    .decisions = r.decisions,
-                } };
-            },
-            .evacuation => |r| .{ .evacuation = .{
-                .expected = .{
-                    .start = expected_cursor.*,
-                    .end = expected_cursor.* + r.ex_wid,
-                },
-                .effective_at = effective_cursor.*,
-                .ex_wid = r.ex_wid,
-                .decisions = r.decisions,
-                .anomalies = r.anomalies,
-            } },
-            .imposition => |r| imposition: {
-                const start_f = effective_cursor.*;
-                effective_cursor.* += r.ef_wid;
-                break :imposition .{ .imposition = .{
-                    .expected_at = expected_cursor.*,
-                    .effective = .{ .start = start_f, .end = effective_cursor.* },
-                    .ef_wid = r.ef_wid,
-                    .decisions = r.decisions,
-                    .anomalies = r.anomalies,
-                } };
-            },
-        };
     }
 };
 
@@ -371,6 +301,12 @@ pub const Step = struct {
     expected_cursor_next: u32,
 };
 
+/// Result of splitting one correction subtree at an expected-axis boundary.
+const TreeSplit = struct {
+    left: ?*CorrectionNode,
+    right: ?*CorrectionNode,
+};
+
 /// Review-capable delta engine owning text, history, anomalies, and provenance.
 pub const DeltaGuidanceSystem = struct {
     allocator: Allocator,
@@ -399,7 +335,7 @@ pub const DeltaGuidanceSystem = struct {
 
     /// If our precalculated buffer is insufficient, we allocate just a bit
     /// more, for luck.
-    pub const growth_fudge: comptime_int = 16;
+    const growth_fudge: comptime_int = 16;
 
     /// Allocates a guidance system on the heap and seeds it from initial text.
     pub fn createWithText(allocator: Allocator, text: []const u8) Error!*DeltaGuidanceSystem {
@@ -469,14 +405,7 @@ pub const DeltaGuidanceSystem = struct {
         dbgassert(decisionToInt(genesis_decision) == 0);
 
         const decision_ref = try gs.appendDecisionProvenance(&.{genesis_decision});
-        const regions = try gs.normalizeAndOwnRegions(&.{.{ .pristine = .{
-            .expected = .{ .start = 0, .end = text_len },
-            .effective = .{ .start = 0, .end = text_len },
-            .wid = text_len,
-            .decisions = decision_ref,
-        } }});
-        const root = try gs.buildTree(regions);
-        defer allocator.free(regions);
+        const root = try gs.createPristineNode(text_len, decision_ref);
 
         const step = try gs.arena.allocator().create(Step);
         step.* = .{
@@ -519,10 +448,9 @@ pub const DeltaGuidanceSystem = struct {
     pub fn openStep(gs: *DeltaGuidanceSystem, raw_delta: *ZDelta, target_revision: usize) Error!void {
         errdefer raw_delta.destroy(gs.allocator);
         if (gs.attached_step != null) return error.StepAlreadyOpen;
-        if (gs.current_step.ex_len != raw_delta.originalBeforeLength()) return error.ZDeltaTextLengthMismatch;
 
         const before_len, const head_room, const tail_room = raw_delta.textNumbers();
-        _ = before_len;
+        if (gs.current_step.ex_len != before_len) return error.ZDeltaTextLengthMismatch;
         const total_change = raw_delta.totalChange();
         if (total_change > 0) {
             const growth_need: u32 = @intCast(total_change);
@@ -603,16 +531,13 @@ pub const DeltaGuidanceSystem = struct {
         // Finish is not a reviewed decision, so the current step is mutated in
         // place.  The undo/redo path remains decision-based; finish only changes
         // which axis that last decided correction surface is keyed against.
-        var promoted_builder = std.ArrayListUnmanaged(CorrectionRegion).empty;
-        defer promoted_builder.deinit(gs.allocator);
-        try gs.appendPromotedRegions(&promoted_builder, gs.current_step.correction_root);
-
-        const new_regions = try gs.normalizeAndOwnRegions(promoted_builder.items);
-        defer gs.allocator.free(new_regions);
-        const new_root = try gs.buildTree(new_regions);
+        const new_root = (try gs.promoteSubtree(gs.current_step.correction_root)) orelse blk: {
+            const empty_decisions = try gs.appendDecisionProvenance(&.{});
+            break :blk try gs.createPristineNode(0, empty_decisions);
+        };
         gs.current_step.correction_root = new_root;
-        gs.current_step.ex_len = computeExpectedLen(new_regions);
-        gs.current_step.ef_len = computeEffectiveLen(new_regions);
+        gs.current_step.ex_len = treeExWid(new_root);
+        gs.current_step.ef_len = treeEfWid(new_root);
         gs.current_step.raw_index_next = 0;
         gs.current_step.expected_cursor_next = 0;
 
@@ -944,47 +869,15 @@ pub const DeltaGuidanceSystem = struct {
         } });
 
         const decision_ref = try gs.appendDecisionProvenance(&.{decision});
-        const split = try gs.splitTreeAtExpected(gs.current_step.correction_root, scanned.expected_cursor);
-        defer gs.allocator.free(split);
+        const split = try gs.splitAtExpected(gs.current_step.correction_root, scanned.expected_cursor);
+        const root = (try gs.concatThree(
+            split.left,
+            try gs.createImpositionNode(span.len, decision_ref, null),
+            split.right,
+        )).?;
 
-        var builder = std.ArrayListUnmanaged(CorrectionRegion).empty;
-        defer builder.deinit(gs.allocator);
-
-        var inserted = false;
-        for (split) |region| {
-            if (!inserted) {
-                switch (region) {
-                    .imposition => |r| {
-                        if (r.expected_at == scanned.expected_cursor) {
-                            try builder.append(gs.allocator, region);
-                            continue;
-                        }
-                    },
-                    else => {},
-                }
-                if (region.expectedStart() >= scanned.expected_cursor) {
-                    try builder.append(gs.allocator, .{ .imposition = .{
-                        .expected_at = scanned.expected_cursor,
-                        .effective = .{ .start = 0, .end = 0 },
-                        .ef_wid = span.len,
-                        .decisions = decision_ref,
-                        .anomalies = null,
-                    } });
-                    inserted = true;
-                }
-            }
-            try builder.append(gs.allocator, region);
-        }
-        if (!inserted) try builder.append(gs.allocator, .{ .imposition = .{
-            .expected_at = scanned.expected_cursor,
-            .effective = .{ .start = 0, .end = 0 },
-            .ef_wid = span.len,
-            .decisions = decision_ref,
-            .anomalies = null,
-        } });
-
-        try gs.commitNewStep(
-            builder.items,
+        try gs.commitNewStepRoot(
+            root,
             decision,
             null,
             scanned.raw_index + 1,
@@ -1017,46 +910,14 @@ pub const DeltaGuidanceSystem = struct {
 
         const decision_ref = try gs.appendDecisionProvenance(&.{decision});
         const anomaly_ref = try gs.appendAnomalyProvenance(&.{anomaly});
-        const split = try gs.splitTreeAtExpected(gs.current_step.correction_root, scanned.expected_cursor);
-        defer gs.allocator.free(split);
+        const split = try gs.splitAtExpected(gs.current_step.correction_root, scanned.expected_cursor);
+        const root = (try gs.concatThree(
+            split.left,
+            try gs.createEvacuationNode(span.len, decision_ref, anomaly_ref),
+            split.right,
+        )).?;
 
-        var builder = std.ArrayListUnmanaged(CorrectionRegion).empty;
-        defer builder.deinit(gs.allocator);
-
-        var inserted = false;
-        for (split) |region| {
-            if (!inserted) {
-                switch (region) {
-                    .imposition => |r| {
-                        if (r.expected_at == scanned.expected_cursor) {
-                            try builder.append(gs.allocator, region);
-                            continue;
-                        }
-                    },
-                    else => {},
-                }
-                if (region.expectedStart() >= scanned.expected_cursor) {
-                    try builder.append(gs.allocator, .{ .evacuation = .{
-                        .expected = .{ .start = 0, .end = 0 },
-                        .effective_at = 0,
-                        .ex_wid = span.len,
-                        .decisions = decision_ref,
-                        .anomalies = anomaly_ref,
-                    } });
-                    inserted = true;
-                }
-            }
-            try builder.append(gs.allocator, region);
-        }
-        if (!inserted) try builder.append(gs.allocator, .{ .evacuation = .{
-            .expected = .{ .start = 0, .end = 0 },
-            .effective_at = 0,
-            .ex_wid = span.len,
-            .decisions = decision_ref,
-            .anomalies = anomaly_ref,
-        } });
-
-        try gs.commitNewStep(builder.items, decision, anomaly, scanned.raw_index + 1, scanned.expected_cursor + span.len);
+        try gs.commitNewStepRoot(root, decision, anomaly, scanned.raw_index + 1, scanned.expected_cursor + span.len);
     }
 
     /// Accepts a raw delete, storing removed bytes in residue for undo.
@@ -1082,51 +943,18 @@ pub const DeltaGuidanceSystem = struct {
             .resolution = resolution,
         } });
 
-        const split_once = try gs.splitTreeAtExpected(gs.current_step.correction_root, expected.start);
-        defer gs.allocator.free(split_once);
-        const split = try gs.splitRegionsAtExpected(split_once, expected.end);
-        defer gs.allocator.free(split);
-        const decision_ref = try gs.appendDecisionProvenance(&.{decision});
+        const split_before = try gs.splitAtExpected(gs.current_step.correction_root, expected.start);
+        const split_after = if (split_before.right) |right|
+            try gs.splitAtExpected(right, len)
+        else
+            TreeSplit{ .left = null, .right = null };
+        const root = (try gs.concatThree(
+            split_before.left,
+            try gs.applyDeleteToSubtree(split_after.left, decision, resolution),
+            split_after.right,
+        )).?;
 
-        var builder = std.ArrayListUnmanaged(CorrectionRegion).empty;
-        defer builder.deinit(gs.allocator);
-
-        for (split) |region| {
-            if (!expectedSpansOverlap(region, expected)) {
-                if (!isImpositionInside(region, expected)) try builder.append(gs.allocator, region);
-                continue;
-            }
-            switch (region) {
-                .pristine => |r| try builder.append(gs.allocator, .{ .evacuation = .{
-                    .expected = .{ .start = 0, .end = 0 },
-                    .effective_at = 0,
-                    .ex_wid = r.wid,
-                    .decisions = try gs.combineDecisionRefs(r.decisions, decision),
-                    .anomalies = null,
-                } }),
-                .evacuation => |r| try builder.append(gs.allocator, .{ .evacuation = .{
-                    .expected = .{ .start = 0, .end = 0 },
-                    .effective_at = 0,
-                    .ex_wid = r.ex_wid,
-                    .decisions = try gs.combineDecisionRefs(r.decisions, decision),
-                    .anomalies = r.anomalies,
-                } }),
-                .imposition => |r| {
-                    if (resolution == .delete_whole and
-                        r.anomalies != null and
-                        r.expected_at >= expected.start and
-                        r.expected_at < expected.end)
-                    {
-                        // Drop the imposed text entirely.
-                    } else {
-                        try builder.append(gs.allocator, region);
-                    }
-                },
-            }
-        }
-
-        try gs.commitNewStep(builder.items, decision, null, scanned.raw_index + 1, scanned.expected_cursor + len);
-        _ = decision_ref;
+        try gs.commitNewStepRoot(root, decision, null, scanned.raw_index + 1, scanned.expected_cursor + len);
     }
 
     /// Rescues a raw delete, preserving the effective text as an imposition anomaly.
@@ -1153,96 +981,27 @@ pub const DeltaGuidanceSystem = struct {
 
         const decision_ref = try gs.appendDecisionProvenance(&.{decision});
         const anomaly_ref = try gs.appendAnomalyProvenance(&.{anomaly});
-        const split_once = try gs.splitTreeAtExpected(gs.current_step.correction_root, expected.start);
-        defer gs.allocator.free(split_once);
-        const split = try gs.splitRegionsAtExpected(split_once, expected.end);
-        defer gs.allocator.free(split);
-
-        var builder = std.ArrayListUnmanaged(CorrectionRegion).empty;
-        defer builder.deinit(gs.allocator);
-
-        var inserted = false;
-        for (split) |region| {
-            if (expectedSpansOverlap(region, expected)) {
-                switch (region) {
-                    .pristine => {},
-                    else => return error.UnresolvedZDeltaOp,
-                }
-                if (!inserted) {
-                    try builder.append(gs.allocator, .{ .imposition = .{
-                        .expected_at = expected.start,
-                        .effective = .{ .start = 0, .end = 0 },
-                        .ef_wid = len,
-                        .decisions = decision_ref,
-                        .anomalies = anomaly_ref,
-                    } });
-                    inserted = true;
-                }
-                continue;
-            }
-            if (!inserted and region.expectedStart() >= expected.end) {
-                try builder.append(gs.allocator, .{ .imposition = .{
-                    .expected_at = expected.start,
-                    .effective = .{ .start = 0, .end = 0 },
-                    .ef_wid = len,
-                    .decisions = decision_ref,
-                    .anomalies = anomaly_ref,
-                } });
-                inserted = true;
-            }
-            try builder.append(gs.allocator, region);
+        const split_before = try gs.splitAtExpected(gs.current_step.correction_root, expected.start);
+        const split_after = if (split_before.right) |right|
+            try gs.splitAtExpected(right, len)
+        else
+            TreeSplit{ .left = null, .right = null };
+        if (split_after.left) |middle| {
+            if (!subtreeIsAllPristine(middle)) return error.UnresolvedZDeltaOp;
         }
-        if (!inserted) try builder.append(gs.allocator, .{ .imposition = .{
-            .expected_at = expected.start,
-            .effective = .{ .start = 0, .end = 0 },
-            .ef_wid = len,
-            .decisions = decision_ref,
-            .anomalies = anomaly_ref,
-        } });
+        const root = (try gs.concatThree(
+            split_before.left,
+            try gs.createImpositionNode(len, decision_ref, anomaly_ref),
+            split_after.right,
+        )).?;
 
-        try gs.commitNewStep(
-            builder.items,
+        try gs.commitNewStepRoot(
+            root,
             decision,
             anomaly,
             scanned.raw_index + 1,
             scanned.expected_cursor,
         );
-    }
-
-    /// Normalizes newly built regions, snapshots the next cursor, and advances history.
-    fn commitNewStep(
-        gs: *DeltaGuidanceSystem,
-        raw_regions: []const CorrectionRegion,
-        decision: DecisionIndex,
-        anomaly: ?AnomalyIndex,
-        raw_index_next: u32,
-        expected_cursor_next: u32,
-    ) Error!void {
-        gs.current_step.next = null;
-
-        const regions = try gs.normalizeAndOwnRegions(raw_regions);
-        defer gs.allocator.free(regions);
-        const root = try gs.buildTree(regions);
-        const step = try gs.arena.allocator().create(Step);
-        step.* = .{
-            .prior = gs.current_step,
-            .next = null,
-            .correction_root = root,
-            .ef_len = computeEffectiveLen(regions),
-            .ex_len = computeExpectedLen(regions),
-            .decision = decision,
-            .anomaly = anomaly,
-            .anomaly_count = gs.current_step.anomaly_count + @as(u32, if (anomaly != null) 1 else 0),
-            .decision_count = gs.current_step.decision_count + 1,
-            .raw_index_next = raw_index_next,
-            .expected_cursor_next = expected_cursor_next,
-        };
-        gs.current_step.next = step;
-        gs.current_step = step;
-        if (gs.attached_step) |*attached| {
-            attached.raw_index_next = raw_index_next;
-            attached.expected_cursor_next = expected_cursor_next;
-        }
     }
 
     /// Reverses the text effects of a single recorded decision.
@@ -1333,229 +1092,216 @@ pub const DeltaGuidanceSystem = struct {
         try gs.preview_anomalies.appendSlice(gs.allocator, gs.anomaly_provenance.items[start..][0..len]);
     }
 
-    /// Converts builder-style regions into absolute coordinates owned by a new step.
-    fn normalizeAndOwnRegions(gs: *DeltaGuidanceSystem, raw_regions: []const CorrectionRegion) Error![]CorrectionRegion {
-        var normalized = std.ArrayListUnmanaged(CorrectionRegion).empty;
-        defer normalized.deinit(gs.allocator);
-
-        var expected_cursor: u32 = 0;
-        var effective_cursor: u32 = 0;
-        if (raw_regions.len == 0) {
-            const empty_decisions = try gs.appendDecisionProvenance(&.{});
-            try normalized.append(gs.allocator, .{ .pristine = .{
-                .expected = .{ .start = 0, .end = 0 },
-                .effective = .{ .start = 0, .end = 0 },
-                .wid = 0,
-                .decisions = empty_decisions,
-            } });
-        } else {
-            try normalized.ensureTotalCapacity(gs.allocator, raw_regions.len);
-            for (raw_regions) |region| {
-                const normalized_region = region.normalize(&expected_cursor, &effective_cursor);
-                switch (normalized_region) {
-                    .evacuation => expected_cursor += normalized_region.exWid(),
-                    .imposition => {},
-                    .pristine => {},
-                }
-                normalized.appendAssumeCapacity(normalized_region);
-            }
-        }
-        return try normalized.toOwnedSlice(gs.allocator);
-    }
-
-    /// Materializes the public correction tree from a normalized region slice.
-    fn buildTree(gs: *DeltaGuidanceSystem, regions: []const CorrectionRegion) Error!*CorrectionNode {
-        return gs.buildTreeRange(regions, 0, regions.len);
-    }
-
-    /// Builds one balanced tree node covering a contiguous subrange of regions.
-    fn buildTreeRange(gs: *DeltaGuidanceSystem, regions: []const CorrectionRegion, start: usize, end: usize) Error!*CorrectionNode {
-        dbgassert(start < end);
+    /// Creates a new region node from already-local region geometry.
+    fn createRegionNode(gs: *DeltaGuidanceSystem, region: CorrectionRegion) Error!*CorrectionNode {
         const node = try gs.arena.allocator().create(CorrectionNode);
-        if (end - start == 1) {
-            node.* = .{ .region = regions[start] };
-            return node;
-        }
-        const mid = start + (end - start) / 2;
-        const left = try gs.buildTreeRange(regions, start, mid);
-        const right = try gs.buildTreeRange(regions, mid, end);
+        node.* = .{ .region = region };
+        return node;
+    }
+
+    /// Creates a pristine region node local to its subtree root.
+    fn createPristineNode(gs: *DeltaGuidanceSystem, wid: u32, decisions: ProvenanceRef) Error!*CorrectionNode {
+        return gs.createRegionNode(.{ .pristine = .{
+            .expected = .{ .start = 0, .end = wid },
+            .effective = .{ .start = 0, .end = wid },
+            .wid = wid,
+            .decisions = decisions,
+        } });
+    }
+
+    /// Creates an evacuation region node local to its subtree root.
+    fn createEvacuationNode(
+        gs: *DeltaGuidanceSystem,
+        ex_wid: u32,
+        decisions: ProvenanceRef,
+        anomalies: ?ProvenanceRef,
+    ) Error!*CorrectionNode {
+        return gs.createRegionNode(.{ .evacuation = .{
+            .expected = .{ .start = 0, .end = ex_wid },
+            .effective_at = 0,
+            .ex_wid = ex_wid,
+            .decisions = decisions,
+            .anomalies = anomalies,
+        } });
+    }
+
+    /// Creates an imposition region node local to its subtree root.
+    fn createImpositionNode(
+        gs: *DeltaGuidanceSystem,
+        ef_wid: u32,
+        decisions: ProvenanceRef,
+        anomalies: ?ProvenanceRef,
+    ) Error!*CorrectionNode {
+        return gs.createRegionNode(.{ .imposition = .{
+            .expected_at = 0,
+            .effective = .{ .start = 0, .end = ef_wid },
+            .ef_wid = ef_wid,
+            .decisions = decisions,
+            .anomalies = anomalies,
+        } });
+    }
+
+    /// Combines two subtrees under one checked span node.
+    fn createSpanNode(gs: *DeltaGuidanceSystem, left: *CorrectionNode, right: *CorrectionNode) Error!*CorrectionNode {
+        const left_ex_wid = treeExWid(left);
+        const left_deviation = treeDeviation(left);
+        const left_ef_wid = applyDeviationToWidth(left_ex_wid, left_deviation);
+        dbgassert(left_ef_wid == treeEfWid(left));
+
+        const node = try gs.arena.allocator().create(CorrectionNode);
         node.* = .{ .span = .{
-            .ex_wid = treeExWid(left),
-            .ef_wid = treeEfWid(left),
-            .deviation = @as(i32, @intCast(treeEfWid(left))) - @as(i32, @intCast(treeExWid(left))),
-            .pivot = treeEfWid(left),
+            .ex_wid = left_ex_wid,
+            .ef_wid = left_ef_wid,
+            .deviation = left_deviation,
+            .pivot = left_ef_wid,
             .left = left,
             .right = right,
         } };
         return node;
     }
 
-    /// Appends promoted regions by walking the current tree in order.
-    fn appendPromotedRegions(
+    /// Concatenates two adjacent subtrees, reusing either side directly when possible.
+    fn concatNodes(
         gs: *DeltaGuidanceSystem,
-        out: *std.ArrayListUnmanaged(CorrectionRegion),
-        node: *const CorrectionNode,
-    ) Error!void {
-        switch (node.*) {
-            .region => |region| switch (region) {
-                .pristine => |r| try out.append(gs.allocator, .{ .pristine = .{
-                    .expected = r.expected,
-                    .effective = r.effective,
-                    .wid = r.wid,
-                    .decisions = r.decisions,
-                } }),
-                .evacuation => |r| {
-                    if (r.anomalies != null) try out.append(gs.allocator, .{ .evacuation = .{
-                        .expected = r.expected,
-                        .effective_at = r.effective_at,
-                        .ex_wid = r.ex_wid,
-                        .decisions = r.decisions,
-                        .anomalies = r.anomalies,
-                    } });
-                },
-                .imposition => |r| {
-                    if (r.anomalies) |anoms| {
-                        try out.append(gs.allocator, .{ .imposition = .{
-                            .expected_at = r.expected_at,
-                            .effective = r.effective,
-                            .ef_wid = r.ef_wid,
-                            .decisions = r.decisions,
-                            .anomalies = anoms,
-                        } });
-                    } else {
-                        try out.append(gs.allocator, .{ .pristine = .{
-                            .expected = .{ .start = 0, .end = 0 },
-                            .effective = .{ .start = 0, .end = 0 },
-                            .wid = r.ef_wid,
-                            .decisions = r.decisions,
-                        } });
-                    }
-                },
-            },
-            .span => |span| {
-                try gs.appendPromotedRegions(out, span.left);
-                try gs.appendPromotedRegions(out, span.right);
-            },
-        }
+        left: ?*CorrectionNode,
+        right: ?*CorrectionNode,
+    ) Error!?*CorrectionNode {
+        if (left == null) return right;
+        if (right == null) return left;
+        return gs.createSpanNode(left.?, right.?);
     }
 
-    /// Splits expected-spanning leaves at the requested point while walking the tree.
-    fn splitTreeAtExpected(gs: *DeltaGuidanceSystem, root: *const CorrectionNode, point: u32) Error![]CorrectionRegion {
-        var out = std.ArrayListUnmanaged(CorrectionRegion).empty;
-        defer out.deinit(gs.allocator);
-        try gs.appendSplitRegionsAtExpected(&out, root, point);
-        return try out.toOwnedSlice(gs.allocator);
-    }
-
-    /// Splits an already collected region slice at the requested expected point.
-    fn splitRegionsAtExpected(gs: *DeltaGuidanceSystem, regions: []const CorrectionRegion, point: u32) Error![]CorrectionRegion {
-        var out = std.ArrayListUnmanaged(CorrectionRegion).empty;
-        defer out.deinit(gs.allocator);
-
-        for (regions) |region| {
-            switch (region) {
-                .pristine => |r| {
-                    if (point <= r.expected.start or point >= r.expected.end) {
-                        try out.append(gs.allocator, region);
-                    } else {
-                        const left_wid = point - r.expected.start;
-                        const right_wid = r.expected.end - point;
-                        try out.append(gs.allocator, .{ .pristine = .{
-                            .expected = .{ .start = r.expected.start, .end = point },
-                            .effective = .{ .start = r.effective.start, .end = r.effective.start + left_wid },
-                            .wid = left_wid,
-                            .decisions = r.decisions,
-                        } });
-                        try out.append(gs.allocator, .{ .pristine = .{
-                            .expected = .{ .start = point, .end = r.expected.end },
-                            .effective = .{ .start = r.effective.end - right_wid, .end = r.effective.end },
-                            .wid = right_wid,
-                            .decisions = r.decisions,
-                        } });
-                    }
-                },
-                .evacuation => |r| {
-                    if (point <= r.expected.start or point >= r.expected.end) {
-                        try out.append(gs.allocator, region);
-                    } else {
-                        try out.append(gs.allocator, .{ .evacuation = .{
-                            .expected = .{ .start = r.expected.start, .end = point },
-                            .effective_at = r.effective_at,
-                            .ex_wid = point - r.expected.start,
-                            .decisions = r.decisions,
-                            .anomalies = r.anomalies,
-                        } });
-                        try out.append(gs.allocator, .{ .evacuation = .{
-                            .expected = .{ .start = point, .end = r.expected.end },
-                            .effective_at = r.effective_at,
-                            .ex_wid = r.expected.end - point,
-                            .decisions = r.decisions,
-                            .anomalies = r.anomalies,
-                        } });
-                    }
-                },
-                .imposition => try out.append(gs.allocator, region),
-            }
-        }
-
-        return try out.toOwnedSlice(gs.allocator);
-    }
-
-    /// Appends in-order regions, splitting any touched leaf at the requested point.
-    fn appendSplitRegionsAtExpected(
+    /// Concatenates three adjacent subtrees into one persistent subtree.
+    fn concatThree(
         gs: *DeltaGuidanceSystem,
-        out: *std.ArrayListUnmanaged(CorrectionRegion),
-        node: *const CorrectionNode,
-        point: u32,
-    ) Error!void {
-        switch (node.*) {
+        left: ?*CorrectionNode,
+        middle: ?*CorrectionNode,
+        right: ?*CorrectionNode,
+    ) Error!?*CorrectionNode {
+        return gs.concatNodes(try gs.concatNodes(left, middle), right);
+    }
+
+    /// Splits a subtree at an expected boundary, keeping zero-width anchors on the right.
+    fn splitAtExpected(gs: *DeltaGuidanceSystem, node: *CorrectionNode, point: u32) Error!TreeSplit {
+        dbgassert(point <= treeExWid(node));
+        return switch (node.*) {
             .region => |region| switch (region) {
-                .pristine => |r| {
-                    if (point <= r.expected.start or point >= r.expected.end) {
-                        try out.append(gs.allocator, region);
-                    } else {
-                        const left_wid = point - r.expected.start;
-                        const right_wid = r.expected.end - point;
-                        try out.append(gs.allocator, .{ .pristine = .{
-                            .expected = .{ .start = r.expected.start, .end = point },
-                            .effective = .{ .start = r.effective.start, .end = r.effective.start + left_wid },
-                            .wid = left_wid,
-                            .decisions = r.decisions,
-                        } });
-                        try out.append(gs.allocator, .{ .pristine = .{
-                            .expected = .{ .start = point, .end = r.expected.end },
-                            .effective = .{ .start = r.effective.end - right_wid, .end = r.effective.end },
-                            .wid = right_wid,
-                            .decisions = r.decisions,
-                        } });
-                    }
+                .pristine => |r| blk: {
+                    if (point == 0) break :blk .{ .left = null, .right = node };
+                    if (point == r.wid) break :blk .{ .left = node, .right = null };
+                    break :blk .{
+                        .left = try gs.createPristineNode(point, r.decisions),
+                        .right = try gs.createPristineNode(r.wid - point, r.decisions),
+                    };
                 },
-                .evacuation => |r| {
-                    if (point <= r.expected.start or point >= r.expected.end) {
-                        try out.append(gs.allocator, region);
-                    } else {
-                        try out.append(gs.allocator, .{ .evacuation = .{
-                            .expected = .{ .start = r.expected.start, .end = point },
-                            .effective_at = r.effective_at,
-                            .ex_wid = point - r.expected.start,
-                            .decisions = r.decisions,
-                            .anomalies = r.anomalies,
-                        } });
-                        try out.append(gs.allocator, .{ .evacuation = .{
-                            .expected = .{ .start = point, .end = r.expected.end },
-                            .effective_at = r.effective_at,
-                            .ex_wid = r.expected.end - point,
-                            .decisions = r.decisions,
-                            .anomalies = r.anomalies,
-                        } });
-                    }
+                .evacuation => |r| blk: {
+                    if (point == 0) break :blk .{ .left = null, .right = node };
+                    if (point == r.ex_wid) break :blk .{ .left = node, .right = null };
+                    break :blk .{
+                        .left = try gs.createEvacuationNode(point, r.decisions, r.anomalies),
+                        .right = try gs.createEvacuationNode(r.ex_wid - point, r.decisions, r.anomalies),
+                    };
                 },
-                .imposition => try out.append(gs.allocator, region),
+                .imposition => .{ .left = null, .right = node },
             },
-            .span => |span| {
-                try gs.appendSplitRegionsAtExpected(out, span.left, point);
-                try gs.appendSplitRegionsAtExpected(out, span.right, point);
+            .span => |span| blk: {
+                if (point < span.ex_wid) {
+                    const split = try gs.splitAtExpected(span.left, point);
+                    break :blk .{
+                        .left = split.left,
+                        .right = try gs.concatNodes(split.right, span.right),
+                    };
+                }
+                if (point > span.ex_wid) {
+                    const split = try gs.splitAtExpected(span.right, point - span.ex_wid);
+                    break :blk .{
+                        .left = try gs.concatNodes(span.left, split.left),
+                        .right = split.right,
+                    };
+                }
+                const split = try gs.splitAtExpected(span.left, point);
+                break :blk .{
+                    .left = split.left,
+                    .right = try gs.concatNodes(split.right, span.right),
+                };
             },
+        };
+    }
+
+    /// Promotes one subtree onto the next expected axis while preserving anomalies.
+    fn promoteSubtree(gs: *DeltaGuidanceSystem, node: *CorrectionNode) Error!?*CorrectionNode {
+        return switch (node.*) {
+            .region => |region| switch (region) {
+                .pristine => node,
+                .evacuation => |r| if (r.anomalies != null) node else null,
+                .imposition => |r| if (r.anomalies != null) node else try gs.createPristineNode(r.ef_wid, r.decisions),
+            },
+            .span => |span| try gs.concatNodes(
+                try gs.promoteSubtree(span.left),
+                try gs.promoteSubtree(span.right),
+            ),
+        };
+    }
+
+    /// Applies an accepted delete to the isolated middle subtree of a split tree.
+    fn applyDeleteToSubtree(
+        gs: *DeltaGuidanceSystem,
+        node: ?*CorrectionNode,
+        decision: DecisionIndex,
+        resolution: ?ApplyResolution,
+    ) Error!?*CorrectionNode {
+        const root = node orelse return null;
+        return switch (root.*) {
+            .region => |region| switch (region) {
+                .pristine => |r| try gs.createEvacuationNode(
+                    r.wid,
+                    try gs.combineDecisionRefs(r.decisions, decision),
+                    null,
+                ),
+                .evacuation => |r| try gs.createEvacuationNode(
+                    r.ex_wid,
+                    try gs.combineDecisionRefs(r.decisions, decision),
+                    r.anomalies,
+                ),
+                .imposition => |r| if (resolution == .delete_whole and r.anomalies != null) null else root,
+            },
+            .span => |span| try gs.concatNodes(
+                try gs.applyDeleteToSubtree(span.left, decision, resolution),
+                try gs.applyDeleteToSubtree(span.right, decision, resolution),
+            ),
+        };
+    }
+
+    /// Commits a freshly built tree root as the next immutable step snapshot.
+    fn commitNewStepRoot(
+        gs: *DeltaGuidanceSystem,
+        root: *CorrectionNode,
+        decision: DecisionIndex,
+        anomaly: ?AnomalyIndex,
+        raw_index_next: u32,
+        expected_cursor_next: u32,
+    ) Error!void {
+        gs.current_step.next = null;
+
+        const step = try gs.arena.allocator().create(Step);
+        step.* = .{
+            .prior = gs.current_step,
+            .next = null,
+            .correction_root = root,
+            .ef_len = treeEfWid(root),
+            .ex_len = treeExWid(root),
+            .decision = decision,
+            .anomaly = anomaly,
+            .anomaly_count = gs.current_step.anomaly_count + @as(u32, if (anomaly != null) 1 else 0),
+            .decision_count = gs.current_step.decision_count + 1,
+            .raw_index_next = raw_index_next,
+            .expected_cursor_next = expected_cursor_next,
+        };
+        gs.current_step.next = step;
+        gs.current_step = step;
+        if (gs.attached_step) |*attached| {
+            attached.raw_index_next = raw_index_next;
+            attached.expected_cursor_next = expected_cursor_next;
         }
     }
 
@@ -1582,7 +1328,10 @@ pub const DeltaGuidanceSystem = struct {
         if (!subtreeMayTouchExpected(node, ex_base, expected)) return;
         switch (node.*) {
             .region => |region| {
-                if (expectedSpansOverlap(region, expected) or isImpositionInside(region, expected)) {
+                const ex_end = ex_base + region.exWid();
+                const overlaps = region.exWid() != 0 and ex_base < expected.end and expected.start < ex_end;
+                const anchored_inside = region.exWid() == 0 and ex_base >= expected.start and ex_base < expected.end;
+                if (overlaps or anchored_inside) {
                     try out.append(gs.allocator, region);
                 }
             },
@@ -1630,7 +1379,7 @@ pub const DeltaGuidanceSystem = struct {
         gs: *DeltaGuidanceSystem,
         node: *const CorrectionNode,
         ex_base: u32,
-        ef_base: u32,
+        deviation: i32,
         point: u32,
         info: *InsertPointInfo,
     ) Error!void {
@@ -1638,11 +1387,12 @@ pub const DeltaGuidanceSystem = struct {
             .region => |region| switch (region) {
                 .pristine => |r| {
                     const end = ex_base + r.wid;
-                    if (point >= ex_base and point <= end) info.exact = ef_base + (point - ex_base);
-                    if (point < ex_base and info.fallback == null) info.fallback = ef_base;
+                    if (point >= ex_base and point <= end) info.exact = applyDeviation(point, deviation);
+                    if (point < ex_base and info.fallback == null) info.fallback = applyDeviation(ex_base, deviation);
                 },
                 .evacuation => |r| {
                     const end = ex_base + r.ex_wid;
+                    const effective_at = applyDeviation(ex_base, deviation);
                     if (r.anomalies) |ref| {
                         if (point > ex_base and point < end) {
                             info.state.inside_anomalous_evacuation = true;
@@ -1653,26 +1403,32 @@ pub const DeltaGuidanceSystem = struct {
                             try gs.appendPreviewAnomalies(ref);
                         }
                     }
-                    if (point >= ex_base and point <= end and info.exact == null) info.exact = ef_base;
-                    if (point < ex_base and info.fallback == null) info.fallback = ef_base;
+                    if (point >= ex_base and point <= end and info.exact == null) info.exact = effective_at;
+                    if (point < ex_base and info.fallback == null) info.fallback = effective_at;
                 },
                 .imposition => |r| {
+                    const effective_at = applyDeviation(ex_base, deviation);
                     if (point == ex_base) {
                         info.state.has_imposition_here = true;
-                        info.after_impositions = ef_base + r.ef_wid;
+                        info.after_impositions = effective_at + r.ef_wid;
                         if (r.anomalies) |ref| {
                             info.state.has_anomalous_neighbor = true;
                             try gs.appendPreviewAnomalies(ref);
                         }
                     }
-                    if (point < ex_base and info.fallback == null) info.fallback = ef_base;
+                    if (point < ex_base and info.fallback == null) info.fallback = effective_at;
                 },
             },
             .span => |span| {
                 const split_ex = ex_base + span.ex_wid;
-                const split_ef = ef_base + span.ef_wid;
-                if (point <= split_ex) try gs.inspectInsertPoint(span.left, ex_base, ef_base, point, info);
-                if (point >= split_ex) try gs.inspectInsertPoint(span.right, split_ex, split_ef, point, info);
+                if (point <= split_ex) try gs.inspectInsertPoint(span.left, ex_base, deviation, point, info);
+                if (point >= split_ex) try gs.inspectInsertPoint(
+                    span.right,
+                    split_ex,
+                    addDeviation(deviation, span.deviation),
+                    point,
+                    info,
+                );
             },
         }
     }
@@ -1682,37 +1438,47 @@ pub const DeltaGuidanceSystem = struct {
         gs: *const DeltaGuidanceSystem,
         node: *const CorrectionNode,
         ex_base: u32,
-        ef_base: u32,
+        deviation: i32,
         point: u32,
     ) ?u32 {
         return switch (node.*) {
             .region => |region| switch (region) {
                 .pristine => |r| blk: {
                     const end = ex_base + r.wid;
-                    if (point >= ex_base and point <= end) break :blk ef_base + (point - ex_base);
-                    if (point < ex_base) break :blk ef_base;
+                    if (point >= ex_base and point <= end) break :blk applyDeviation(point, deviation);
+                    if (point < ex_base) break :blk applyDeviation(ex_base, deviation);
                     break :blk null;
                 },
                 .evacuation => |r| blk: {
                     const end = ex_base + r.ex_wid;
-                    if (point >= ex_base and point <= end) break :blk ef_base;
-                    if (point < ex_base) break :blk ef_base;
+                    const effective_at = applyDeviation(ex_base, deviation);
+                    if (point >= ex_base and point <= end) break :blk effective_at;
+                    if (point < ex_base) break :blk effective_at;
                     break :blk null;
                 },
                 .imposition => |r| blk: {
-                    if (point == ex_base) break :blk ef_base;
-                    if (point < ex_base) break :blk ef_base;
+                    const effective_at = applyDeviation(ex_base, deviation);
+                    if (point == ex_base) break :blk effective_at;
+                    if (point < ex_base) break :blk effective_at;
                     _ = r;
                     break :blk null;
                 },
             },
             .span => |span| blk: {
                 const split_ex = ex_base + span.ex_wid;
-                const split_ef = ef_base + span.ef_wid;
-                if (point < split_ex) break :blk gs.lookupDeleteBoundary(span.left, ex_base, ef_base, point);
-                if (point > split_ex) break :blk gs.lookupDeleteBoundary(span.right, split_ex, split_ef, point);
-                break :blk gs.lookupDeleteBoundary(span.right, split_ex, split_ef, point) orelse
-                    gs.lookupDeleteBoundary(span.left, ex_base, ef_base, point);
+                if (point < split_ex) break :blk gs.lookupDeleteBoundary(span.left, ex_base, deviation, point);
+                if (point > split_ex) break :blk gs.lookupDeleteBoundary(
+                    span.right,
+                    split_ex,
+                    addDeviation(deviation, span.deviation),
+                    point,
+                );
+                break :blk gs.lookupDeleteBoundary(
+                    span.right,
+                    split_ex,
+                    addDeviation(deviation, span.deviation),
+                    point,
+                ) orelse gs.lookupDeleteBoundary(span.left, ex_base, deviation, point);
             },
         };
     }
@@ -1751,36 +1517,6 @@ fn subtreeMayTouchExpected(node: *const CorrectionNode, ex_base: u32, expected: 
     return ex_base < expected.end and expected.start < ex_base + ex_wid;
 }
 
-/// Reports whether a region with expected width overlaps the given expected span.
-fn expectedSpansOverlap(region: CorrectionRegion, expected: Span) bool {
-    return switch (region) {
-        .pristine, .evacuation => region.expectedStart() < expected.end and expected.start < region.expectedEnd(),
-        .imposition => false,
-    };
-}
-
-/// Reports whether an imposition anchor falls inside the given expected span.
-fn isImpositionInside(region: CorrectionRegion, expected: Span) bool {
-    return switch (region) {
-        .imposition => |r| r.expected_at >= expected.start and r.expected_at < expected.end,
-        else => false,
-    };
-}
-
-/// Sums expected-axis width across a normalized region slice.
-fn computeExpectedLen(regions: []const CorrectionRegion) u32 {
-    var len: u32 = 0;
-    for (regions) |region| len += region.exWid();
-    return len;
-}
-
-/// Sums effective-axis width across a normalized region slice.
-fn computeEffectiveLen(regions: []const CorrectionRegion) u32 {
-    var len: u32 = 0;
-    for (regions) |region| len += region.efWid();
-    return len;
-}
-
 /// Computes expected-axis width for a correction subtree.
 fn treeExWid(node: *const CorrectionNode) u32 {
     return switch (node.*) {
@@ -1792,8 +1528,24 @@ fn treeExWid(node: *const CorrectionNode) u32 {
 /// Computes effective-axis width for a correction subtree.
 fn treeEfWid(node: *const CorrectionNode) u32 {
     return switch (node.*) {
-        .span => |span| span.ef_wid + treeEfWid(span.right),
+        .span => |span| blk: {
+            const left_ef_wid = applyDeviationToWidth(span.ex_wid, span.deviation);
+            dbgassert(left_ef_wid == span.ef_wid);
+            break :blk left_ef_wid + treeEfWid(span.right);
+        },
         .region => |region| region.efWid(),
+    };
+}
+
+/// Computes the authoritative effective-minus-expected deviation for a subtree.
+fn treeDeviation(node: *const CorrectionNode) i32 {
+    return switch (node.*) {
+        .region => |region| switch (region) {
+            .pristine => 0,
+            .evacuation => |r| -@as(i32, @intCast(r.ex_wid)),
+            .imposition => |r| @as(i32, @intCast(r.ef_wid)),
+        },
+        .span => |span| addDeviation(span.deviation, treeDeviation(span.right)),
     };
 }
 
@@ -1845,6 +1597,35 @@ fn totalGuidanceBufferLen(text_len: usize, extra_slack: usize) Error!usize {
 /// Adds two u32 values using the shared zdelta checked addition helper.
 fn addU32(a: u32, b: u32) Error!u32 {
     return zdelta_mod.addU32(a, b);
+}
+
+/// Adds one deviation to another, keeping the result within the checked i32 range.
+fn addDeviation(lhs: i32, rhs: i32) i32 {
+    const sum = @as(i64, lhs) + @as(i64, rhs);
+    dbgassert(sum >= std.math.minInt(i32));
+    dbgassert(sum <= std.math.maxInt(i32));
+    return @intCast(sum);
+}
+
+/// Applies an authoritative deviation to one expected-axis boundary.
+fn applyDeviation(expected_at: u32, deviation: i32) u32 {
+    const shifted = @as(i64, expected_at) + @as(i64, deviation);
+    dbgassert(shifted >= 0);
+    dbgassert(shifted <= std.math.maxInt(u32));
+    return @intCast(shifted);
+}
+
+/// Applies a subtree deviation to its expected width to recover effective width.
+fn applyDeviationToWidth(ex_wid: u32, deviation: i32) u32 {
+    return applyDeviation(ex_wid, deviation);
+}
+
+/// Reports whether every terminal region in a subtree is pristine.
+fn subtreeIsAllPristine(node: *const CorrectionNode) bool {
+    return switch (node.*) {
+        .region => |region| region == .pristine,
+        .span => |span| subtreeIsAllPristine(span.left) and subtreeIsAllPristine(span.right),
+    };
 }
 
 /// Test helper asserting the current effective text.
@@ -1947,7 +1728,7 @@ fn collectTestRegions(
 ) TestError![]CorrectionRegion {
     var out = std.ArrayListUnmanaged(CorrectionRegion).empty;
     defer out.deinit(allocator);
-    try appendTestRegions(allocator, &out, root);
+    try appendTestRegions(allocator, &out, root, 0, 0);
     return try out.toOwnedSlice(allocator);
 }
 
@@ -1956,12 +1737,47 @@ fn appendTestRegions(
     allocator: Allocator,
     out: *std.ArrayListUnmanaged(CorrectionRegion),
     node: *const CorrectionNode,
+    ex_base: u32,
+    deviation: i32,
 ) TestError!void {
     switch (node.*) {
-        .region => |region| try out.append(allocator, region),
+        .region => |region| try out.append(allocator, switch (region) {
+            .pristine => |r| .{ .pristine = .{
+                .expected = .{ .start = ex_base, .end = ex_base + r.wid },
+                .effective = .{
+                    .start = applyDeviation(ex_base, deviation),
+                    .end = applyDeviation(ex_base, deviation) + r.wid,
+                },
+                .wid = r.wid,
+                .decisions = r.decisions,
+            } },
+            .evacuation => |r| .{ .evacuation = .{
+                .expected = .{ .start = ex_base, .end = ex_base + r.ex_wid },
+                .effective_at = applyDeviation(ex_base, deviation),
+                .ex_wid = r.ex_wid,
+                .decisions = r.decisions,
+                .anomalies = r.anomalies,
+            } },
+            .imposition => |r| .{ .imposition = .{
+                .expected_at = ex_base,
+                .effective = .{
+                    .start = applyDeviation(ex_base, deviation),
+                    .end = applyDeviation(ex_base, deviation) + r.ef_wid,
+                },
+                .ef_wid = r.ef_wid,
+                .decisions = r.decisions,
+                .anomalies = r.anomalies,
+            } },
+        }),
         .span => |span| {
-            try appendTestRegions(allocator, out, span.left);
-            try appendTestRegions(allocator, out, span.right);
+            try appendTestRegions(allocator, out, span.left, ex_base, deviation);
+            try appendTestRegions(
+                allocator,
+                out,
+                span.right,
+                ex_base + span.ex_wid,
+                addDeviation(deviation, span.deviation),
+            );
         },
     }
 }

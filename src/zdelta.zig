@@ -75,7 +75,7 @@ pub const ZDelta = struct {
         _ = .{ delta, allocator };
     }
 
-    fn beforeLength(delta: *const ZDelta) u32 {
+    pub fn beforeLength(delta: *const ZDelta) u32 {
         var len: u32 = 0;
         for (delta.ops) |op| {
             switch (op) {
@@ -85,10 +85,6 @@ pub const ZDelta = struct {
             }
         }
         return len;
-    }
-
-    pub fn originalBeforeLength(delta: *const ZDelta) u32 {
-        return delta.beforeLength();
     }
 
     fn midpoint(delta: *const ZDelta) u32 {

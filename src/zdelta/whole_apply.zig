@@ -68,7 +68,7 @@ pub const DeltaApplicator = struct {
         tm.z_idx = 0;
         tm.t_idx = 0;
 
-        const original_before_len = zdelta.originalBeforeLength();
+        const original_before_len = zdelta.beforeLength();
         if (tm.textLen() != original_before_len) return error.ZDeltaTextLengthMismatch;
         const before_len, const head_room, const tail_room = zdelta.textNumbers();
 

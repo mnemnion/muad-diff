@@ -418,7 +418,7 @@ const ReviewDriver = struct {
             driver.tm.allocator.destroy(owned_delta);
             return err;
         };
-        const raw_before_len = owned_delta.originalBeforeLength();
+        const raw_before_len = owned_delta.beforeLength();
         driver.last_before_len = raw_before_len;
         try driver.tm.addDelta(owned_delta);
         return raw_before_len;
