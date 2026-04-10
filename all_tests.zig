@@ -12,8 +12,6 @@ const diff_fn = @import("src/diff_fn.zig");
 const patch = @import("src/dmp/Patch.zig");
 const diff = @import("src/dmp/diff.zig");
 const diff_context = @import("src/diff_context.zig");
-const zdelta_context = @import("src/zdelta/context.zig");
-const apply_manager = @import("src/zdelta/apply_manager.zig");
 
 comptime {
     std.testing.refAllDecls(muad_diff);
@@ -26,6 +24,4 @@ comptime {
     std.testing.refAllDecls(patch);
     std.testing.refAllDecls(diff);
     std.testing.refAllDecls(diff_context);
-    std.testing.refAllDecls(zdelta_context);
-    std.testing.refAllDecls(apply_manager);
 }

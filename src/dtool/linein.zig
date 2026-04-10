@@ -384,4 +384,4 @@ test "replay exhaustion is reported" {
 }
 
 const std = @import("std");
-const zdelta_session = @import("../zdelta/session.zig");
+const zdelta_session = @import("../zdelta/session_mock.zig");

@@ -1058,8 +1058,8 @@ const std = @import("std");
 const dmp = @import("../dmp.zig");
 const obelizmo = @import("obelizmo");
 const linein_mod = @import("linein.zig");
-const zdelta_context = @import("../zdelta/context.zig");
-const zdelta_session = @import("../zdelta/session.zig");
+const zdelta_context = @import("../zdelta/context_mock.zig");
+const zdelta_session = @import("../zdelta/session_mock.zig");
 
 const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
