@@ -1,10 +1,10 @@
-// Zig package metadata for {driff}
+// Zig package metadata for muad_diff
 .{
     .name = .muad_diff,
 
     .version = "0.0.1",
 
-    .minimum_zig_version = "0.15.1",
+    .minimum_zig_version = "0.15.2",
 
     .fingerprint = 0xcf462719a1974fa7,
 
