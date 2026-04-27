@@ -4,7 +4,7 @@
 
     .version = "0.0.1",
 
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
 
     .fingerprint = 0xcf462719a1974fa7,
 
@@ -16,9 +16,9 @@
         .ztap = .{
             .path = "../ztap",
         },
-        .obelizmo = .{
-            .path = "../obelizmo",
-        },
+        // .obelizmo = .{
+        //     .path = "../obelizmo",
+        // },
     },
 
     .paths = .{

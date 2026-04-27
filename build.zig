@@ -88,12 +88,13 @@ pub fn build(b: *std.Build) void {
             .timed = true,
         });
 
-        const obelizmo_dep = b.dependency("obelizmo", .{
-            .target = target,
-            .optimize = optimize,
-        });
-        delta_tool_mod.addImport("obelizmo", obelizmo_dep.module("obelizmo"));
-        all_tests_mod.addImport("obelizmo", obelizmo_dep.module("obelizmo"));
+        // if (b.lazyDependency("obelizmo", .{
+        //     .target = target,
+        //     .optimize = optimize,
+        // })) |obelizmo_dep| {
+        //     delta_tool_mod.addImport("obelizmo", obelizmo_dep.module("obelizmo"));
+        //     all_tests_mod.addImport("obelizmo", obelizmo_dep.module("obelizmo"));
+        // }
 
         if (b.lazyDependency("clap", .{
             .target = target,
