@@ -146,7 +146,7 @@ pub fn diffIndex(diffs: anytype, u_loc: usize) usize {
 
 /// Compute and return the source text (all equalities and deletions).
 pub fn diffBeforeText(allocator: Allocator, diffs: anytype) Allocator.Error![]const u8 {
-    var chars = ArrayListUnmanaged(u8){};
+    var chars: ArrayListUnmanaged(u8) = .empty;
     defer chars.deinit(allocator);
     for (diffs.items) |edit| {
         if (edit.operation != .insert) try chars.appendSlice(allocator, edit.text);
@@ -156,7 +156,7 @@ pub fn diffBeforeText(allocator: Allocator, diffs: anytype) Allocator.Error![]co
 
 /// Compute and return the destination text (all equalities and insertions).
 pub fn diffAfterText(allocator: Allocator, diffs: anytype) Allocator.Error![]const u8 {
-    var chars = ArrayListUnmanaged(u8){};
+    var chars: ArrayListUnmanaged(u8) = .empty;
     defer chars.deinit(allocator);
     for (diffs.items) |edit| {
         if (edit.operation != .delete) try chars.appendSlice(allocator, edit.text);

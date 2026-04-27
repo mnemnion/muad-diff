@@ -377,9 +377,9 @@ fn writeDecoratedSlice(
         return written;
     }
 
-    const left_trimmed = std.mem.trimLeft(u8, full_text, &std.ascii.whitespace);
+    const left_trimmed = std.mem.trimStart(u8, full_text, &std.ascii.whitespace);
     const leading_end = full_text.len - left_trimmed.len;
-    const middle = std.mem.trimRight(u8, left_trimmed, &std.ascii.whitespace);
+    const middle = std.mem.trimEnd(u8, left_trimmed, &std.ascii.whitespace);
     const trailing_start = leading_end + middle.len;
 
     if (fragment_start < leading_end) {
@@ -663,10 +663,10 @@ fn renderForTest(
     deco: DiffDecorations,
     show_lines: usize,
 ) ![]u8 {
-    var out = std.array_list.Managed(u8).init(testing.allocator);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
     errdefer out.deinit();
-    const bytes_written = try ctx.render(out.writer(), deco, "sample", show_lines);
-    try testing.expectEqual(bytes_written, out.items.len);
+    const bytes_written = try ctx.render(&out.writer, deco, "sample", show_lines);
+    try testing.expectEqual(bytes_written, out.writer.end);
     return out.toOwnedSlice();
 }
 

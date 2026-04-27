@@ -279,10 +279,12 @@ pub fn DiffFn(config: anytype) type {
             before: []const u8,
             after: []const u8,
         ) DiffError!DiffList {
-            const deadline = if (difference.config.timeout == 0)
-                std.math.maxInt(u64)
-            else
-                @as(u64, @intCast(std.time.milliTimestamp())) + difference.config.timeout;
+            const deadline = std.math.maxInt(u64);
+            // Timeout clocking needs an explicit Zig 0.16 Io design.
+            // const deadline = if (difference.config.timeout == 0)
+            //     std.math.maxInt(u64)
+            // else
+            //     @as(u64, @intCast(std.time.milliTimestamp())) + difference.config.timeout;
             return difference.diffInternal(allocator, before, after, deadline);
         }
 
@@ -540,7 +542,9 @@ pub fn DiffFn(config: anytype) type {
 
             var d: isize = 0;
             while (d < max_d) : (d += 1) {
-                if (@as(u64, @intCast(std.time.milliTimestamp())) > deadline) break;
+                if (deadline == 0) break;
+                // Timeout clocking needs an explicit Zig 0.16 Io design.
+                // if (@as(u64, @intCast(std.time.milliTimestamp())) > deadline) break;
 
                 var k1 = -d + k1start;
                 while (k1 <= d - k1end) : (k1 += 2) {
@@ -824,7 +828,7 @@ pub fn DiffFn(config: anytype) type {
             text1: []const u8,
             text2: []const u8,
         ) DiffError!LinesToCharsResult {
-            var line_array = ArrayListUnmanaged([]const u8){};
+            var line_array: ArrayListUnmanaged([]const u8) = .empty;
             errdefer line_array.deinit(allocator);
             line_array.items.len = 0;
             var line_hash = std.StringHashMapUnmanaged(u31){};
@@ -857,7 +861,7 @@ pub fn DiffFn(config: anytype) type {
             segment_hash: *std.StringHashMapUnmanaged(u31),
             iterator: anytype,
         ) DiffError![]const u8 {
-            var chars = ArrayListUnmanaged(u8){};
+            var chars: ArrayListUnmanaged(u8) = .empty;
             defer chars.deinit(allocator);
             var codepoint: u31 = cast(u31, segment_array.items.len) + CHAR_OFFSET;
             var char_buf: [6]u8 = undefined;
@@ -886,9 +890,9 @@ pub fn DiffFn(config: anytype) type {
             var count_delete: usize = 0;
             var count_insert: usize = 0;
 
-            var delete_run = ArrayListUnmanaged(*const Edit){};
+            var delete_run: ArrayListUnmanaged(*const Edit) = .empty;
             defer delete_run.deinit(allocator);
-            var insert_run = ArrayListUnmanaged(*const Edit){};
+            var insert_run: ArrayListUnmanaged(*const Edit) = .empty;
             defer insert_run.deinit(allocator);
 
             while (pointer < diffs.items.len) {
@@ -1069,7 +1073,7 @@ pub fn DiffFn(config: anytype) type {
         /// equalities.
         fn cleanupSemanticImpl(difference: *Diff, allocator: Allocator, diffs: *DiffList) OOM!void {
             var changes = false;
-            var equalities = ArrayListUnmanaged(usize){};
+            var equalities: ArrayListUnmanaged(usize) = .empty;
             defer equalities.deinit(allocator);
             var last_equality: ?Edit = null;
             var pointer: usize = 0;
@@ -1207,15 +1211,15 @@ pub fn DiffFn(config: anytype) type {
             diffs: *DiffList,
             pointer: *usize,
         ) OOM!void {
-            var equality_1 = std.ArrayListUnmanaged(u8){};
+            var equality_1: std.ArrayListUnmanaged(u8) = .empty;
             defer equality_1.deinit(allocator);
             try equality_1.appendSlice(allocator, diffs.items[pointer.* - 1].text);
 
-            var edit = std.ArrayListUnmanaged(u8){};
+            var edit: std.ArrayListUnmanaged(u8) = .empty;
             defer edit.deinit(allocator);
             try edit.appendSlice(allocator, diffs.items[pointer.*].text);
 
-            var equality_2 = std.ArrayListUnmanaged(u8){};
+            var equality_2: std.ArrayListUnmanaged(u8) = .empty;
             defer equality_2.deinit(allocator);
             try equality_2.appendSlice(allocator, diffs.items[pointer.* + 1].text);
 
@@ -1232,13 +1236,13 @@ pub fn DiffFn(config: anytype) type {
                 try equality_2.insertSlice(allocator, 0, common_string);
             }
 
-            var best_equality_1 = ArrayListUnmanaged(u8){};
+            var best_equality_1: ArrayListUnmanaged(u8) = .empty;
             defer best_equality_1.deinit(allocator);
             try best_equality_1.appendSlice(allocator, equality_1.items);
-            var best_edit = ArrayListUnmanaged(u8){};
+            var best_edit: ArrayListUnmanaged(u8) = .empty;
             defer best_edit.deinit(allocator);
             try best_edit.appendSlice(allocator, edit.items);
-            var best_equality_2 = ArrayListUnmanaged(u8){};
+            var best_equality_2: ArrayListUnmanaged(u8) = .empty;
             defer best_equality_2.deinit(allocator);
             try best_equality_2.appendSlice(allocator, equality_2.items);
 
@@ -1433,7 +1437,7 @@ fn diffCharsToLines(
     before_text: []const u8,
     after_text: []const u8,
 ) OOM!DiffList {
-    var text = ArrayListUnmanaged(u8){};
+    var text: ArrayListUnmanaged(u8) = .empty;
     defer text.deinit(allocator);
     var diffs: DiffList = .empty;
     errdefer deinitDiffList(allocator, &diffs);

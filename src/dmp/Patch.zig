@@ -70,14 +70,13 @@ pub const Hunk = struct {
         deinitDiffList(allocator, &patch.diffs);
     }
 
-    const format = std.fmt.format;
-
     pub fn asText(patch: Hunk, allocator: Allocator) ![]const u8 {
-        var text_array = ArrayList(u8).init(allocator);
-        defer text_array.deinit();
-        const writer = text_array.writer();
-        try patch.writeText(writer);
-        return text_array.toOwnedSlice();
+        var text: std.Io.Writer.Allocating = .init(allocator);
+        defer text.deinit();
+        patch.writeText(&text.writer) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+        };
+        return text.toOwnedSlice();
     }
 
     /// Stream textual patch representation to Writer.  See `asText`
@@ -87,19 +86,19 @@ pub const Hunk = struct {
         try writer.writeAll(PATCH_HEAD);
         // Stream coordinates
         if (patch.length1 == 0) {
-            try format(writer, "{d},0", .{patch.start1});
+            try writer.print("{d},0", .{patch.start1});
         } else if (patch.length1 == 1) {
-            try format(writer, "{d}", .{patch.start1 + 1});
+            try writer.print("{d}", .{patch.start1 + 1});
         } else {
-            try format(writer, "{d},{d}", .{ patch.start1 + 1, patch.length1 });
+            try writer.print("{d},{d}", .{ patch.start1 + 1, patch.length1 });
         }
         _ = try writer.write(" +");
         if (patch.length2 == 0) {
-            try std.fmt.format(writer, "{d},0", .{patch.start2});
+            try writer.print("{d},0", .{patch.start2});
         } else if (patch.length2 == 1) {
-            _ = try format(writer, "{d}", .{patch.start2 + 1});
+            try writer.print("{d}", .{patch.start2 + 1});
         } else {
-            try format(writer, "{d},{d}", .{ patch.start2 + 1, patch.length2 });
+            try writer.print("{d},{d}", .{ patch.start2 + 1, patch.length2 });
         }
         try writer.writeAll(PATCH_TAIL);
         // Escape the body of the patch with %xx notation.
@@ -1466,11 +1465,12 @@ fn patchAddPadding(
 }
 
 fn patchListToText(allocator: Allocator, patches: PatchList) error{OutOfMemory}![]const u8 {
-    var text_array = ArrayList(u8).init(allocator);
-    defer text_array.deinit();
-    const writer = text_array.writer();
-    try writePatch(writer, patches);
-    return text_array.toOwnedSlice();
+    var text: std.Io.Writer.Allocating = .init(allocator);
+    defer text.deinit();
+    writePatch(&text.writer, patches) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+    };
+    return text.toOwnedSlice();
 }
 
 fn writePatch(writer: anytype, patches: PatchList) !void {
@@ -1770,10 +1770,9 @@ fn writeEscaped(writer: anytype, text: []const u8) !usize {
 }
 
 fn encodeUri(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
-    var charlist = try ArrayList(u8).initCapacity(allocator, text.len);
+    var charlist = try std.Io.Writer.Allocating.initCapacity(allocator, text.len);
     defer charlist.deinit();
-    const writer = charlist.writer();
-    _ = try writeUriEncoded(writer, text);
+    _ = try writeUriEncoded(&charlist.writer, text);
     return charlist.toOwnedSlice();
 }
 
@@ -1921,11 +1920,11 @@ test "encodeUri" {
 }
 
 fn testWriteEscapedCase(allocator: Allocator, text: []const u8, expected: []const u8) !void {
-    var out = ArrayList(u8).init(allocator);
+    var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
-    const written = try writeEscaped(out.writer(), text);
+    const written = try writeEscaped(&out.writer, text);
     try testing.expectEqual(expected.len, written);
-    try testing.expectEqualStrings(expected, out.items);
+    try testing.expectEqualStrings(expected, out.writer.buffer[0..out.writer.end]);
 }
 
 test "writeEscaped" {
@@ -1961,12 +1960,12 @@ fn testPatchWriteTextEscapesSpecialBodyChars(allocator: Allocator) !void {
     };
     defer hunk.deinit(allocator);
 
-    var text = ArrayList(u8).init(allocator);
+    var text: std.Io.Writer.Allocating = .init(allocator);
     defer text.deinit();
-    try hunk.writeText(text.writer());
+    try hunk.writeText(&text.writer);
     try testing.expectEqualStrings(
         "@@ -1,10 +1,10 @@\n %2B%2D%3D%40%25%0Aabc\n",
-        text.items,
+        text.writer.buffer[0..text.writer.end],
     );
 }
 

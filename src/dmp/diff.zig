@@ -430,10 +430,12 @@ fn diffImpl(
     before: []const u8,
     after: []const u8,
 ) OOM!DiffList {
-    const deadline = if (config.timeout == 0)
-        std.math.maxInt(u64)
-    else
-        @as(u64, @intCast(std.time.milliTimestamp())) + config.timeout;
+    const deadline = std.math.maxInt(u64);
+    // Timeout clocking needs an explicit Zig 0.16 Io design.
+    // const deadline = if (config.timeout == 0)
+    //     std.math.maxInt(u64)
+    // else
+    //     @as(u64, @intCast(std.time.milliTimestamp())) + config.timeout;
     return diffInternal(config, allocator, before, after, deadline);
 }
 
@@ -782,9 +784,13 @@ fn diffBisect(
     var d: isize = 0;
     while (d < max_d) : (d += 1) {
         // Bail out if deadline is reached.
-        if (@as(u64, @intCast(std.time.milliTimestamp())) > deadline) {
+        if (deadline == 0) {
             break;
         }
+        // Timeout clocking needs an explicit Zig 0.16 Io design.
+        // if (@as(u64, @intCast(std.time.milliTimestamp())) > deadline) {
+        //     break;
+        // }
 
         // Walk the front path one step.
         var k1 = -d + k1start;
@@ -1186,7 +1192,7 @@ fn diffLinesToChars(
     text1: []const u8,
     text2: []const u8,
 ) OOM!LinesToCharsResult {
-    var line_array = ArrayListUnmanaged([]const u8){};
+    var line_array: ArrayListUnmanaged([]const u8) = .empty;
     errdefer line_array.deinit(allocator);
     line_array.items.len = 0;
     var line_hash = std.StringHashMapUnmanaged(u21){};
@@ -1266,7 +1272,7 @@ fn diffIteratorToCharsMunge(
     // Because we rebase the codepoint off the already counted segments,
     // this makes the unreachables in the function legitimate:
     dbgassert(max_segments <= UNICODE_MAX);
-    var chars = ArrayListUnmanaged(u8){};
+    var chars: ArrayListUnmanaged(u8) = .empty;
     defer chars.deinit(allocator);
     var codepoint: u21 = CHAR_OFFSET + cast(u21, segment_array.items.len);
     var char_buf: [4]u8 = undefined;
@@ -1306,7 +1312,7 @@ fn diffCharsToLines(
     before_text: []const u8,
     after_text: []const u8,
 ) OOM!DiffList {
-    var text = ArrayListUnmanaged(u8){};
+    var text: ArrayListUnmanaged(u8) = .empty;
     defer text.deinit(allocator);
     var diffs: DiffList = .empty;
     errdefer deinitDiffList(allocator, &diffs);
@@ -1396,10 +1402,10 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void {
     var count_delete: usize = 0;
     var count_insert: usize = 0;
 
-    var delete_run = ArrayListUnmanaged(*const Edit){};
+    var delete_run: ArrayListUnmanaged(*const Edit) = .empty;
     defer delete_run.deinit(allocator);
 
-    var insert_run = ArrayListUnmanaged(*const Edit){};
+    var insert_run: ArrayListUnmanaged(*const Edit) = .empty;
     defer insert_run.deinit(allocator);
 
     while (pointer < diffs.items.len) {
@@ -1649,7 +1655,7 @@ fn diffCleanupMerge(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void {
 fn diffCleanupSemantic(allocator: std.mem.Allocator, diffs: *DiffList) OOM!void {
     var changes = false;
     // Stack of indices where equalities are found.
-    var equalities = ArrayListUnmanaged(usize){};
+    var equalities: ArrayListUnmanaged(usize) = .empty;
     defer equalities.deinit(allocator);
     // Always equal to equalities[equalitiesLength-1][1]
     var last_equality: ?Edit = null;
@@ -1914,15 +1920,15 @@ fn diffCleanupSemanticLosslessOwned(
     pointer: *usize,
 ) OOM!void {
     // This is a single edit surrounded by equalities.
-    var equality_1 = std.ArrayListUnmanaged(u8){};
+    var equality_1: std.ArrayListUnmanaged(u8) = .empty;
     defer equality_1.deinit(allocator);
     try equality_1.appendSlice(allocator, diffs.items[pointer.* - 1].text);
 
-    var edit = std.ArrayListUnmanaged(u8){};
+    var edit: std.ArrayListUnmanaged(u8) = .empty;
     defer edit.deinit(allocator);
     try edit.appendSlice(allocator, diffs.items[pointer.*].text);
 
-    var equality_2 = std.ArrayListUnmanaged(u8){};
+    var equality_2: std.ArrayListUnmanaged(u8) = .empty;
     defer equality_2.deinit(allocator);
     try equality_2.appendSlice(allocator, diffs.items[pointer.* + 1].text);
 
@@ -1946,15 +1952,15 @@ fn diffCleanupSemanticLosslessOwned(
 
     // Second, step character by character right,
     // looking for the best fit.
-    var best_equality_1 = ArrayListUnmanaged(u8){};
+    var best_equality_1: ArrayListUnmanaged(u8) = .empty;
     defer best_equality_1.deinit(allocator);
     try best_equality_1.appendSlice(allocator, equality_1.items);
 
-    var best_edit = ArrayListUnmanaged(u8){};
+    var best_edit: ArrayListUnmanaged(u8) = .empty;
     defer best_edit.deinit(allocator);
     try best_edit.appendSlice(allocator, edit.items);
 
-    var best_equality_2 = ArrayListUnmanaged(u8){};
+    var best_equality_2: ArrayListUnmanaged(u8) = .empty;
     defer best_equality_2.deinit(allocator);
     try best_equality_2.appendSlice(allocator, equality_2.items);
 
@@ -2191,10 +2197,9 @@ fn diffPrettyFormat(
     diffs: DiffList,
     deco: DiffDecorations,
 ) ![]const u8 {
-    var out = ArrayList(u8).init(allocator);
+    var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
-    const writer = out.writer();
-    _ = try writeDiffPrettyFormat(allocator, writer, diffs, deco);
+    _ = try writeDiffPrettyFormat(allocator, &out.writer, diffs, deco);
     return out.toOwnedSlice();
 }
 
@@ -2270,7 +2275,7 @@ pub fn writeDecoratedEdit(
         return written;
     }
 
-    const left_trimmed = std.mem.trimLeft(u8, text, &std.ascii.whitespace);
+    const left_trimmed = std.mem.trimStart(u8, text, &std.ascii.whitespace);
     const leading_len = text.len - left_trimmed.len;
     if (leading_len != 0) {
         written += try writer.write(markers.ws_start);
@@ -2278,7 +2283,7 @@ pub fn writeDecoratedEdit(
         written += try writer.write(markers.ws_end);
     }
 
-    const fully_trimmed = std.mem.trimRight(u8, left_trimmed, &std.ascii.whitespace);
+    const fully_trimmed = std.mem.trimEnd(u8, left_trimmed, &std.ascii.whitespace);
     written += try writer.write(fully_trimmed);
 
     const trailing_len = left_trimmed.len - fully_trimmed.len;
@@ -2619,7 +2624,7 @@ test diffLinesToChars {
         try testing.expectEqualStrings("", result.chars_2);
         result.deinit(allocator);
 
-        var line_array = ArrayListUnmanaged([]const u8){};
+        var line_array: ArrayListUnmanaged([]const u8) = .empty;
         defer line_array.deinit(allocator);
         line_array.items.len = 0;
         var line_hash = std.StringHashMapUnmanaged(u21){};
