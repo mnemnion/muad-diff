@@ -10,15 +10,15 @@
 
     .dependencies = .{
         .clap = .{
-            .url = "git+https://github.com/Hejsil/zig-clap?ref=0.11.0#5289e0753cd274d65344bef1c114284c633536ea",
-            .hash = "clap-0.11.0-oBajB-HnAQDPCKYzwF7rO3qDFwRcD39Q0DALlTSz5H7e",
+            .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.12.0.tar.gz",
+            .hash = "clap-0.12.0-oBajB7foAQDqlSwaSG5g0yq7xGbQARUsBk5T64gAOqP5",
         },
         .ztap = .{
             .path = "../ztap",
         },
-        // .obelizmo = .{
-        //     .path = "../obelizmo",
-        // },
+        .obelizmo = .{
+            .path = "../obelizmo",
+        },
     },
 
     .paths = .{

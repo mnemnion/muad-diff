@@ -8,18 +8,17 @@ const DeltaMakerError = error{
 };
 
 /// Build `.zdset` files from a corpus root like `corpus/diff`.
-pub fn main() !void {
-    var gpa_state: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    defer std.debug.assert(gpa_state.deinit() == .ok);
-    const gpa = gpa_state.allocator();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const gpa = init.gpa;
+    const arena = init.arena.allocator();
 
     var stderr_buffer: [256]u8 = undefined;
     var stdout_buffer: [4096]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
 
-    const args = try std.process.argsAlloc(gpa);
-    defer std.process.argsFree(gpa, args);
+    const args = try init.minimal.args.toSlice(arena);
 
     if (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h"))) {
         try stdout_writer.interface.print("Usage: zig build delta-maker -- <corpus-root>\n", .{});
@@ -33,17 +32,18 @@ pub fn main() !void {
         std.process.exit(1);
     }
 
-    var root_dir = try std.fs.cwd().openDir(args[1], .{ .iterate = true });
-    defer root_dir.close();
+    var root_dir = try std.Io.Dir.cwd().openDir(io, args[1], .{ .iterate = true });
+    defer root_dir.close(io);
 
-    try makeDeltaSets(RealCodec, gpa, root_dir, &stdout_writer.interface);
+    try makeDeltaSets(RealCodec, gpa, io, root_dir, &stdout_writer.interface);
     try stdout_writer.interface.flush();
 }
 
 fn makeDeltaSets(
     comptime Codec: type,
     allocator: Allocator,
-    root_dir: std.fs.Dir,
+    io: std.Io,
+    root_dir: std.Io.Dir,
     stdout_writer: anytype,
 ) !void {
     var batch_names = try corpus_contract.collectSortedBatchNames(allocator, root_dir);
@@ -60,8 +60,8 @@ fn makeDeltaSets(
     };
 
     for (batch_names.items) |batch_name| {
-        var batch_dir = try root_dir.openDir(batch_name, .{ .iterate = true });
-        defer batch_dir.close();
+        var batch_dir = try root_dir.openDir(io, batch_name, .{ .iterate = true });
+        defer batch_dir.close(io);
 
         var wiki_names = try corpus_contract.collectSortedWikiNames(allocator, batch_dir);
         defer corpus_contract.deinitOwnedStrings(allocator, &wiki_names);
@@ -71,16 +71,16 @@ fn makeDeltaSets(
         const output_name = try std.fmt.allocPrint(allocator, "{s}.zdset", .{batch_name});
         defer allocator.free(output_name);
 
-        var output_file = try root_dir.createFile(output_name, .{ .truncate = true });
-        defer output_file.close();
+        var output_file = try root_dir.createFile(io, output_name, .{ .truncate = true });
+        defer output_file.close(io);
         var output_buffer: [4096]u8 = undefined;
-        var output_writer = output_file.writer(&output_buffer);
+        var output_writer = output_file.writer(io, &output_buffer);
 
         for (wiki_names.items) |wiki_name| {
             const relative_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ batch_name, wiki_name });
             defer allocator.free(relative_path);
 
-            const file_data = try batch_dir.readFileAlloc(allocator, wiki_name, std.math.maxInt(usize));
+            const file_data = try batch_dir.readFileAlloc(io, wiki_name, allocator, .unlimited);
             defer allocator.free(file_data);
             const target_body = try corpus_contract.fixtureBody(file_data);
 
@@ -156,8 +156,8 @@ test "delta maker writes zdsets and carries baseline across batches" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("000000-000099");
-    try tmp.dir.makePath("000100-000199");
+    try tmp.dir.createDirPath(testing.io, "000000-000099");
+    try tmp.dir.createDirPath(testing.io, "000100-000199");
 
     try writeFixture(
         tmp.dir,
@@ -175,24 +175,26 @@ test "delta maker writes zdsets and carries baseline across batches" {
         "one\ntwo\nthree\n",
     );
 
-    var stdout_buffer = ArrayList(u8).init(testing.allocator);
+    var stdout_buffer: std.Io.Writer.Allocating = .init(testing.allocator);
     defer stdout_buffer.deinit();
 
-    try makeDeltaSets(RealCodec, testing.allocator, tmp.dir, stdout_buffer.writer());
+    try makeDeltaSets(RealCodec, testing.allocator, testing.io, tmp.dir, &stdout_buffer.writer);
 
-    try testing.expectEqual(@as(usize, 0), stdout_buffer.items.len);
+    try testing.expectEqual(@as(usize, 0), stdout_buffer.written().len);
 
     const first_output = try tmp.dir.readFileAlloc(
-        testing.allocator,
+        testing.io,
         "000000-000099.zdset",
-        std.math.maxInt(usize),
+        testing.allocator,
+        .unlimited,
     );
     defer testing.allocator.free(first_output);
 
     const second_output = try tmp.dir.readFileAlloc(
-        testing.allocator,
+        testing.io,
         "000100-000199.zdset",
-        std.math.maxInt(usize),
+        testing.allocator,
+        .unlimited,
     );
     defer testing.allocator.free(second_output);
 
@@ -229,7 +231,7 @@ test "delta maker reports failed validation and rebases to the target body" {
 
     FaultyCodec.failed_once = false;
 
-    try tmp.dir.makePath("000000-000099");
+    try tmp.dir.createDirPath(testing.io, "000000-000099");
 
     try writeFixture(
         tmp.dir,
@@ -247,20 +249,21 @@ test "delta maker reports failed validation and rebases to the target body" {
         "alpha\nbeta\ngamma\n",
     );
 
-    var stdout_buffer = ArrayList(u8).init(testing.allocator);
+    var stdout_buffer: std.Io.Writer.Allocating = .init(testing.allocator);
     defer stdout_buffer.deinit();
 
-    try makeDeltaSets(FaultyCodec, testing.allocator, tmp.dir, stdout_buffer.writer());
+    try makeDeltaSets(FaultyCodec, testing.allocator, testing.io, tmp.dir, &stdout_buffer.writer);
 
     try testing.expectEqualStrings(
         "000000-000099/20000101T000000Z_1.wiki\n",
-        stdout_buffer.items,
+        stdout_buffer.written(),
     );
 
     const output = try tmp.dir.readFileAlloc(
-        testing.allocator,
+        testing.io,
         "000000-000099.zdset",
-        std.math.maxInt(usize),
+        testing.allocator,
+        .unlimited,
     );
     defer testing.allocator.free(output);
 
@@ -282,7 +285,7 @@ test "delta maker reports failed validation and rebases to the target body" {
     try testing.expectEqualStrings("alpha\nbeta\ngamma\n", reconstructed);
 }
 
-fn writeFixture(dir: std.fs.Dir, path: []const u8, body: []const u8) !void {
+fn writeFixture(dir: std.Io.Dir, path: []const u8, body: []const u8) !void {
     const file_data = try std.fmt.allocPrint(
         testing.allocator,
         "---\norigin = \"wikipedia\"\narticle_slug = \"diff\"\nlanguage = \"en\"\ntitle = \"Diff\"\nrevid = 1\nparentid = 0\ntimestamp = \"2000-01-01T00:00:00Z\"\nuser = \"tester\"\ncomment = \"fixture\"\nsize = {d}\nminor = false\n---\n{s}",
@@ -290,7 +293,7 @@ fn writeFixture(dir: std.fs.Dir, path: []const u8, body: []const u8) !void {
     );
     defer testing.allocator.free(file_data);
 
-    try dir.writeFile(.{ .sub_path = path, .data = file_data });
+    try dir.writeFile(testing.io, .{ .sub_path = path, .data = file_data });
 }
 
 const FaultyCodec = struct {

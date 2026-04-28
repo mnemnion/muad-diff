@@ -132,12 +132,13 @@ const RunResult = struct {
 };
 
 const StdinSource = union(enum) {
-    file: std.fs.File,
+    file: std.Io.File,
     bytes: []const u8,
 };
 
 const InputResolver = struct {
     allocator: Allocator,
+    io: std.Io,
     stdin: StdinSource,
     consumed_stdin: bool = false,
     owned_stdin: ?[]u8 = null,
@@ -148,7 +149,11 @@ const InputResolver = struct {
         self.consumed_stdin = true;
 
         self.owned_stdin = switch (self.stdin) {
-            .file => |file| try file.readToEndAlloc(self.allocator, std.math.maxInt(usize)),
+            .file => |file| file: {
+                var buffer: [1024]u8 = undefined;
+                var reader = file.reader(self.io, &buffer);
+                break :file try reader.interface.allocRemaining(self.allocator, .unlimited);
+            },
             .bytes => |bytes| try self.allocator.dupe(u8, bytes),
         };
         return self.owned_stdin.?;
@@ -160,30 +165,29 @@ const InputResolver = struct {
     }
 };
 
-pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_state.deinit();
-    const allocator = gpa_state.allocator();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
+    const arena_allocator = init.arena.allocator();
 
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-
-    var iter = try std.process.ArgIterator.initWithAllocator(arena_state.allocator());
+    var iter = try init.minimal.args.iterateAllocator(arena_allocator);
+    defer iter.deinit();
     const exe_name = iter.next() orelse "muad-diff";
 
-    const stdout_supports_color = std.io.tty.detectConfig(std.fs.File.stdout()) != .no_color;
+    const stdout_supports_color = std.Io.File.stdout().supportsAnsiEscapeCodes(io) catch false;
     var result = try runIterator(
-        arena_state.allocator(),
+        arena_allocator,
         allocator,
+        io,
         &iter,
         exe_name,
-        .{ .file = std.fs.File.stdin() },
+        .{ .file = std.Io.File.stdin() },
         stdout_supports_color,
     );
     defer result.deinit(allocator);
 
-    try std.fs.File.stdout().writeAll(result.stdout);
-    try std.fs.File.stderr().writeAll(result.stderr);
+    try std.Io.File.stdout().writeStreamingAll(io, result.stdout);
+    try std.Io.File.stderr().writeStreamingAll(io, result.stderr);
     if (result.exit_code == 0)
         std.process.cleanExit()
     else
@@ -207,6 +211,7 @@ fn runForTesting(
     return runIterator(
         arena_state.allocator(),
         allocator,
+        std.testing.io,
         &iter,
         exe_name,
         .{ .bytes = stdin_bytes },
@@ -217,31 +222,30 @@ fn runForTesting(
 fn runIterator(
     arena_allocator: Allocator,
     allocator: Allocator,
+    io: std.Io,
     iter: anytype,
     exe_name: []const u8,
     stdin: StdinSource,
     stdout_supports_color: bool,
 ) !RunResult {
-    var stdout_buffer = ArrayList(u8).init(allocator);
+    var stdout_buffer: std.Io.Writer.Allocating = .init(allocator);
     errdefer stdout_buffer.deinit();
 
-    var stderr_buffer = ArrayList(u8).init(allocator);
+    var stderr_buffer: std.Io.Writer.Allocating = .init(allocator);
     errdefer stderr_buffer.deinit();
-
-    const stdout_writer = stdout_buffer.writer();
-    const stderr_writer = stderr_buffer.writer();
 
     const exit_code = dispatch(
         arena_allocator,
         allocator,
+        io,
         iter,
         exe_name,
         stdin,
         stdout_supports_color,
-        stdout_writer,
-        stderr_writer,
+        &stdout_buffer.writer,
+        &stderr_buffer.writer,
     ) catch |err| {
-        try stderr_writer.print("error: {s}\n", .{@errorName(err)});
+        try stderr_buffer.writer.print("error: {s}\n", .{@errorName(err)});
         return .{
             .stdout = try stdout_buffer.toOwnedSlice(),
             .stderr = try stderr_buffer.toOwnedSlice(),
@@ -259,6 +263,7 @@ fn runIterator(
 fn dispatch(
     arena_allocator: Allocator,
     allocator: Allocator,
+    io: std.Io,
     iter: anytype,
     exe_name: []const u8,
     stdin: StdinSource,
@@ -291,6 +296,7 @@ fn dispatch(
 
     var inputs = InputResolver{
         .allocator = allocator,
+        .io = io,
         .stdin = stdin,
     };
     defer inputs.deinit();
@@ -299,6 +305,7 @@ fn dispatch(
         .diff => try runDiff(
             arena_allocator,
             allocator,
+            io,
             iter,
             exe_name,
             &inputs,
@@ -309,6 +316,7 @@ fn dispatch(
         .patch => try runPatch(
             arena_allocator,
             allocator,
+            io,
             iter,
             exe_name,
             &inputs,
@@ -318,6 +326,7 @@ fn dispatch(
         .apply => try runApply(
             arena_allocator,
             allocator,
+            io,
             iter,
             exe_name,
             &inputs,
@@ -327,6 +336,7 @@ fn dispatch(
         .@"zdelta-encode" => try runZDeltaEncode(
             arena_allocator,
             allocator,
+            io,
             iter,
             exe_name,
             &inputs,
@@ -336,6 +346,7 @@ fn dispatch(
         .@"zdelta-decode" => try runZDeltaDecode(
             arena_allocator,
             allocator,
+            io,
             iter,
             exe_name,
             &inputs,
@@ -348,6 +359,7 @@ fn dispatch(
 fn runDiff(
     arena_allocator: Allocator,
     allocator: Allocator,
+    io: std.Io,
     iter: anytype,
     exe_name: []const u8,
     _: *InputResolver,
@@ -374,9 +386,9 @@ fn runDiff(
 
     const before_path = res.positionals[0] orelse return error.MissingBeforeFile;
     const after_path = res.positionals[1] orelse return error.MissingAfterFile;
-    const before = try readInputFile(allocator, before_path);
+    const before = try readInputFile(allocator, io, before_path);
     defer allocator.free(before);
-    const after = try readInputFile(allocator, after_path);
+    const after = try readInputFile(allocator, io, after_path);
     defer allocator.free(after);
 
     var diff: dmp.Diff = .default;
@@ -406,6 +418,7 @@ fn runDiff(
 fn runPatch(
     arena_allocator: Allocator,
     allocator: Allocator,
+    io: std.Io,
     iter: anytype,
     exe_name: []const u8,
     _: *InputResolver,
@@ -431,9 +444,9 @@ fn runPatch(
 
     const before_path = res.positionals[0] orelse return error.MissingBeforeFile;
     const after_path = res.positionals[1] orelse return error.MissingAfterFile;
-    const before = try readInputFile(allocator, before_path);
+    const before = try readInputFile(allocator, io, before_path);
     defer allocator.free(before);
-    const after = try readInputFile(allocator, after_path);
+    const after = try readInputFile(allocator, io, after_path);
     defer allocator.free(after);
 
     var patch: dmp.Patch = .default;
@@ -447,6 +460,7 @@ fn runPatch(
 fn runApply(
     arena_allocator: Allocator,
     allocator: Allocator,
+    io: std.Io,
     iter: anytype,
     exe_name: []const u8,
     _: *InputResolver,
@@ -472,9 +486,9 @@ fn runApply(
 
     const patch_path = res.positionals[0] orelse return error.MissingPatchFile;
     const text_path = res.positionals[1] orelse return error.MissingTextFile;
-    const patch_text = try readInputFile(allocator, patch_path);
+    const patch_text = try readInputFile(allocator, io, patch_path);
     defer allocator.free(patch_text);
-    const text = try readInputFile(allocator, text_path);
+    const text = try readInputFile(allocator, io, text_path);
     defer allocator.free(text);
 
     var patch: dmp.Patch = .default;
@@ -491,6 +505,7 @@ fn runApply(
 fn runZDeltaEncode(
     arena_allocator: Allocator,
     allocator: Allocator,
+    io: std.Io,
     iter: anytype,
     exe_name: []const u8,
     _: *InputResolver,
@@ -516,9 +531,9 @@ fn runZDeltaEncode(
 
     const before_path = res.positionals[0] orelse return error.MissingBeforeFile;
     const after_path = res.positionals[1] orelse return error.MissingAfterFile;
-    const before = try readInputFile(allocator, before_path);
+    const before = try readInputFile(allocator, io, before_path);
     defer allocator.free(before);
-    const after = try readInputFile(allocator, after_path);
+    const after = try readInputFile(allocator, io, after_path);
     defer allocator.free(after);
 
     var diff: dmp.Diff = .default;
@@ -538,6 +553,7 @@ fn runZDeltaEncode(
 fn runZDeltaDecode(
     arena_allocator: Allocator,
     allocator: Allocator,
+    io: std.Io,
     iter: anytype,
     exe_name: []const u8,
     _: *InputResolver,
@@ -563,9 +579,9 @@ fn runZDeltaDecode(
 
     const zdelta_path = res.positionals[0] orelse return error.MissingZDeltaFile;
     const before_path = res.positionals[1] orelse return error.MissingBeforeFile;
-    const zdelta = try readInputFile(allocator, zdelta_path);
+    const zdelta = try readInputFile(allocator, io, zdelta_path);
     defer allocator.free(zdelta);
-    const before = try readInputFile(allocator, before_path);
+    const before = try readInputFile(allocator, io, before_path);
     defer allocator.free(before);
 
     var diff: dmp.Diff = .default;
@@ -594,8 +610,8 @@ fn applyCleanupMode(
     }
 }
 
-fn readInputFile(allocator: Allocator, path: []const u8) ![]u8 {
-    return std.fs.cwd().readFileAlloc(allocator, path, std.math.maxInt(usize));
+fn readInputFile(allocator: Allocator, io: std.Io, path: []const u8) ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
 }
 
 fn writeMainHelp(writer: anytype, exe_name: []const u8) !void {
@@ -624,27 +640,15 @@ fn writeSubcommandHelp(
 }
 
 fn reportDiagnostic(writer: anytype, diag: clap.Diagnostic, err: anyerror) !void {
-    var scratch: [1024]u8 = undefined;
-    var adapter = writer.adaptToNewApi(&scratch);
-    try diag.report(&adapter.new_interface, err);
-    try adapter.new_interface.flush();
-    if (adapter.err) |write_err| return write_err;
+    try diag.report(writer, err);
 }
 
 fn writeClapHelp(writer: anytype, comptime params: anytype) !void {
-    var scratch: [1024]u8 = undefined;
-    var adapter = writer.adaptToNewApi(&scratch);
-    try clap.help(&adapter.new_interface, clap.Help, params, .{});
-    try adapter.new_interface.flush();
-    if (adapter.err) |write_err| return write_err;
+    try clap.help(writer, clap.Help, params, .{});
 }
 
 fn writeClapUsage(writer: anytype, comptime params: anytype) !void {
-    var scratch: [256]u8 = undefined;
-    var adapter = writer.adaptToNewApi(&scratch);
-    try clap.usage(&adapter.new_interface, clap.Help, params);
-    try adapter.new_interface.flush();
-    if (adapter.err) |write_err| return write_err;
+    try clap.usage(writer, clap.Help, params);
 }
 
 test "top-level help goes to stderr" {
@@ -662,8 +666,8 @@ test "diff command prints a readable diff" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{ .sub_path = "before.txt", .data = "cat" });
-    try tmp.dir.writeFile(.{ .sub_path = "after.txt", .data = "cart" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "before.txt", .data = "cat" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "after.txt", .data = "cart" });
 
     const before_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/before.txt", .{tmp.sub_path});
     defer allocator.free(before_path);
@@ -688,8 +692,8 @@ test "diff command reads files as positionals" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{ .sub_path = "before.txt", .data = "alpha" });
-    try tmp.dir.writeFile(.{ .sub_path = "after.txt", .data = "alphaβ" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "before.txt", .data = "alpha" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "after.txt", .data = "alphaβ" });
 
     const before_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/before.txt", .{tmp.sub_path});
     defer allocator.free(before_path);
@@ -728,8 +732,8 @@ test "invalid cleanup value is reported" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{ .sub_path = "before.txt", .data = "a" });
-    try tmp.dir.writeFile(.{ .sub_path = "after.txt", .data = "b" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "before.txt", .data = "a" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "after.txt", .data = "b" });
 
     const before_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/before.txt", .{tmp.sub_path});
     defer allocator.free(before_path);
@@ -753,8 +757,8 @@ test "patch emits patch text" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{ .sub_path = "before.txt", .data = "Καλημέρα" });
-    try tmp.dir.writeFile(.{ .sub_path = "after.txt", .data = "Καλησπέρα" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "before.txt", .data = "Καλημέρα" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "after.txt", .data = "Καλησπέρα" });
 
     const before_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/before.txt", .{tmp.sub_path});
     defer allocator.free(before_path);
@@ -778,9 +782,9 @@ test "apply returns partial-apply exit code" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{ .sub_path = "before.txt", .data = "The quick brown fox jumps over the lazy dog." });
-    try tmp.dir.writeFile(.{ .sub_path = "after.txt", .data = "That quick brown fox jumped over a lazy dog." });
-    try tmp.dir.writeFile(.{ .sub_path = "text.txt", .data = "I am the very model of a modern major general." });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "before.txt", .data = "The quick brown fox jumps over the lazy dog." });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "after.txt", .data = "That quick brown fox jumped over a lazy dog." });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "text.txt", .data = "I am the very model of a modern major general." });
 
     const before_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/before.txt", .{tmp.sub_path});
     defer allocator.free(before_path);
@@ -802,7 +806,7 @@ test "apply returns partial-apply exit code" {
     );
     defer patch_result.deinit(allocator);
 
-    try tmp.dir.writeFile(.{ .sub_path = "change.patch", .data = patch_result.stdout });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "change.patch", .data = patch_result.stdout });
     const patch_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/change.patch", .{tmp.sub_path});
     defer allocator.free(patch_path);
 
@@ -828,8 +832,8 @@ test "zdelta encode and decode round-trip" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{ .sub_path = "before.txt", .data = "Καλημέρα" });
-    try tmp.dir.writeFile(.{ .sub_path = "after.txt", .data = "Καλησπέρα" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "before.txt", .data = "Καλημέρα" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "after.txt", .data = "Καλησπέρα" });
 
     const before_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/before.txt", .{tmp.sub_path});
     defer allocator.free(before_path);
@@ -849,7 +853,7 @@ test "zdelta encode and decode round-trip" {
     );
     defer encoded.deinit(allocator);
 
-    try tmp.dir.writeFile(.{ .sub_path = "change.zdelta", .data = encoded.stdout });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "change.zdelta", .data = encoded.stdout });
     const zdelta_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/change.zdelta", .{tmp.sub_path});
     defer allocator.free(zdelta_path);
 

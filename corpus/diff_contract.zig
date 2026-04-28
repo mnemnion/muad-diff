@@ -46,6 +46,7 @@ pub fn loadSelectionAtPath(
     start_revision: usize,
     end_revision: usize,
 ) !CorpusSelection {
+    const io = std.Options.debug_io;
     var relative_paths = try collectSortedCorpusWikiPathsAtPath(allocator, corpus_root);
     defer deinitOwnedStrings(allocator, &relative_paths);
 
@@ -61,12 +62,12 @@ pub fn loadSelectionAtPath(
     }
 
     var corpus_dir = try openCorpusDir(corpus_root, .{});
-    defer corpus_dir.close();
+    defer corpus_dir.close(io);
 
     for (revisions, 0..) |*revision, idx| {
         const ordinal = start_revision + idx;
         const relative_path = relative_paths.items[ordinal - 1];
-        const file_data = try corpus_dir.readFileAlloc(allocator, relative_path, std.math.maxInt(usize));
+        const file_data = try corpus_dir.readFileAlloc(io, relative_path, allocator, .unlimited);
         defer allocator.free(file_data);
 
         revision.* = .{
@@ -99,16 +100,17 @@ pub fn collectSortedCorpusWikiPathsAtPath(
     allocator: Allocator,
     corpus_root: []const u8,
 ) !ArrayList([]u8) {
+    const io = std.Options.debug_io;
     var paths = ArrayList([]u8).init(allocator);
     errdefer deinitOwnedStrings(allocator, &paths);
 
     var dir = try openCorpusDir(corpus_root, .{ .iterate = true });
-    defer dir.close();
+    defer dir.close(io);
 
     var walker = try dir.walk(allocator);
     defer walker.deinit();
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.path, ".wiki")) continue;
         try paths.append(try allocator.dupe(u8, entry.path));
@@ -118,12 +120,13 @@ pub fn collectSortedCorpusWikiPathsAtPath(
     return paths;
 }
 
-pub fn collectSortedBatchNames(allocator: Allocator, root_dir: std.fs.Dir) !ArrayList([]u8) {
+pub fn collectSortedBatchNames(allocator: Allocator, root_dir: std.Io.Dir) !ArrayList([]u8) {
+    const io = std.Options.debug_io;
     var names = ArrayList([]u8).init(allocator);
     errdefer deinitOwnedStrings(allocator, &names);
 
     var iterator = root_dir.iterate();
-    while (try iterator.next()) |entry| {
+    while (try iterator.next(io)) |entry| {
         if (entry.kind != .directory) continue;
         try names.append(try allocator.dupe(u8, entry.name));
     }
@@ -132,12 +135,13 @@ pub fn collectSortedBatchNames(allocator: Allocator, root_dir: std.fs.Dir) !Arra
     return names;
 }
 
-pub fn collectSortedWikiNames(allocator: Allocator, dir: std.fs.Dir) !ArrayList([]u8) {
+pub fn collectSortedWikiNames(allocator: Allocator, dir: std.Io.Dir) !ArrayList([]u8) {
+    const io = std.Options.debug_io;
     var names = ArrayList([]u8).init(allocator);
     errdefer deinitOwnedStrings(allocator, &names);
 
     var iterator = dir.iterate();
-    while (try iterator.next()) |entry| {
+    while (try iterator.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".wiki")) continue;
         try names.append(try allocator.dupe(u8, entry.name));
@@ -157,16 +161,17 @@ fn loadSelectionZDeltasAtPath(
     corpus_root: []const u8,
     revisions: []CorpusRevision,
 ) !void {
+    const io = std.Options.debug_io;
     if (revisions.len <= 1) return;
 
     var dir = try openCorpusDir(corpus_root, .{ .iterate = true });
-    defer dir.close();
+    defer dir.close(io);
 
     var zdset_names = ArrayList([]u8).init(allocator);
     defer deinitOwnedStrings(allocator, &zdset_names);
 
     var iterator = dir.iterate();
-    while (try iterator.next()) |entry| {
+    while (try iterator.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".zdset")) continue;
         try zdset_names.append(try allocator.dupe(u8, entry.name));
@@ -177,13 +182,13 @@ fn loadSelectionZDeltasAtPath(
     for (zdset_names.items) |name| {
         if (next_needed >= revisions.len) break;
 
-        const file_data = try dir.readFileAlloc(allocator, name, std.math.maxInt(usize));
+        const file_data = try dir.readFileAlloc(io, name, allocator, .unlimited);
         defer allocator.free(file_data);
 
         var line_iter = std.mem.tokenizeScalar(u8, file_data, '\n');
         var pending_path: ?[]const u8 = null;
         while (line_iter.next()) |raw_line| {
-            const line = std.mem.trimRight(u8, raw_line, "\r");
+            const line = std.mem.trimEnd(u8, raw_line, "\r");
             if (line.len == 0) continue;
             if (std.mem.startsWith(u8, line, "# baseline ")) {
                 pending_path = null;
@@ -212,11 +217,12 @@ fn loadSelectionZDeltasAtPath(
     }
 }
 
-fn openCorpusDir(path: []const u8, flags: std.fs.Dir.OpenOptions) !std.fs.Dir {
+fn openCorpusDir(path: []const u8, flags: std.Io.Dir.OpenOptions) !std.Io.Dir {
+    const io = std.Options.debug_io;
     return if (std.fs.path.isAbsolute(path))
-        std.fs.openDirAbsolute(path, flags)
+        std.Io.Dir.openDirAbsolute(io, path, flags)
     else
-        std.fs.cwd().openDir(path, flags);
+        std.Io.Dir.cwd().openDir(io, path, flags);
 }
 
 fn lessThanString(_: void, lhs: []const u8, rhs: []const u8) bool {

@@ -171,20 +171,21 @@ fn parseFixture(
 }
 
 fn loadCorpusFixtures(arena: Allocator) !ArrayList(RevisionFixture) {
+    const io = std.Options.debug_io;
     var fixtures = ArrayList(RevisionFixture).init(arena);
     errdefer fixtures.deinit();
 
-    var dir = try std.fs.cwd().openDir(corpus_root, .{ .iterate = true });
-    defer dir.close();
+    var dir = try std.Io.Dir.cwd().openDir(io, corpus_root, .{ .iterate = true });
+    defer dir.close(io);
 
     var walker = try dir.walk(arena);
     defer walker.deinit();
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.path, ".wiki")) continue;
 
-        const file_data = try dir.readFileAlloc(arena, entry.path, std.math.maxInt(usize));
+        const file_data = try dir.readFileAlloc(io, entry.path, arena, .limited(std.math.maxInt(usize)));
         const revision = try parseFixture(arena, entry.path, file_data);
         try fixtures.append(revision);
     }
