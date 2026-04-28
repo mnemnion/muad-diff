@@ -189,7 +189,7 @@ pub fn main(init: std.process.Init) !void {
     try std.Io.File.stdout().writeStreamingAll(io, result.stdout);
     try std.Io.File.stderr().writeStreamingAll(io, result.stderr);
     if (result.exit_code == 0)
-        std.process.cleanExit()
+        std.process.cleanExit(io)
     else
         std.process.exit(result.exit_code);
 }

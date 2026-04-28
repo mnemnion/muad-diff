@@ -7,7 +7,7 @@
 //! prompt/help mode.
 
 pub const StdinSource = union(enum) {
-    file: std.fs.File,
+    file: std.Io.File,
     bytes: []const u8,
 };
 
@@ -49,6 +49,7 @@ pub const Event = union(enum) {
 
 pub const LineIn = struct {
     source: Source,
+    io: std.Io = std.Options.debug_io,
     mode: Mode = .prompt_delta,
     cursor: usize = 0,
     pending: [64]u8 = undefined,
@@ -162,7 +163,7 @@ pub const LineIn = struct {
             },
             .file => |file| {
                 var byte_buf: [1]u8 = undefined;
-                const read_len = try file.read(byte_buf[0..]);
+                const read_len = try file.readStreaming(in.io, &.{byte_buf[0..]});
                 if (read_len == 0) return null;
                 return byte_buf[0];
             },

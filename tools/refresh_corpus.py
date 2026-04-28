@@ -65,6 +65,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Refresh checked-in corpus fixtures from Wikipedia JSON snapshots.",
     )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("do",),
+        help="Pass 'do' to replace the checked-in corpus tree. Without it, run as a dry run.",
+    )
     return parser.parse_args()
 
 
@@ -172,7 +178,8 @@ def emit_emoji_fixture(corpus_root: Path) -> None:
 
 
 def main() -> int:
-    _ = parse_args()
+    args = parse_args()
+    should_apply = args.command == "do"
 
     if not FETCH_SCRIPT.exists():
         raise SystemExit(f"Missing fetch script: {FETCH_SCRIPT}")
@@ -187,11 +194,14 @@ def main() -> int:
         emit_wikipedia_fixtures(temp_root, fresh_corpus_root)
         emit_emoji_fixture(fresh_corpus_root)
 
-        if CORPUS_ROOT.exists():
-            shutil.rmtree(CORPUS_ROOT)
-        shutil.move(str(fresh_corpus_root), str(CORPUS_ROOT))
-
-    print(f"Refreshed corpus fixtures under {CORPUS_ROOT}")
+        if should_apply:
+            if CORPUS_ROOT.exists():
+                shutil.rmtree(CORPUS_ROOT)
+            shutil.move(str(fresh_corpus_root), str(CORPUS_ROOT))
+            print(f"Refreshed corpus fixtures under {CORPUS_ROOT}")
+        else:
+            print(f"Dry run generated corpus fixtures under {fresh_corpus_root}")
+            print("Pass 'do' to replace the checked-in corpus tree.")
     return 0
 
 

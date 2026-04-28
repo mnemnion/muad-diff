@@ -33,7 +33,7 @@ const ParsedArgs = struct {
 
 /// Set terminal raw, with fallbacks if something goes hinky.
 const RawTerminal = struct {
-    file: ?std.fs.File,
+    file: ?std.Io.File,
     original_state: ?std.posix.termios,
 
     pub const dummy: RawTerminal = .{ .file = null, .original_state = null };
@@ -91,37 +91,40 @@ const RawTerminal = struct {
 };
 
 const RunRecorder = struct {
-    file: std.fs.File,
+    file: std.Io.File,
     last_command: ?u8 = null,
 
     fn init(
+        io: std.Io,
         runs_path: []const u8,
         timestamp_secs: u64,
         start_revision: usize,
         end_revision: usize,
     ) !RunRecorder {
         var file = if (std.fs.path.isAbsolute(runs_path))
-            try std.fs.createFileAbsolute(runs_path, .{ .truncate = false })
+            try std.Io.Dir.createFileAbsolute(io, runs_path, .{ .truncate = false })
         else
-            try std.fs.cwd().createFile(runs_path, .{ .truncate = false });
-        errdefer file.close();
+            try std.Io.Dir.cwd().createFile(io, runs_path, .{ .truncate = false });
+        errdefer file.close(io);
 
-        try file.seekFromEnd(0);
+        const stat = try file.stat(io);
+        try io.vtable.fileSeekTo(io.userdata, file, stat.size);
 
         var recorder: RunRecorder = .{
             .file = file,
         };
-        try recorder.writeHeader(timestamp_secs, start_revision, end_revision);
+        try recorder.writeHeader(io, timestamp_secs, start_revision, end_revision);
         return recorder;
     }
 
-    fn deinit(recorder: *RunRecorder) void {
-        recorder.file.close();
+    fn deinit(recorder: *RunRecorder, io: std.Io) void {
+        recorder.file.close(io);
         recorder.* = undefined;
     }
 
     fn writeHeader(
         recorder: *RunRecorder,
+        io: std.Io,
         timestamp_secs: u64,
         start_revision: usize,
         end_revision: usize,
@@ -135,20 +138,20 @@ const RunRecorder = struct {
             start_revision,
             end_revision,
         });
-        try recorder.file.writeAll(header);
-        try recorder.file.sync();
+        try recorder.file.writeStreamingAll(io, header);
+        try recorder.file.sync(io);
     }
 
-    fn recordCommand(recorder: *RunRecorder, command: u8) !void {
+    fn recordCommand(recorder: *RunRecorder, io: std.Io, command: u8) !void {
         const bytes = [1]u8{command};
-        try recorder.file.writeAll(&bytes);
-        try recorder.file.sync();
+        try recorder.file.writeStreamingAll(io, &bytes);
+        try recorder.file.sync(io);
         recorder.last_command = command;
     }
 
-    fn ensureSuccessQuit(recorder: *RunRecorder) !void {
+    fn ensureSuccessQuit(recorder: *RunRecorder, io: std.Io) !void {
         if (recorder.last_command == 'q') return;
-        try recorder.recordCommand('q');
+        try recorder.recordCommand(io, 'q');
     }
 };
 
@@ -161,28 +164,26 @@ const OwnedSessionSeed = struct {
     }
 };
 
-pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_state.deinit();
-    const allocator = gpa_state.allocator();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const allocator = init.gpa;
+    const arena = init.arena.allocator();
 
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-
-    const args = try std.process.argsAlloc(arena_state.allocator());
+    const args = try init.minimal.args.toSlice(arena);
     const exe_name = if (args.len > 0) args[0] else "delta-tool";
-    const stdout_supports_color = std.io.tty.detectConfig(std.fs.File.stdout()) != .no_color;
+    const stdout_supports_color = std.Io.File.stdout().supportsAnsiEscapeCodes(io) catch false;
 
     var stdout_buf: [4096]u8 = undefined;
     var stderr_buf: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
 
     const exit_code = run(
         allocator,
+        io,
         args[1..],
         exe_name,
-        .{ .file = std.fs.File.stdin() },
+        .{ .file = std.Io.File.stdin() },
         stdout_supports_color,
         .{ .use_pager = true },
         &stdout_writer.interface,
@@ -202,7 +203,7 @@ pub fn main() !void {
 
     try stdout_writer.interface.flush();
     try stderr_writer.interface.flush();
-    if (exit_code == 0) std.process.cleanExit() else std.process.exit(exit_code);
+    if (exit_code == 0) std.process.cleanExit(io) else std.process.exit(exit_code);
 }
 
 fn runForTesting(
@@ -228,6 +229,7 @@ fn runForTesting(
     const exe_name = if (args.len > 0) args[0] else "delta-tool";
     const exit_code = run(
         allocator,
+        std.testing.io,
         if (args.len > 1) args[1..] else &.{},
         exe_name,
         .{ .bytes = stdin_bytes },
@@ -244,7 +246,7 @@ fn runForTesting(
         return .{
             .stdout = try stdout_buffer.toOwnedSlice(),
             .stderr = try stderr_buffer.toOwnedSlice(),
-            .runs = tmp.dir.readFileAlloc(allocator, "delta_tool.runs", std.math.maxInt(usize)) catch |read_err| switch (read_err) {
+            .runs = tmp.dir.readFileAlloc(std.testing.io, "delta_tool.runs", allocator, .unlimited) catch |read_err| switch (read_err) {
                 error.FileNotFound => null,
                 else => return read_err,
             },
@@ -255,7 +257,7 @@ fn runForTesting(
     return .{
         .stdout = try stdout_buffer.toOwnedSlice(),
         .stderr = try stderr_buffer.toOwnedSlice(),
-        .runs = tmp.dir.readFileAlloc(allocator, "delta_tool.runs", std.math.maxInt(usize)) catch |err| switch (err) {
+        .runs = tmp.dir.readFileAlloc(std.testing.io, "delta_tool.runs", allocator, .unlimited) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
         },
@@ -265,6 +267,7 @@ fn runForTesting(
 
 fn run(
     allocator: Allocator,
+    io: std.Io,
     args: []const []const u8,
     exe_name: []const u8,
     stdin: StdinSource,
@@ -298,14 +301,15 @@ fn run(
     if (should_record_runs) {
         if (options.runs_path) |runs_path| {
             recorder = try RunRecorder.init(
+                io,
                 runs_path,
-                options.timestamp_secs orelse @as(u64, @intCast(std.time.timestamp())),
+                options.timestamp_secs orelse currentTimestampSeconds(),
                 start_revision,
                 end_revision,
             );
         }
     }
-    defer if (recorder) |*owned| owned.deinit();
+    defer if (recorder) |*owned| owned.deinit(io);
 
     var selection = try corpus_contract.loadCheckedInSelection(allocator, start_revision, end_revision);
     defer selection.deinit(allocator);
@@ -317,6 +321,7 @@ fn run(
         .{ .replay = script }
     else
         .{ .live = stdin });
+    in.io = io;
     const raw_guard: RawTerminal = if (parsed_args.replay_script == null)
         try .init(stdin)
     else
@@ -398,7 +403,7 @@ fn run(
             if (painter.supportsInPlaceRepaint() and painter.previewIntent(&interaction_state, input.intent)) {
                 try painter.repaintPromptFrame(interaction_state);
             }
-            if (recorder) |*owned| try owned.recordCommand(input.canonical);
+            if (recorder) |*owned| try owned.recordCommand(io, input.canonical);
 
             var outcome = try session.dispatch(input.intent);
             defer outcome.deinit(allocator);
@@ -431,7 +436,7 @@ fn run(
         session.currentText().len,
         session.skippedHistoryLen(),
     );
-    if (recorder) |*owned| try owned.ensureSuccessQuit();
+    if (recorder) |*owned| try owned.ensureSuccessQuit(io);
     return 0;
 }
 
@@ -507,6 +512,14 @@ fn formatUtcTimestamp(buffer: []u8, timestamp_secs: u64) ![]const u8 {
         day_seconds.getMinutesIntoHour(),
         day_seconds.getSecondsIntoMinute(),
     });
+}
+
+fn currentTimestampSeconds() u64 {
+    var timespec: std.posix.timespec = undefined;
+    return switch (std.posix.errno(std.posix.system.clock_gettime(std.posix.CLOCK.REALTIME, &timespec))) {
+        .SUCCESS => @intCast(timespec.sec),
+        else => 0,
+    };
 }
 
 test "help exits cleanly without creating a run transcript" {

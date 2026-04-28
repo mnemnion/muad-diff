@@ -627,7 +627,7 @@ fn writePlainAnnotatedLine(
 ) !void {
     const start = document.line_starts[line_index];
     const end = start + line.len;
-    const display_line = std.mem.trimRight(u8, line, "\n");
+    const display_line = std.mem.trimEnd(u8, line, "\n");
     var primary: ?zdelta_context.Annotation = null;
     for (document.annotations) |annotation| {
         if (annotation.start == start and annotation.start + annotation.len == end) {
@@ -693,27 +693,26 @@ fn tryWriteExitReviewPager(
     diff: *const dmp.Diff,
     use_color: bool,
 ) bool {
-    var stdout = std.fs.File.stdout();
-    stdout.lock(.exclusive) catch return false;
-    defer stdout.unlock();
+    const io = std.Options.debug_io;
+    var stdout = std.Io.File.stdout();
+    stdout.lock(io, .exclusive) catch return false;
+    defer stdout.unlock(io);
 
-    var pager = std.process.Child.init(
-        if (use_color) &.{ "less", "-R" } else &.{"less"},
-        allocator,
-    );
-    pager.stdin_behavior = .Pipe;
-    pager.stdout_behavior = .Inherit;
-    pager.stderr_behavior = .Inherit;
-    pager.spawn() catch return false;
+    var pager = std.process.spawn(io, .{
+        .argv = if (use_color) &.{ "less", "-R" } else &.{"less"},
+        .stdin = .pipe,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    }) catch return false;
     errdefer {
-        if (pager.stdin) |stdin| stdin.close();
-        _ = pager.wait() catch {};
+        if (pager.stdin) |stdin| stdin.close(io);
+        _ = pager.wait(io) catch {};
     }
 
     const pager_stdin = pager.stdin orelse return false;
     {
         var pager_buf: [4096]u8 = undefined;
-        var pager_writer = pager_stdin.writer(&pager_buf);
+        var pager_writer = pager_stdin.writer(io, &pager_buf);
         const written = if (use_color)
             diff.writePrettyFormat(allocator, &pager_writer.interface, .xterm_classic)
         else
@@ -722,9 +721,9 @@ fn tryWriteExitReviewPager(
         pager_writer.interface.flush() catch return false;
     }
 
-    pager_stdin.close();
+    pager_stdin.close(io);
     pager.stdin = null;
-    _ = pager.wait() catch return false;
+    _ = pager.wait(io) catch return false;
     return true;
 }
 
@@ -812,16 +811,14 @@ test "render interaction state writes plain review sections" {
         state.session.deinit(allocator);
     }
 
-    var out = ArrayList(u8).init(allocator);
+    var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
-    var out_writer = out.writer();
-    _ = &out_writer;
-    try renderInteractionState(OutputClient.init(allocator, false), &out_writer, state, false);
+    try renderInteractionState(OutputClient.init(allocator, false), &out.writer, state, false);
 
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "--- target revision ---"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, " same\n"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, " ... 4;9\n"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, " ---[eof]---\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "--- target revision ---"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, " same\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, " ... 4;9\n"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, " ---[eof]---\n"));
 }
 
 test "render interaction state hides focused data at delta prompt" {
@@ -887,15 +884,13 @@ test "render interaction state hides focused data at delta prompt" {
         state.session.deinit(allocator);
     }
 
-    var out = ArrayList(u8).init(allocator);
+    var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
-    var out_writer = out.writer();
-    _ = &out_writer;
-    try renderInteractionState(OutputClient.init(allocator, false), &out_writer, state, false);
+    try renderInteractionState(OutputClient.init(allocator, false), &out.writer, state, false);
 
-    try std.testing.expect(!std.mem.containsAtLeast(u8, out.items, 1, "focus: change"));
-    try std.testing.expect(!std.mem.containsAtLeast(u8, out.items, 1, "--- next change ---"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "--- target revision ---"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, out.written(), 1, "focus: change"));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, out.written(), 1, "--- next change ---"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "--- target revision ---"));
 }
 
 test "raw repaint frame uses synchronized updates" {
@@ -1004,14 +999,12 @@ test "render document ansi uses obelizmo for annotated lines" {
     };
     defer document.deinit(allocator);
 
-    var out = ArrayList(u8).init(allocator);
+    var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
-    var out_writer = out.writer();
-    _ = &out_writer;
-    try renderDocumentAnsi(OutputClient.init(allocator, false), &out_writer, document);
+    try renderDocumentAnsi(OutputClient.init(allocator, false), &out.writer, document);
 
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "\x1b["));
-    try std.testing.expect(std.mem.containsAtLeast(u8, out.items, 1, "green"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "\x1b["));
+    try std.testing.expect(std.mem.containsAtLeast(u8, out.written(), 1, "green"));
 }
 
 test "writer helpers split stdout and stderr policy" {

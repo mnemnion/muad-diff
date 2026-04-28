@@ -195,6 +195,9 @@ pub fn build(b: *std.Build) void {
         "/Users/atman/Dropbox/deck/m/skills/.venv/bin/python",
     });
     refresh_corpus.addFileArg(b.path("tools/refresh_corpus.py"));
+    if (b.args) |args| {
+        refresh_corpus.addArgs(args);
+    }
 
     const refresh_corpus_step = b.step(
         "refresh-corpus",
