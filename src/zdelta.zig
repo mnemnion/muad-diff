@@ -33,6 +33,7 @@ pub const ZDeltaError = Allocator.Error || error{
 pub const DeltaSpan = common_apply.DeltaSpan;
 pub const DeltaOp = common_apply.DeltaOp;
 pub const DeltaApplicator = whole_apply_mod.DeltaApplicator;
+pub const streamApply = whole_apply_mod.streamApply;
 pub const Span = guidance_mod.Span;
 pub const TargetClass = guidance_mod.TargetClass;
 pub const ExpectedTarget = guidance_mod.ExpectedTarget;

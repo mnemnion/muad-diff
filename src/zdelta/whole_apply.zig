@@ -5,6 +5,23 @@
 //! storage policy is shared with `DeltaManager`, but this type intentionally
 //! avoids skip history and harmonization.
 
+/// Stream a ZDelta.  `reader` is presumed to have the before text, `writer` will
+/// have received the after text.
+pub fn streamApply(zdelta: *const ZDelta, reader: *std.Io.Reader, writer: *std.Io.Writer) !void {
+    for (zdelta.ops) |op| {
+        switch (op) {
+            .equal => |len| try reader.streamExact(writer, len),
+            .delete => |len| try reader.discardAll(len),
+            .insert => |span| {
+                const offset: usize = span.offset;
+                const len: usize = span.len;
+                try writer.writeAll(zdelta.insert_text[offset..][0..len]);
+            },
+        }
+    }
+    try writer.flush();
+}
+
 pub const DeltaApplicator = struct {
     allocator: Allocator,
     zdelta: ?*ZDelta,
@@ -427,4 +444,38 @@ test "DeltaApplicator applyAll keeps pivot crossing replacement on ordinary path
 
     try tm.applyAll();
     try testing.expectEqualStrings("abcdXYhij", tm.view());
+}
+
+test "streamApply streams after text without buffering before text" {
+    const allocator = testing.allocator;
+    var zdelta = try testOwnedZDelta(allocator, "XY!", &.{
+        .{ .equal = 3 },
+        .{ .delete = 2 },
+        .{ .insert = .{ .offset = 0, .len = 2 } },
+        .{ .equal = 3 },
+        .{ .insert = .{ .offset = 2, .len = 1 } },
+    });
+    defer zdelta.destroy(allocator);
+
+    var reader: std.Io.Reader = .fixed("abcdefgh");
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    try streamApply(zdelta, &reader, &out.writer);
+
+    try testing.expectEqualStrings("abcXYfgh!", out.written());
+}
+
+test "streamApply returns EndOfStream when before text is too short" {
+    const allocator = testing.allocator;
+    var zdelta = try testOwnedZDelta(allocator, "", &.{
+        .{ .equal = 4 },
+    });
+    defer zdelta.destroy(allocator);
+
+    var reader: std.Io.Reader = .fixed("abc");
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    try testing.expectError(error.EndOfStream, streamApply(zdelta, &reader, &out.writer));
 }

@@ -27,6 +27,7 @@ pub const ZDelta = zdelta_mod.ZDelta;
 pub const DeltaOp = zdelta_mod.DeltaOp;
 pub const DeltaApplicator = zdelta_mod.DeltaApplicator;
 pub const decode = zdelta_mod.decode;
+pub const streamApply = zdelta_mod.streamApply;
 pub const writeDecoratedEdit = diff_mod.writeDecoratedEdit;
 pub const DiffContext = diff_context_mod;
 pub const Patch = @import("dmp/Patch.zig");
