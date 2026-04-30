@@ -13,7 +13,9 @@ pub const ZDeltaVersion = enum {
     b,
 };
 
-/// Don't add things to this.
+// TODO: Split these up by operation (e.g. decode, apply)
+
+/// Errors pertaining to ZDelta operations.
 pub const ZDeltaError = Allocator.Error || error{
     BadZDeltaHeader,
     UnknownZDeltaVersion,
@@ -73,6 +75,42 @@ pub const ZDelta = struct {
         return len;
     }
 
+    pub fn textNumbers(delta: *const ZDelta) struct { u32, u32, u32 } {
+        const before_len = delta.beforeLength();
+        const pre_padding, const post_padding = delta.padding();
+        return .{
+            before_len,
+            pre_padding,
+            post_padding,
+        };
+    }
+
+    pub fn totalChange(delta: *const ZDelta) i33 {
+        var change: i33 = 0;
+        for (delta.ops) |op| {
+            switch (op) {
+                .insert => |span| change += cast(i33, span.len),
+                .delete => |len| change -= cast(i33, len),
+                .equal => {},
+            }
+        }
+        return change;
+    }
+
+    pub fn deinit(delta: *ZDelta, allocator: Allocator) void {
+        allocator.free(delta.insert_text);
+        allocator.free(delta.ops);
+        delta.* = undefined;
+    }
+
+    pub fn destroy(delta: *ZDelta, allocator: Allocator) void {
+        delta.deinit(allocator);
+        allocator.destroy(delta);
+    }
+
+    // TODO: format: debug-style printers, and std.fmt.alt-s which
+    // render it as a zDelta a or b (etc?) string.
+
     fn midpoint(delta: *const ZDelta) u32 {
         return delta.beforeLength() / 2;
     }
@@ -126,42 +164,6 @@ pub const ZDelta = struct {
             cast(u32, @max(@as(i64, 0), tail_max)),
         };
     }
-
-    pub fn textNumbers(delta: *const ZDelta) struct { u32, u32, u32 } {
-        const before_len = delta.beforeLength();
-        const pre_padding, const post_padding = delta.padding();
-        return .{
-            before_len,
-            pre_padding,
-            post_padding,
-        };
-    }
-
-    pub fn totalChange(delta: *const ZDelta) i33 {
-        var change: i33 = 0;
-        for (delta.ops) |op| {
-            switch (op) {
-                .insert => |span| change += cast(i33, span.len),
-                .delete => |len| change -= cast(i33, len),
-                .equal => {},
-            }
-        }
-        return change;
-    }
-
-    pub fn deinit(delta: *ZDelta, allocator: Allocator) void {
-        allocator.free(delta.insert_text);
-        allocator.free(delta.ops);
-        delta.* = undefined;
-    }
-
-    pub fn destroy(delta: *ZDelta, allocator: Allocator) void {
-        delta.deinit(allocator);
-        allocator.destroy(delta);
-    }
-
-    // TODO: format: debug-style printers, and std.fmt.alt-s which
-    // render it as a zDelta a or b (etc?) string.
 };
 
 /// Write a Diff in a zdelta format.  Currently supported are
@@ -250,12 +252,6 @@ fn writeHeader(writer: anytype, version: ZDeltaVersion) !void {
     try writer.writeByte(@tagName(version)[0]);
 }
 
-/// loc is a location in text1, compute and return the equivalent location in
-/// text2.
-/// e.g. "The cat" vs "The big cat", 1->1, 5->8
-/// @param diffs List of Diff objects.
-/// @param loc Location within text1.
-/// @return Location within text2.
 fn writeInsert(writer: anytype, text: []const u8, version: ZDeltaVersion) !void {
     switch (version) {
         .a => {
@@ -1113,7 +1109,8 @@ test "ZDelta totalChange handles large values" {
     try testing.expectEqual(-@as(i33, std.math.maxInt(u32)), zdelta.totalChange());
 }
 
-test "zdelta guidance declarations compile" {
+comptime {
+    testing.refAllDecls(whole_apply_mod);
     testing.refAllDecls(guidance_mod);
 }
 

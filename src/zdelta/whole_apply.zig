@@ -109,11 +109,19 @@ pub const DeltaApplicator = struct {
     }
 
     pub fn applyAll(tm: *DeltaApplicator) !void {
-        while (try tm.applyNext()) |_| {}
+        while (true) {
+            const op = (try tm.advanceToMutation()) orelse return;
+            if (try tm.applyAdjacentMutationPair(op)) continue;
+            try tm.applyMutation(op);
+        }
     }
 
     pub fn applyNext(tm: *DeltaApplicator) !?void {
         const op = (try tm.advanceToMutation()) orelse return null;
+        try tm.applyMutation(op);
+    }
+
+    fn applyMutation(tm: *DeltaApplicator, op: DeltaOp) !void {
         switch (op) {
             .delete => |len| {
                 tm.delete(tm.t_idx, len);
@@ -128,6 +136,30 @@ pub const DeltaApplicator = struct {
             },
             .equal => unreachable,
         }
+    }
+
+    fn applyAdjacentMutationPair(tm: *DeltaApplicator, op: DeltaOp) !bool {
+        const zdelta = tm.zdelta orelse return error.MissingZDelta;
+        if (tm.z_idx + 1 >= zdelta.ops.len) return false;
+
+        const next = zdelta.ops[tm.z_idx + 1];
+        const delete_len, const insert_text = switch (op) {
+            .delete => |delete_len| switch (next) {
+                .insert => |span| .{ delete_len, try tm.deltaInsertText(span) },
+                .delete, .equal => return false,
+            },
+            .insert => |span| switch (next) {
+                .delete => |delete_len| .{ delete_len, try tm.deltaInsertText(span) },
+                .insert, .equal => return false,
+            },
+            .equal => unreachable,
+        };
+
+        if (!tm.replacementStaysOnOneSide(tm.t_idx, delete_len)) return false;
+        try tm.replace(tm.t_idx, delete_len, insert_text);
+        tm.t_idx += @intCast(insert_text.len);
+        tm.z_idx += 2;
+        return true;
     }
 
     fn rebase(tm: *DeltaApplicator, new_start: u32) void {
@@ -168,6 +200,50 @@ pub const DeltaApplicator = struct {
 
         @memcpy(tm.buffer[tm.start + at ..][0..new_len], new_text);
         tm.budget -|= new_len;
+    }
+
+    fn replace(tm: *DeltaApplicator, at: u32, old_len: u32, new_text: []const u8) !void {
+        dbgassert(new_text.len <= std.math.maxInt(u32));
+        const new_len: u32 = @intCast(new_text.len);
+        dbgassert(at <= tm.textLen());
+        dbgassert(old_len <= tm.textLen() - at);
+
+        if (new_len > old_len) {
+            const growth = new_len - old_len;
+            if (at < tm.pivot) {
+                try tm.ensureHeadRoom(growth);
+                const new_start = tm.start - growth;
+                @memmove(tm.buffer[new_start..][0..at], tm.buffer[tm.start..][0..at]);
+                tm.start = new_start;
+            } else {
+                try tm.ensureTailRoom(growth);
+                const abs_start = tm.start + at;
+                const abs_old_end = abs_start + old_len;
+                @memmove(
+                    tm.buffer[abs_start + new_len ..][0 .. tm.end - abs_old_end],
+                    tm.buffer[abs_old_end..][0 .. tm.end - abs_old_end],
+                );
+                tm.end += growth;
+            }
+            tm.budget -|= growth;
+        } else if (old_len > new_len) {
+            const shrink = old_len - new_len;
+            if (at < tm.pivot) {
+                @memmove(tm.buffer[tm.start + shrink ..][0..at], tm.buffer[tm.start..][0..at]);
+                tm.start += shrink;
+            } else {
+                const abs_start = tm.start + at;
+                const abs_old_end = abs_start + old_len;
+                @memmove(
+                    tm.buffer[abs_start + new_len ..][0 .. tm.end - abs_old_end],
+                    tm.buffer[abs_old_end..][0 .. tm.end - abs_old_end],
+                );
+                tm.end -= shrink;
+            }
+            tm.budget +|= shrink;
+        }
+
+        @memcpy(tm.buffer[tm.start + at ..][0..new_len], new_text);
     }
 
     pub fn delete(tm: *DeltaApplicator, start: u32, len: u32) void {
@@ -218,6 +294,10 @@ pub const DeltaApplicator = struct {
         return zdelta.insert_text[offset..][0..len];
     }
 
+    fn replacementStaysOnOneSide(tm: *const DeltaApplicator, start: u32, len: u32) bool {
+        return start >= tm.pivot or start + len <= tm.pivot;
+    }
+
     pub fn textLen(tm: *const DeltaApplicator) u32 {
         return tm.end - tm.start;
     }
@@ -240,3 +320,111 @@ const common = @import("../dmp/common.zig");
 const dbgassert = common.dbgassert;
 const DeltaOp = common_apply.DeltaOp;
 const DeltaSpan = common_apply.DeltaSpan;
+const testing = std.testing;
+
+fn testOwnedZDelta(
+    allocator: Allocator,
+    insert_text: []const u8,
+    ops: []const DeltaOp,
+) !*ZDelta {
+    const zdelta = try allocator.create(ZDelta);
+    errdefer allocator.destroy(zdelta);
+    const raw_ops = try allocator.dupe(DeltaOp, ops);
+    errdefer allocator.free(raw_ops);
+    zdelta.* = .{
+        .version = .b,
+        .insert_text = try allocator.dupe(u8, insert_text),
+        .ops = raw_ops,
+    };
+    return zdelta;
+}
+
+test "DeltaApplicator applyAll combines delete then insert replacement before pivot" {
+    const allocator = testing.allocator;
+    const before = "abcdefghij";
+    var tm = try DeltaApplicator.init(allocator, before, try testOwnedZDelta(allocator, "WXYZ!", &.{
+        .{ .equal = 2 },
+        .{ .delete = 3 },
+        .{ .insert = .{ .offset = 0, .len = 5 } },
+        .{ .equal = 5 },
+    }));
+    defer tm.deinit();
+
+    tm.t_idx = 2;
+    tm.z_idx = 1;
+    const op = DeltaOp{ .delete = 3 };
+    try testing.expect(try tm.applyAdjacentMutationPair(op));
+
+    try testing.expectEqual(@as(u32, 3), tm.z_idx);
+    try testing.expectEqual(@as(u32, 7), tm.t_idx);
+    try testing.expectEqualStrings("abWXYZ!fghij", tm.view());
+}
+
+test "DeltaApplicator applyAll combines insert then delete replacement after pivot" {
+    const allocator = testing.allocator;
+    const before = "abcdefghij";
+    var tm = try DeltaApplicator.init(allocator, before, try testOwnedZDelta(allocator, "XY", &.{
+        .{ .equal = 6 },
+        .{ .insert = .{ .offset = 0, .len = 2 } },
+        .{ .delete = 3 },
+        .{ .equal = 1 },
+    }));
+    defer tm.deinit();
+
+    tm.t_idx = 6;
+    tm.z_idx = 1;
+    const op = DeltaOp{ .insert = .{ .offset = 0, .len = 2 } };
+    try testing.expect(try tm.applyAdjacentMutationPair(op));
+
+    try testing.expectEqual(@as(u32, 3), tm.z_idx);
+    try testing.expectEqual(@as(u32, 8), tm.t_idx);
+    try testing.expectEqualStrings("abcdefXYj", tm.view());
+}
+
+test "DeltaApplicator applyAll combines right replacement after tail rebase" {
+    const allocator = testing.allocator;
+    const before = "abcdefghij";
+    var tm = try DeltaApplicator.init(allocator, before, try testOwnedZDelta(allocator, "WXYZ!", &.{
+        .{ .equal = 6 },
+        .{ .delete = 1 },
+        .{ .insert = .{ .offset = 0, .len = 5 } },
+        .{ .equal = 3 },
+    }));
+    defer tm.deinit();
+
+    const tail_start = tm.buffer.len - before.len;
+    @memmove(tm.buffer[tail_start..][0..before.len], tm.view());
+    tm.start = @intCast(tail_start);
+    tm.end = @intCast(tm.buffer.len);
+
+    tm.t_idx = 6;
+    tm.z_idx = 1;
+    const op = DeltaOp{ .delete = 1 };
+    try testing.expect(try tm.applyAdjacentMutationPair(op));
+
+    try testing.expectEqual(@as(u32, 3), tm.z_idx);
+    try testing.expectEqual(@as(u32, 11), tm.t_idx);
+    try testing.expectEqualStrings("abcdefWXYZ!hij", tm.view());
+}
+
+test "DeltaApplicator applyAll keeps pivot crossing replacement on ordinary path" {
+    const allocator = testing.allocator;
+    const before = "abcdefghij";
+    var tm = try DeltaApplicator.init(allocator, before, try testOwnedZDelta(allocator, "XY", &.{
+        .{ .equal = 4 },
+        .{ .delete = 3 },
+        .{ .insert = .{ .offset = 0, .len = 2 } },
+        .{ .equal = 3 },
+    }));
+    defer tm.deinit();
+
+    tm.t_idx = 4;
+    tm.z_idx = 1;
+    const op = DeltaOp{ .delete = 3 };
+    try testing.expect(!try tm.applyAdjacentMutationPair(op));
+    try testing.expectEqual(@as(u32, 1), tm.z_idx);
+    try testing.expectEqual(@as(u32, 4), tm.t_idx);
+
+    try tm.applyAll();
+    try testing.expectEqualStrings("abcdXYhij", tm.view());
+}
