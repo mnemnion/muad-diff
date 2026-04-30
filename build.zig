@@ -42,8 +42,6 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
 
-    test_step.dependOn(&run_module_unit_tests.step);
-
     const corpus_contract_mod = b.createModule(.{
         .root_source_file = b.path("corpus/diff_contract.zig"),
         .target = target,
@@ -102,6 +100,15 @@ pub fn build(b: *std.Build) void {
         all_tests_mod.addImport("clap", clap_dep.module("clap"));
     }
 
+    const all_unit_tests = b.addTest(.{
+        .name = "all",
+        .root_module = all_tests_mod,
+        .filters = test_filters,
+    });
+
+    const run_all_unit_tests = b.addRunArtifact(all_unit_tests);
+    test_step.dependOn(&run_all_unit_tests.step);
+
     const muad_diff = b.addExecutable(.{
         .name = "muad-diff",
         .root_module = muaddiff_mod,
@@ -150,22 +157,6 @@ pub fn build(b: *std.Build) void {
     );
     delta_maker_step.dependOn(&run_delta_maker.step);
 
-    const mdiff_unit_tests = b.addTest(.{
-        .root_module = muaddiff_mod,
-        .filters = test_filters,
-    });
-
-    const run_mdiff_unit_tests = b.addRunArtifact(mdiff_unit_tests);
-    test_step.dependOn(&run_mdiff_unit_tests.step);
-
-    const delta_tool_unit_tests = b.addTest(.{
-        .root_module = delta_tool_mod,
-        .filters = test_filters,
-    });
-
-    const run_delta_tool_unit_tests = b.addRunArtifact(delta_tool_unit_tests);
-    test_step.dependOn(&run_delta_tool_unit_tests.step);
-
     const delta_maker_unit_tests = b.addTest(.{
         .root_module = delta_maker_mod,
         .filters = test_filters,
@@ -188,7 +179,6 @@ pub fn build(b: *std.Build) void {
 
     const corpus_step = b.step("corpus", "Run offline corpus-backed tests");
     corpus_step.dependOn(&run_corpus_unit_tests.step);
-    test_step.dependOn(&run_corpus_unit_tests.step);
     b.default_step = dmp_test_step;
 
     const refresh_corpus = b.addSystemCommand(&.{
