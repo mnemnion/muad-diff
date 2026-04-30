@@ -449,7 +449,7 @@ const ReviewDriver = struct {
             .change_number = preview.delta_index + 1,
             .text_index = preview.text_index,
             .effect = switch (preview.op.current) {
-                .insert => |insert| .{ .insert = driver.tm.effective.?.insert_text[insert.text.offset..][0..insert.text.len] },
+                .insert => |insert| .{ .insert = driver.tm.effective.?.text(insert.text) },
                 .delete => |span| .{ .delete = span.len() },
                 .equal => |span| .{ .equal = span.len() },
             },

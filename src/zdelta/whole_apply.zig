@@ -13,9 +13,7 @@ pub fn streamApply(zdelta: *const ZDelta, reader: *std.Io.Reader, writer: *std.I
             .equal => |len| try reader.streamExact(writer, len),
             .delete => |len| try reader.discardAll(len),
             .insert => |span| {
-                const offset: usize = span.offset;
-                const len: usize = span.len;
-                try writer.writeAll(zdelta.insert_text[offset..][0..len]);
+                try writer.writeAll(zdelta.text(span));
             },
         }
     }
@@ -306,9 +304,7 @@ pub const DeltaApplicator = struct {
 
     fn deltaInsertText(tm: *const DeltaApplicator, span: DeltaSpan) ![]const u8 {
         const zdelta = tm.zdelta.?;
-        const offset: usize = span.offset;
-        const len: usize = span.len;
-        return zdelta.insert_text[offset..][0..len];
+        return zdelta.text(span);
     }
 
     fn replacementStaysOnOneSide(tm: *const DeltaApplicator, start: u32, len: u32) bool {

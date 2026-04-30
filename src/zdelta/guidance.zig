@@ -1031,7 +1031,7 @@ pub const DeltaGuidanceSystem = struct {
     /// Slices the attached delta's insert-text payload for one raw insert op.
     fn deltaInsertText(gs: *const DeltaGuidanceSystem, span: DeltaSpan) Error![]const u8 {
         const attached = gs.attached_step orelse return error.MissingZDelta;
-        return attached.raw_delta.insert_text[span.offset..][0..span.len];
+        return attached.raw_delta.text(span);
     }
 
     /// Appends a decision record and returns its stable global id.
@@ -1714,7 +1714,7 @@ fn dumpZDeltaDiff(before: []const u8, zdelta: *const ZDelta) void {
                 std.debug.print("- {s}\n", .{slice});
             },
             .insert => |span| {
-                const slice = zdelta.insert_text[span.offset..][0..span.len];
+                const slice = zdelta.text(span);
                 std.debug.print("+ {s}\n", .{slice});
             },
         }

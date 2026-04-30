@@ -56,6 +56,10 @@ pub const ZDelta = struct {
     insert_text: []u8,
     ops: []DeltaOp,
 
+    pub fn text(delta: *const ZDelta, span: DeltaSpan) []const u8 {
+        return delta.insert_text[span.offset..][0..span.len];
+    }
+
     /// TODO: Given a delta which has been through a TextManager, return
     /// a delta which, when applied to the text at the state it was in
     /// when the delta was exhausted, will return it to the state it
