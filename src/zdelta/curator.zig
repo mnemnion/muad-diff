@@ -889,7 +889,7 @@ fn spanFromPreview(edit: EffectiveEdit) Span {
 }
 
 /// Error set reserved for Curator skeleton work.
-pub const Error = zdelta_mod.ZDeltaError || guidance_mod.Error || error{
+pub const Error = zdelta_mod.ZDeltaDecodeError || guidance_mod.Error || error{
     NotImplemented,
     NoActiveRevision,
     NoActiveHunk,

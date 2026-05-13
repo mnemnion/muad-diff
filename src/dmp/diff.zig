@@ -51,7 +51,8 @@ pub const DiffConfig = struct {
 };
 
 const ZDeltaVersion = zdelta_mod.ZDeltaVersion;
-pub const ZDeltaError = zdelta_mod.ZDeltaError;
+pub const ZDeltaEncodeError = zdelta_mod.ZDeltaEncodeError;
+pub const ZDeltaDecodeError = zdelta_mod.ZDeltaDecodeError;
 
 /// A single edit of a diff: insertion, deletion, or neither.
 pub const Edit = struct {
@@ -325,7 +326,7 @@ pub const Diff = struct {
         difference: *const Diff,
         allocator: Allocator,
         version: ZDeltaVersion,
-    ) ZDeltaError![]const u8 {
+    ) ZDeltaEncodeError![]const u8 {
         return zdelta_mod.encode(allocator, difference.edits, version);
     }
 
@@ -335,7 +336,7 @@ pub const Diff = struct {
         allocator: Allocator,
         before: []const u8,
         zdelta: []const u8,
-    ) ZDeltaError!*Diff {
+    ) ZDeltaDecodeError!*Diff {
         var edits = try zdelta_mod.toDiffList(Edit, DiffList, allocator, before, zdelta);
         errdefer deinitDiffList(allocator, &edits);
         if (difference.edits.items.len != 0) {

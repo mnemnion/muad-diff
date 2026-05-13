@@ -2105,7 +2105,7 @@ const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const OOM = std.mem.Allocator.Error;
-const TestError = Error || zdelta_mod.ZDeltaError || error{
+const TestError = Error || zdelta_mod.ZDeltaDecodeError || error{
     SkipZigTest,
     TestExpectedEqual,
     TestExpectedError,

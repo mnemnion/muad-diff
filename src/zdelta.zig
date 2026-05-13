@@ -13,23 +13,6 @@ pub const ZDeltaVersion = enum {
     b,
 };
 
-// TODO: Split these up by operation (e.g. decode, apply)
-
-/// Errors pertaining to ZDelta operations.
-pub const ZDeltaError = Allocator.Error || error{
-    BadZDeltaHeader,
-    UnknownZDeltaVersion,
-    BadZDeltaEscape,
-    BadZDeltaOperation,
-    BadZDeltaNumber,
-    ZDeltaLengthMismatch,
-    ZDeltaTooLarge,
-    ZDeltaTextLengthMismatch,
-    MissingZDelta,
-    UnresolvedZDeltaOp,
-    InvalidZDeltaText,
-};
-
 pub const DeltaSpan = common_apply.DeltaSpan;
 pub const DeltaOp = common_apply.DeltaOp;
 pub const DeltaApplicator = whole_apply_mod.DeltaApplicator;
@@ -56,6 +39,7 @@ pub const ZDelta = struct {
     insert_text: []u8,
     ops: []DeltaOp,
 
+    /// Obtain the text for a `DeltaSpan` (an `.insert` `DeltaOp`).
     pub fn text(delta: *const ZDelta, span: DeltaSpan) []const u8 {
         return delta.insert_text[span.offset..][0..span.len];
     }
@@ -171,13 +155,17 @@ pub const ZDelta = struct {
     }
 };
 
+pub const ZDeltaEncodeError = Allocator.Error || error{
+    InvalidZDeltaText,
+};
+
 /// Write a Diff in a zdelta format.  Currently supported are
 /// formats `.a` and `.b`, see documentation for more details.
 pub fn encode(
     allocator: Allocator,
     diffs: anytype,
     version: ZDeltaVersion,
-) ZDeltaError![]const u8 {
+) ZDeltaEncodeError![]const u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     const writer = &out.writer;
@@ -199,10 +187,25 @@ pub fn encode(
     return out.toOwnedSlice();
 }
 
+pub const ZDeltaDecodeError = Allocator.Error || error{
+    BadZDeltaHeader,
+    UnknownZDeltaVersion,
+    BadZDeltaEscape,
+    BadZDeltaOperation,
+    BadZDeltaNumber,
+    ZDeltaLengthMismatch,
+    ZDeltaTooLarge,
+    ZDeltaTextLengthMismatch,
+    MissingZDelta,
+    UnresolvedZDeltaOp,
+    InvalidZDeltaText,
+};
+
+/// Decode a zDelta string into a ZDelta object.
 pub fn decode(
     allocator: Allocator,
     zdelta: []const u8,
-) ZDeltaError!ZDelta {
+) ZDeltaDecodeError!ZDelta {
     const parsed = try parseHeader(zdelta);
     return switch (parsed.version) {
         .a => try decodeA(allocator, zdelta[parsed.body_start..]),
@@ -217,7 +220,7 @@ pub fn toDiffList(
     allocator: Allocator,
     before: []const u8,
     zdelta: []const u8,
-) ZDeltaError!DiffListType {
+) ZDeltaDecodeError!DiffListType {
     const parsed = try parseHeader(zdelta);
     return switch (parsed.version) {
         .a => try diffListFromA(EditType, DiffListType, allocator, before, zdelta[parsed.body_start..]),
@@ -319,7 +322,7 @@ fn writeBText(writer: anytype, text: []const u8) !usize {
     return written;
 }
 
-fn parseHeader(zdelta: []const u8) ZDeltaError!ParsedHeader {
+fn parseHeader(zdelta: []const u8) !ParsedHeader {
     var cursor: usize = 0;
     if (std.mem.startsWith(u8, zdelta, UTF8_BOM)) cursor += UTF8_BOM.len;
     if (!std.mem.startsWith(u8, zdelta[cursor..], zdelta_magic)) return error.BadZDeltaHeader;
@@ -351,7 +354,7 @@ fn diffListFromA(
     allocator: Allocator,
     before: []const u8,
     body: []const u8,
-) ZDeltaError!DiffListType {
+) ZDeltaDecodeError!DiffListType {
     var edits: DiffListType = .empty;
     errdefer deinitList(allocator, &edits);
     if (body.len == 0) {
@@ -379,7 +382,7 @@ fn diffListFromB(
     allocator: Allocator,
     before: []const u8,
     body: []const u8,
-) ZDeltaError!DiffListType {
+) ZDeltaDecodeError!DiffListType {
     var compact_storage: ?[]u8 = null;
     defer if (compact_storage) |compact| allocator.free(compact);
     const compact = compact: {
@@ -422,7 +425,7 @@ fn diffListFromB(
 fn decodeA(
     allocator: Allocator,
     body: []const u8,
-) ZDeltaError!ZDelta {
+) !ZDelta {
     var insert_text = ArrayList(u8).init(allocator);
     defer insert_text.deinit();
     var ops = ArrayList(DeltaOp).init(allocator);
@@ -465,7 +468,7 @@ fn decodeA(
 fn decodeB(
     allocator: Allocator,
     body: []const u8,
-) ZDeltaError!ZDelta {
+) !ZDelta {
     var compact_storage: ?[]u8 = null;
     defer if (compact_storage) |compact| allocator.free(compact);
     const compact = compact: {
@@ -532,7 +535,7 @@ fn appendField(
     pointer: *usize,
     field: []const u8,
     version: ZDeltaVersion,
-) ZDeltaError!void {
+) !void {
     const action = field[0];
     const payload = field[1..];
     switch (version) {
@@ -573,7 +576,7 @@ fn decodeField(
     ops: *ArrayList(DeltaOp),
     field: []const u8,
     version: ZDeltaVersion,
-) ZDeltaError!struct { u64, bool } {
+) !struct { u64, bool } {
     const action = field[0];
     const payload = field[1..];
     switch (version) {
@@ -622,7 +625,7 @@ fn decodeField(
     }
 }
 
-fn parseDecodeCount(payload: []const u8) ZDeltaError!struct { u32, bool } {
+fn parseDecodeCount(payload: []const u8) ZDeltaDecodeError!struct { u32, bool } {
     const parsed = std.fmt.parseInt(u64, payload, 16) catch |err| switch (err) {
         error.Overflow => return .{ std.math.maxInt(u32), true },
         error.InvalidCharacter => return error.BadZDeltaNumber,
@@ -659,7 +662,7 @@ fn appendCountEdit(
     pointer: *usize,
     payload: []const u8,
     operation: anytype,
-) ZDeltaError!void {
+) !void {
     const len = try parseCount(payload);
     if (pointer.* + len < pointer.* or pointer.* + len > before.len) return error.ZDeltaLengthMismatch;
     try edits.append(allocator, EditType{
@@ -785,7 +788,7 @@ fn testBadToDiffListCase(
     allocator: Allocator,
     before: []const u8,
     delta: []const u8,
-    expected: ZDeltaError,
+    expected: ZDeltaDecodeError,
 ) anyerror!void {
     try testing.expectError(expected, toDiffList(TestEdit, TestDiffList, allocator, before, delta));
 }
@@ -833,7 +836,7 @@ fn testDecodeCase(
 fn testBadDecodeReifiedCase(
     allocator: Allocator,
     zdelta: []const u8,
-    expected: ZDeltaError,
+    expected: ZDeltaDecodeError,
 ) anyerror!void {
     try testing.expectError(expected, decode(allocator, zdelta));
 }
