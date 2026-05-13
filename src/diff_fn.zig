@@ -468,7 +468,10 @@ pub fn DiffFn(config: anytype) type {
             short_text: []const u8,
             i: usize,
         ) DiffError!?HalfMatchResult {
-            const seed = long_text[i .. i + long_text.len / 4];
+            const seed_start = fixSplitForward(long_text, i);
+            const seed_end = fixSplitBackward(long_text, @min(long_text.len, seed_start + long_text.len / 4));
+            if (seed_end <= seed_start) return null;
+            const seed = long_text[seed_start..seed_end];
             var j: isize = -1;
 
             var best_common: []const u8 = "";
@@ -481,12 +484,12 @@ pub fn DiffFn(config: anytype) type {
                 j = u2i(std.mem.indexOf(u8, short_text[i2u(j + 1)..], seed) orelse break :b false) + j + 1;
                 break :b true;
             }) {
-                const prefix_length = diffCommonPrefix(long_text[i..], short_text[@as(usize, @intCast(j))..]);
-                const suffix_length = diffCommonSuffix(long_text[0..i], short_text[0..@as(usize, @intCast(j))]);
+                const prefix_length = diffCommonPrefix(long_text[seed_start..], short_text[@as(usize, @intCast(j))..]);
+                const suffix_length = diffCommonSuffix(long_text[0..seed_start], short_text[0..@as(usize, @intCast(j))]);
                 if (best_common.len < suffix_length + prefix_length) {
                     best_common = short_text[i2u(j - u2i(suffix_length)) .. i2u(j) + prefix_length];
-                    best_long_text_a = long_text[0 .. i - suffix_length];
-                    best_long_text_b = long_text[i + prefix_length ..];
+                    best_long_text_a = long_text[0 .. seed_start - suffix_length];
+                    best_long_text_b = long_text[seed_start + prefix_length ..];
                     best_short_text_a = short_text[0..i2u(j - u2i(suffix_length))];
                     best_short_text_b = short_text[i2u(j + u2i(prefix_length))..];
                 }
@@ -2034,6 +2037,18 @@ test "DiffFn diffHalfMatch" {
     try testing.checkAllAllocationFailures(testing.allocator, testDiffFnHalfMatch, .{TestHalfMatch{ .config = one_timeout, .before = "x-=-=-=-=-=-=-=-=-=-=-=-=", .after = "xx-=-=-=-=-=-=-=", .expected = .{ .prefix_before = "", .suffix_before = "-=-=-=-=-=", .prefix_after = "x", .suffix_after = "", .common_middle = "x-=-=-=-=-=-=-=" } }});
     try testing.checkAllAllocationFailures(testing.allocator, testDiffFnHalfMatch, .{TestHalfMatch{ .config = one_timeout, .before = "-=-=-=-=-=-=-=-=-=-=-=-=y", .after = "-=-=-=-=-=-=-=yy", .expected = .{ .prefix_before = "-=-=-=-=-=", .suffix_before = "", .prefix_after = "", .suffix_after = "y", .common_middle = "-=-=-=-=-=-=-=y" } }});
     try testing.checkAllAllocationFailures(testing.allocator, testDiffFnHalfMatch, .{TestHalfMatch{ .config = one_timeout, .before = "qHilloHelloHew", .after = "xHelloHeHulloy", .expected = .{ .prefix_before = "qHillo", .suffix_before = "w", .prefix_after = "x", .suffix_after = "Hulloy", .common_middle = "HelloHe" } }});
+    try testDiffFnHalfMatch(testing.allocator, .{
+        .config = one_timeout,
+        .before = "\u{92b}\u{917}\u{914}\u{93b}\u{940}\u{907}",
+        .after = "\u{92b}\u{997}\u{914}\u{93b}\u{940}\u{97d}",
+        .expected = .{
+            .prefix_before = "\u{92b}\u{917}",
+            .suffix_before = "\u{907}",
+            .prefix_after = "\u{92b}\u{997}",
+            .suffix_after = "\u{97d}",
+            .common_middle = "\u{914}\u{93b}\u{940}",
+        },
+    });
     try testing.checkAllAllocationFailures(testing.allocator, testDiffFnHalfMatch, .{TestHalfMatch{
         .config = blk: {
             var cfg: DiffConfig = .default;
