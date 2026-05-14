@@ -1,12 +1,11 @@
 //! Contract for the checked-in diff corpus.
 //!
-//! The `.wiki` fixtures and `.zdset` batches under `corpus/diff` are currently
-//! a development-time contract for `delta-tool` and friends. The data stays in
-//! the corpus tree, but the policy for finding and interpreting it lives here
-//! so callers do not each grow their own idea of "the corpus layout".
+//! The `.wiki` fixtures and `.zdset` batches under `corpus/diff` are checked-in
+//! development fixtures. The data stays in the corpus tree, but the policy for
+//! finding and interpreting it lives here so callers do not each grow their own
+//! idea of "the corpus layout".
 
 pub const corpus_diff_root = "corpus/diff";
-pub const default_runs_path = corpus_diff_root ++ "/delta_tool.runs";
 
 pub const CorpusRevision = struct {
     ordinal: usize,

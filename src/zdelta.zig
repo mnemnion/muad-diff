@@ -17,22 +17,6 @@ pub const DeltaSpan = common_apply.DeltaSpan;
 pub const DeltaOp = common_apply.DeltaOp;
 pub const DeltaApplicator = whole_apply_mod.DeltaApplicator;
 pub const streamApply = whole_apply_mod.streamApply;
-pub const Span = guidance_mod.Span;
-pub const TargetClass = guidance_mod.TargetClass;
-pub const ExpectedTarget = guidance_mod.ExpectedTarget;
-pub const EffectiveTarget = guidance_mod.EffectiveTarget;
-pub const ApplyResolution = guidance_mod.ApplyResolution;
-pub const DecisionIndex = guidance_mod.DecisionIndex;
-pub const AnomalyIndex = guidance_mod.AnomalyIndex;
-pub const ProvenanceRef = guidance_mod.ProvenanceRef;
-pub const DecisionRecord = guidance_mod.DecisionRecord;
-pub const AnomalyRecord = guidance_mod.AnomalyRecord;
-pub const EffectiveEdit = guidance_mod.EffectiveEdit;
-pub const CorrectionRegion = guidance_mod.CorrectionRegion;
-pub const CorrectionNode = guidance_mod.CorrectionNode;
-pub const AttachedStepState = guidance_mod.AttachedStepState;
-pub const Step = guidance_mod.Step;
-pub const DeltaGuidanceSystem = guidance_mod.DeltaGuidanceSystem;
 
 pub const ZDelta = struct {
     version: ZDeltaVersion,
@@ -1119,7 +1103,6 @@ test "ZDelta totalChange handles large values" {
 
 comptime {
     testing.refAllDecls(whole_apply_mod);
-    testing.refAllDecls(guidance_mod);
 }
 
 const TestEdit = struct {
@@ -1157,7 +1140,6 @@ const ArrayList = std.array_list.Managed;
 const testing = std.testing;
 const common_apply = @import("zdelta/common.zig");
 const whole_apply_mod = @import("zdelta/whole_apply.zig");
-const guidance_mod = @import("zdelta/guidance.zig");
 const dmp = @import("dmp.zig");
 const Edit = dmp.Edit;
 const common = @import("dmp/common.zig");

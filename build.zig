@@ -55,14 +55,6 @@ pub fn build(b: *std.Build) void {
     });
     muaddiff_mod.addImport("dmp", dmp_module);
 
-    const delta_tool_mod = b.createModule(.{
-        .root_source_file = b.path("src/delta_tool.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    delta_tool_mod.addImport("dmp", dmp_module);
-    delta_tool_mod.addImport("corpus_contract", corpus_contract_mod);
-
     const delta_maker_mod = b.createModule(.{
         .root_source_file = b.path("tools/delta_maker.zig"),
         .target = target,
@@ -77,20 +69,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     all_tests_mod.addImport("corpus_contract", corpus_contract_mod);
-
-    const ztap_dep = b.dependency("ztap", .{
-        .target = b.graph.host,
-        .optimize = optimize,
-        .timed = true,
-    });
-
-    if (b.lazyDependency("obelizmo", .{
-        .target = target,
-        .optimize = optimize,
-    })) |obelizmo_dep| {
-        delta_tool_mod.addImport("obelizmo", obelizmo_dep.module("obelizmo"));
-        all_tests_mod.addImport("obelizmo", obelizmo_dep.module("obelizmo"));
-    }
 
     if (b.lazyDependency("clap", .{
         .target = target,
@@ -125,22 +103,6 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the muad-diff CLI");
     run_step.dependOn(&run_cmd.step);
 
-    const delta_tool = b.addExecutable(.{
-        .name = "delta-tool",
-        .root_module = delta_tool_mod,
-    });
-
-    b.installArtifact(delta_tool);
-
-    const run_delta_tool = b.addRunArtifact(delta_tool);
-    run_delta_tool.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_delta_tool.addArgs(args);
-    }
-
-    const delta_tool_step = b.step("delta-tool", "Run the specialized interactive zdelta corpus tool");
-    delta_tool_step.dependOn(&run_delta_tool.step);
-
     const delta_maker = b.addExecutable(.{
         .name = "delta-maker",
         .root_module = delta_maker_mod,
@@ -164,18 +126,6 @@ pub fn build(b: *std.Build) void {
 
     const run_delta_maker_unit_tests = b.addRunArtifact(delta_maker_unit_tests);
     test_step.dependOn(&run_delta_maker_unit_tests.step);
-
-    const ztap_unit_tests = b.addTest(.{
-        .name = "ztap-all",
-        .root_module = all_tests_mod,
-        .filters = test_filters,
-        .test_runner = .{ .path = ztap_dep.namedLazyPath("runner"), .mode = .simple },
-    });
-    ztap_unit_tests.root_module.addImport("ztap", ztap_dep.module("ztap"));
-    const run_ztap_unit_tests = b.addRunArtifact(ztap_unit_tests);
-
-    const ztap_step = b.step("ztap", "Run tests with ZTAP");
-    ztap_step.dependOn(&run_ztap_unit_tests.step);
 
     const corpus_step = b.step("corpus", "Run offline corpus-backed tests");
     corpus_step.dependOn(&run_corpus_unit_tests.step);

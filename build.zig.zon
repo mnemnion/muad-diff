@@ -13,14 +13,6 @@
             .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.12.0.tar.gz",
             .hash = "clap-0.12.0-oBajB7foAQDqlSwaSG5g0yq7xGbQARUsBk5T64gAOqP5",
         },
-        .obelizmo = .{
-            .url = "https://github.com/mnemnion/obelizmo/archive/refs/tags/v0.2.2.tar.gz",
-            .hash = "obelizmo-0.2.2-ACZjRi6zAQBzkFwxQQKoVKWX8jJpy4SRpOaCDLPK16VH",
-        },
-        .ztap = .{
-            .url = "https://github.com/mnemnion/ztap/archive/refs/tags/v0.9.6.tar.gz",
-            .hash = "ztap-0.9.6-2runTcJZAAAGbmsi7tkHaVGweQCg2LncF_LSsAnvAMvs",
-        },
     },
 
     .paths = .{
