@@ -36,6 +36,7 @@ pub const Patch = @import("dmp/Patch.zig");
 test {
     _ = Diff;
     _ = DiffFn(.{});
+    _ = diff_fn_mod.TestDiff;
     _ = DiffContext;
     _ = Patch;
 }
