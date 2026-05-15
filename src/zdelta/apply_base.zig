@@ -110,6 +110,12 @@ test "ensureHeadRoom grows and rebases when head slack is short" {
     try testing.checkAllAllocationFailures(testing.allocator, testEnsureHeadRoom, .{});
 }
 
+test "initialSlack rounds odd slack up to keep room balanced" {
+    try testing.expectEqual(@as(usize, 0), try initialSlack(0));
+    try testing.expectEqual(@as(usize, 2), try initialSlack(1));
+    try testing.expectEqual(@as(usize, 2), try initialSlack(6));
+}
+
 const std = @import("std");
 const common = @import("../dmp/common.zig");
 const dbgassert = common.dbgassert;
