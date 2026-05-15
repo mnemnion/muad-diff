@@ -381,7 +381,6 @@ test "corpus revision pairs satisfy diff and patch invariants" {
         var config: DiffConfig = .default;
         config.check_line_threshold = 1024 * 1024;
         config.check_lines = false;
-        config.timeout = 0;
         break :blk config;
     };
     const patch_config: PatchConfig = .default;
@@ -413,7 +412,6 @@ test "corpus revision invariants (line mode)" {
         var config: DiffConfig = .default;
         config.check_line_threshold = 10;
         config.check_lines = true;
-        config.timeout = 0;
         break :blk config;
     };
     const patch_config: PatchConfig = .default;

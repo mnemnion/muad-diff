@@ -9,8 +9,6 @@
 //! when finished with `diff.deinit(allocator)`.
 //!
 //! `DiffConfig` controls how the diff is produced:
-//! - `timeout` is the maximum number of milliseconds to spend computing a diff;
-//!   `0` means no timeout.
 //! - `edit_cost` tunes the efficiency cleanup heuristics.
 //! - `check_lines` enables the initial line-mode speedup for large inputs.
 //! - `check_line_threshold` sets the minimum input size for that speedup.
@@ -27,8 +25,6 @@
 
 /// The configurable parameters for a Diff object.
 pub const DiffConfig = struct {
-    /// Number of milliseconds to map a diff before giving up (0 for infinity).
-    timeout: u64,
     /// Cost of an empty edit operation in terms of edit characters.  Higher
     /// values lead to fewer, larger edit chunks.
     edit_cost: u16,
@@ -39,11 +35,9 @@ pub const DiffConfig = struct {
     /// Ignored if check_lines is `false`.
     check_line_threshold: u32,
 
-    /// Reasonable defaults for diffing: a five second timeout, use of
-    /// line mode in most cases (4K strings), an edit cost which prevents
-    /// most chaff.
+    /// Reasonable defaults for diffing: use line mode in most cases (4K
+    /// strings), with an edit cost which prevents most chaff.
     pub const default: DiffConfig = .{
-        .timeout = 5000,
         .edit_cost = 4,
         .check_lines = true,
         .check_line_threshold = 4096,

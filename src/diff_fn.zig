@@ -200,7 +200,7 @@ pub fn DiffFn(config: anytype) type {
                 deinitDiffList(allocator, &difference.edits);
                 difference.edits = .empty;
             }
-            difference.edits = try difference.diffLine(allocator, before, after, std.math.maxInt(u64));
+            difference.edits = try difference.diffLine(allocator, before, after);
             return difference;
         }
 
@@ -344,23 +344,15 @@ pub fn DiffFn(config: anytype) type {
             before: []const u8,
             after: []const u8,
         ) DiffError!DiffList {
-            const deadline = std.math.maxInt(u64);
-            // Timeout clocking needs an explicit Zig 0.16 Io design.
-            // const deadline = if (difference.config.timeout == 0)
-            //     std.math.maxInt(u64)
-            // else
-            //     @as(u64, @intCast(std.time.milliTimestamp())) + difference.config.timeout;
-            return difference.diffInternal(allocator, before, after, deadline);
+            return difference.diffInternal(allocator, before, after);
         }
 
-        /// Internal diff entrypoint which carries the computed deadline through
-        /// the recursive diff pipeline.
+        /// Internal diff entrypoint used by recursive diff paths.
         fn diffInternal(
             difference: *Diff,
             allocator: Allocator,
             before: []const u8,
             after: []const u8,
-            deadline: u64,
         ) DiffError!DiffList {
             if (std.mem.eql(u8, before, after)) {
                 var diffs: DiffList = .empty;
@@ -382,7 +374,7 @@ pub fn DiffFn(config: anytype) type {
             trimmed_before = trimmed_before[0 .. trimmed_before.len - common_length];
             trimmed_after = trimmed_after[0 .. trimmed_after.len - common_length];
 
-            var diffs = try difference.diffCompute(allocator, trimmed_before, trimmed_after, deadline);
+            var diffs = try difference.diffCompute(allocator, trimmed_before, trimmed_after);
             errdefer deinitDiffList(allocator, &diffs);
 
             if (common_prefix.len != 0) {
@@ -404,7 +396,6 @@ pub fn DiffFn(config: anytype) type {
             allocator: Allocator,
             before: []const u8,
             after: []const u8,
-            deadline: u64,
         ) DiffError!DiffList {
             if (before.len == 0) {
                 var diffs: DiffList = .empty;
@@ -447,11 +438,11 @@ pub fn DiffFn(config: anytype) type {
                 return diffs;
             }
 
-            var maybe_half_match = try difference.diffHalfMatch(allocator, before, after);
+            var maybe_half_match = try difference.diffHalfMatch(before, after);
             if (maybe_half_match) |*half_match| {
-                var diffs = try difference.diffInternal(allocator, half_match.prefix_before, half_match.prefix_after, deadline);
+                var diffs = try difference.diffInternal(allocator, half_match.prefix_before, half_match.prefix_after);
                 errdefer deinitDiffList(allocator, &diffs);
-                var diffs_b = try difference.diffInternal(allocator, half_match.suffix_before, half_match.suffix_after, deadline);
+                var diffs_b = try difference.diffInternal(allocator, half_match.suffix_before, half_match.suffix_after);
                 defer diffs_b.deinit(allocator);
                 errdefer {
                     for (diffs_b.items) |*edit| edit.deinit(allocator);
@@ -468,21 +459,18 @@ pub fn DiffFn(config: anytype) type {
                 before.len > difference.config.check_line_threshold and
                 after.len > difference.config.check_line_threshold)
             {
-                return difference.diffLineMode(allocator, before, after, deadline);
+                return difference.diffLineMode(allocator, before, after);
             }
-            return difference.diffBisect(allocator, before, after, deadline);
+            return difference.diffBisect(allocator, before, after);
         }
 
         /// Check whether the problem can be split in two around a large common
         /// middle block.
         fn diffHalfMatch(
             difference: *Diff,
-            allocator: Allocator,
             before: []const u8,
             after: []const u8,
         ) DiffError!?HalfMatchResult {
-            _ = allocator;
-            if (difference.config.timeout == 0) return null;
             const long_text = if (before.len > after.len) before else after;
             const short_text = if (before.len > after.len) after else before;
             if (long_text.len < 4 or short_text.len * 2 < long_text.len) return null;
@@ -577,7 +565,6 @@ pub fn DiffFn(config: anytype) type {
             allocator: Allocator,
             before: []const u8,
             after: []const u8,
-            deadline: u64,
         ) DiffError!DiffList {
             const before_length: isize = @intCast(before.len);
             const after_length: isize = @intCast(after.len);
@@ -610,10 +597,6 @@ pub fn DiffFn(config: anytype) type {
 
             var d: isize = 0;
             while (d < max_d) : (d += 1) {
-                if (deadline == 0) break;
-                // Timeout clocking needs an explicit Zig 0.16 Io design.
-                // if (@as(u64, @intCast(std.time.milliTimestamp())) > deadline) break;
-
                 var k1 = -d + k1start;
                 while (k1 <= d - k1end) : (k1 += 2) {
                     const k1_offset = v_offset + k1;
@@ -640,7 +623,7 @@ pub fn DiffFn(config: anytype) type {
                         if (k2_offset >= 0 and k2_offset < v_length and v2.items[i2u(k2_offset)] != -1) {
                             const x2 = before_length - v2.items[i2u(k2_offset)];
                             if (x1 >= x2) {
-                                return difference.diffBisectSplit(allocator, before, after, x1, y1, deadline);
+                                return difference.diffBisectSplit(allocator, before, after, x1, y1);
                             }
                         }
                     }
@@ -674,7 +657,7 @@ pub fn DiffFn(config: anytype) type {
                             const y1 = v_offset + x1 - k1_offset;
                             x2 = before_length - v2.items[i2u(k2_offset)];
                             if (x1 >= x2) {
-                                return difference.diffBisectSplit(allocator, before, after, x1, y1, deadline);
+                                return difference.diffBisectSplit(allocator, before, after, x1, y1);
                             }
                         }
                     }
@@ -698,7 +681,6 @@ pub fn DiffFn(config: anytype) type {
             text2: []const u8,
             x: isize,
             y: isize,
-            deadline: u64,
         ) DiffError!DiffList {
             const x1 = fixSplitForward(text1, @intCast(x));
             const y1 = fixSplitBackward(text2, @intCast(y));
@@ -724,9 +706,9 @@ pub fn DiffFn(config: anytype) type {
             }
 
             var text_mode = difference.copyForTextMode();
-            var diffs = try text_mode.diffInternal(allocator, text1a, text2a, deadline);
+            var diffs = try text_mode.diffInternal(allocator, text1a, text2a);
             errdefer deinitDiffList(allocator, &diffs);
-            var diffs_b = try text_mode.diffInternal(allocator, text1b, text2b, deadline);
+            var diffs_b = try text_mode.diffInternal(allocator, text1b, text2b);
             defer diffs_b.deinit(allocator);
             errdefer for (diffs_b.items) |*edit| edit.deinit(allocator);
             try diffs.appendSlice(allocator, diffs_b.items);
@@ -740,11 +722,10 @@ pub fn DiffFn(config: anytype) type {
             allocator: Allocator,
             text1_in: []const u8,
             text2_in: []const u8,
-            deadline: u64,
         ) DiffError!DiffList {
-            var diffs = try difference.diffLine(allocator, text1_in, text2_in, deadline);
+            var diffs = try difference.diffLine(allocator, text1_in, text2_in);
             errdefer deinitDiffList(allocator, &diffs);
-            return difference.diffLineCleanup(&diffs, allocator, text1_in, text2_in, deadline);
+            return difference.diffLineCleanup(&diffs, allocator, text1_in, text2_in);
         }
 
         /// Perform only the iterator-based diff speedup, returning what we get.
@@ -753,13 +734,12 @@ pub fn DiffFn(config: anytype) type {
             allocator: Allocator,
             text1_in: []const u8,
             text2_in: []const u8,
-            deadline: u64,
         ) DiffError!DiffList {
             var text_mode = difference.copyForTextMode();
             var a = try difference.diffLinesToChars(allocator, text1_in, text2_in);
             defer a.deinit(allocator);
             var diffs: DiffList = diff_munge: {
-                var char_diffs = try text_mode.diffInternal(allocator, a.chars_1, a.chars_2, deadline);
+                var char_diffs = try text_mode.diffInternal(allocator, a.chars_1, a.chars_2);
                 defer deinitDiffList(allocator, &char_diffs);
                 break :diff_munge try diffCharsToLines(allocator, &char_diffs, a.line_array.items, text1_in, text2_in);
             };
@@ -776,7 +756,6 @@ pub fn DiffFn(config: anytype) type {
             allocator: Allocator,
             text1_in: []const u8,
             text2_in: []const u8,
-            deadline: u64,
         ) DiffError!DiffList {
             var text_mode = difference.copyForTextMode();
             try diffs.append(allocator, Edit.asBorrow(.equal, ""));
@@ -813,7 +792,7 @@ pub fn DiffFn(config: anytype) type {
                                 if (edit.operation != .insert) before_cursor += edit.text.len;
                                 if (edit.operation != .delete) after_cursor += edit.text.len;
                             }
-                            var sub_diff = try text_mode.diffInternal(allocator, delete_run, insert_run, deadline);
+                            var sub_diff = try text_mode.diffInternal(allocator, delete_run, insert_run);
                             {
                                 errdefer deinitDiffList(allocator, &sub_diff);
                                 try diffs.ensureUnusedCapacity(allocator, sub_diff.items.len);
@@ -1727,7 +1706,6 @@ const TBisect = struct {
     config: DiffConfig,
     before: []const u8,
     after: []const u8,
-    deadline: u64,
     expected: []const Edit,
 };
 
@@ -1739,11 +1717,10 @@ const TDiff = struct {
 };
 
 fn testDiffFnHalfMatch(
-    allocator: Allocator,
     params: TestHalfMatch,
 ) !void {
     var difference = DefaultDiff.init(params.config);
-    const maybe_result = try difference.diffHalfMatch(allocator, params.before, params.after);
+    const maybe_result = try difference.diffHalfMatch(params.before, params.after);
     try testing.expectEqualDeep(params.expected, maybe_result);
 }
 
@@ -1756,11 +1733,7 @@ fn testDiffFnHalfMatchLeak(allocator: Allocator) !void {
 }
 
 fn testDiffFnHalfMatchAppendFailureCleanup(allocator: Allocator) !void {
-    const config: DiffConfig = blk: {
-        var cfg: DiffConfig = .default;
-        cfg.timeout = 1;
-        break :blk cfg;
-    };
+    const config: DiffConfig = .default;
     const before_text =
         "left-before:" ++
         "COMMON-COMMON-COMMON-COMMON-COMMON-COMMON-" ++
@@ -1774,7 +1747,6 @@ fn testDiffFnHalfMatchAppendFailureCleanup(allocator: Allocator) !void {
         allocator,
         before_text,
         after_text,
-        std.math.maxInt(u64),
     );
     defer deinitDiffList(allocator, &diffs);
 
@@ -1794,7 +1766,6 @@ fn testDiffFnLineCleanupFailureCleanup(allocator: Allocator) !void {
         allocator,
         "alpha\nbeta\ngamma\ndelta\nalpha\nbeta\ngamma\ndelta\n",
         "alpha\nbeta\nGAMMA\ndelta\nalpha\nbeta\nGAMMA\ndelta\n",
-        std.math.maxInt(u64),
     );
     defer deinitDiffList(allocator, &diffs);
 
@@ -1820,11 +1791,7 @@ test "DiffFn targeted allocation failures clean up partial diff lists" {
         after: []const u8,
     }{
         .{
-            .config = blk: {
-                var cfg: DiffConfig = .default;
-                cfg.timeout = 1;
-                break :blk cfg;
-            },
+            .config = .default,
             .before = "121231234123451234123121",
             .after = "a1234123451234z",
         },
@@ -2152,7 +2119,7 @@ fn testDiffFnBisect(
     params: TBisect,
 ) !void {
     var difference = DefaultDiff.init(params.config);
-    var diffs = try difference.diffBisect(allocator, params.before, params.after, params.deadline);
+    var diffs = try difference.diffBisect(allocator, params.before, params.after);
     defer deinitDiffList(allocator, &diffs);
     try expectEqualDiff(params.expected, diffs.items);
 }
@@ -2166,7 +2133,7 @@ fn testDiffFnBisectSplitCase(
     y: isize,
 ) !void {
     var difference = DefaultDiff.init(config);
-    var diffs = try difference.diffBisectSplit(allocator, text1, text2, x, y, std.math.maxInt(i64));
+    var diffs = try difference.diffBisectSplit(allocator, text1, text2, x, y);
     defer deinitDiffList(allocator, &diffs);
 }
 
@@ -2187,7 +2154,6 @@ fn testDiffFnLineMode(
 ) !void {
     const checked_config: DiffConfig = blk: {
         var config: DiffConfig = .default;
-        config.timeout = 0;
         config.check_lines = true;
         config.check_line_threshold = threshold;
         break :blk config;
@@ -2264,7 +2230,6 @@ test "DiffFn lifecycle" {
 
     {
         const options: DiffConfig = .{
-            .timeout = 0,
             .edit_cost = 9,
             .check_lines = false,
             .check_line_threshold = 33,
@@ -2275,9 +2240,7 @@ test "DiffFn lifecycle" {
     }
 
     {
-        var options: DiffConfig = .default;
-        options.timeout = 0;
-        var diff_obj = DefaultDiff.init(options);
+        var diff_obj = DefaultDiff.init(.default);
         defer diff_obj.deinit(allocator);
         _ = try diff_obj.diff(allocator, "cat", "coat");
         var cloned = try diff_obj.clone(allocator);
@@ -2287,9 +2250,7 @@ test "DiffFn lifecycle" {
     }
 
     {
-        var options: DiffConfig = .default;
-        options.timeout = 0;
-        var diff_obj = DefaultDiff.init(options);
+        var diff_obj = DefaultDiff.init(.default);
         defer diff_obj.deinit(allocator);
         _ = try diff_obj.diff(allocator, "abc", "axc");
         var copied = try diff_obj.copy(allocator);
@@ -2307,9 +2268,7 @@ test "DiffFn lifecycle" {
     }
 
     {
-        var options: DiffConfig = .default;
-        options.timeout = 0;
-        var diff_obj = DefaultDiff.init(options);
+        var diff_obj = DefaultDiff.init(.default);
         _ = try diff_obj.diff(allocator, "abc", "axc");
         try testing.expect(diff_obj.edits.items.len != 0);
         diff_obj.deinit(allocator);
@@ -2317,9 +2276,7 @@ test "DiffFn lifecycle" {
     }
 
     {
-        var options: DiffConfig = .default;
-        options.timeout = 0;
-        var diff_obj = DefaultDiff.init(options);
+        var diff_obj = DefaultDiff.init(.default);
         defer diff_obj.deinit(allocator);
         _ = try diff_obj.diff(allocator, "abc", "axc");
         const first_len = diff_obj.edits.items.len;
@@ -2355,24 +2312,18 @@ test "DiffFn diffHalfMatch leak regression test" {
 }
 
 test "DiffFn diffHalfMatch" {
-    const one_timeout: DiffConfig = blk: {
-        var config: DiffConfig = .default;
-        config.timeout = 1;
-        break :blk config;
-    };
-
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnHalfMatch, .{TestHalfMatch{ .config = one_timeout, .before = "1234567890", .after = "abcdef", .expected = null }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnHalfMatch, .{TestHalfMatch{ .config = one_timeout, .before = "12345", .after = "23", .expected = null }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnHalfMatch, .{TestHalfMatch{ .config = one_timeout, .before = "1234567890", .after = "a345678z", .expected = .{ .prefix_before = "12", .suffix_before = "90", .prefix_after = "a", .suffix_after = "z", .common_middle = "345678" } }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnHalfMatch, .{TestHalfMatch{ .config = one_timeout, .before = "a345678z", .after = "1234567890", .expected = .{ .prefix_before = "a", .suffix_before = "z", .prefix_after = "12", .suffix_after = "90", .common_middle = "345678" } }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnHalfMatch, .{TestHalfMatch{ .config = one_timeout, .before = "abc56789z", .after = "1234567890", .expected = .{ .prefix_before = "abc", .suffix_before = "z", .prefix_after = "1234", .suffix_after = "0", .common_middle = "56789" } }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnHalfMatch, .{TestHalfMatch{ .config = one_timeout, .before = "a23456xyz", .after = "1234567890", .expected = .{ .prefix_before = "a", .suffix_before = "xyz", .prefix_after = "1", .suffix_after = "7890", .common_middle = "23456" } }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnHalfMatch, .{TestHalfMatch{ .config = one_timeout, .before = "121231234123451234123121", .after = "a1234123451234z", .expected = .{ .prefix_before = "12123", .suffix_before = "123121", .prefix_after = "a", .suffix_after = "z", .common_middle = "1234123451234" } }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnHalfMatch, .{TestHalfMatch{ .config = one_timeout, .before = "x-=-=-=-=-=-=-=-=-=-=-=-=", .after = "xx-=-=-=-=-=-=-=", .expected = .{ .prefix_before = "", .suffix_before = "-=-=-=-=-=", .prefix_after = "x", .suffix_after = "", .common_middle = "x-=-=-=-=-=-=-=" } }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnHalfMatch, .{TestHalfMatch{ .config = one_timeout, .before = "-=-=-=-=-=-=-=-=-=-=-=-=y", .after = "-=-=-=-=-=-=-=yy", .expected = .{ .prefix_before = "-=-=-=-=-=", .suffix_before = "", .prefix_after = "", .suffix_after = "y", .common_middle = "-=-=-=-=-=-=-=y" } }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnHalfMatch, .{TestHalfMatch{ .config = one_timeout, .before = "qHilloHelloHew", .after = "xHelloHeHulloy", .expected = .{ .prefix_before = "qHillo", .suffix_before = "w", .prefix_after = "x", .suffix_after = "Hulloy", .common_middle = "HelloHe" } }});
-    try testDiffFnHalfMatch(testing.allocator, .{
-        .config = one_timeout,
+    try testDiffFnHalfMatch(.{ .config = .default, .before = "1234567890", .after = "abcdef", .expected = null });
+    try testDiffFnHalfMatch(.{ .config = .default, .before = "12345", .after = "23", .expected = null });
+    try testDiffFnHalfMatch(.{ .config = .default, .before = "1234567890", .after = "a345678z", .expected = .{ .prefix_before = "12", .suffix_before = "90", .prefix_after = "a", .suffix_after = "z", .common_middle = "345678" } });
+    try testDiffFnHalfMatch(.{ .config = .default, .before = "a345678z", .after = "1234567890", .expected = .{ .prefix_before = "a", .suffix_before = "z", .prefix_after = "12", .suffix_after = "90", .common_middle = "345678" } });
+    try testDiffFnHalfMatch(.{ .config = .default, .before = "abc56789z", .after = "1234567890", .expected = .{ .prefix_before = "abc", .suffix_before = "z", .prefix_after = "1234", .suffix_after = "0", .common_middle = "56789" } });
+    try testDiffFnHalfMatch(.{ .config = .default, .before = "a23456xyz", .after = "1234567890", .expected = .{ .prefix_before = "a", .suffix_before = "xyz", .prefix_after = "1", .suffix_after = "7890", .common_middle = "23456" } });
+    try testDiffFnHalfMatch(.{ .config = .default, .before = "121231234123451234123121", .after = "a1234123451234z", .expected = .{ .prefix_before = "12123", .suffix_before = "123121", .prefix_after = "a", .suffix_after = "z", .common_middle = "1234123451234" } });
+    try testDiffFnHalfMatch(.{ .config = .default, .before = "x-=-=-=-=-=-=-=-=-=-=-=-=", .after = "xx-=-=-=-=-=-=-=", .expected = .{ .prefix_before = "", .suffix_before = "-=-=-=-=-=", .prefix_after = "x", .suffix_after = "", .common_middle = "x-=-=-=-=-=-=-=" } });
+    try testDiffFnHalfMatch(.{ .config = .default, .before = "-=-=-=-=-=-=-=-=-=-=-=-=y", .after = "-=-=-=-=-=-=-=yy", .expected = .{ .prefix_before = "-=-=-=-=-=", .suffix_before = "", .prefix_after = "", .suffix_after = "y", .common_middle = "-=-=-=-=-=-=-=y" } });
+    try testDiffFnHalfMatch(.{ .config = .default, .before = "qHilloHelloHew", .after = "xHelloHeHulloy", .expected = .{ .prefix_before = "qHillo", .suffix_before = "w", .prefix_after = "x", .suffix_after = "Hulloy", .common_middle = "HelloHe" } });
+    try testDiffFnHalfMatch(.{
+        .config = .default,
         .before = "\u{92b}\u{917}\u{914}\u{93b}\u{940}\u{907}",
         .after = "\u{92b}\u{997}\u{914}\u{93b}\u{940}\u{97d}",
         .expected = .{
@@ -2383,16 +2334,6 @@ test "DiffFn diffHalfMatch" {
             .common_middle = "\u{914}\u{93b}\u{940}",
         },
     });
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnHalfMatch, .{TestHalfMatch{
-        .config = blk: {
-            var cfg: DiffConfig = .default;
-            cfg.timeout = 0;
-            break :blk cfg;
-        },
-        .before = "qHilloHelloHew",
-        .after = "xHelloHeHulloy",
-        .expected = null,
-    }});
 }
 
 test "DiffFn diffLinesToChars" {
@@ -2589,16 +2530,11 @@ test "DiffFn rebuildtexts" {
 }
 
 test "DiffFn diffBisect" {
-    const config: DiffConfig = blk: {
-        var config: DiffConfig = .default;
-        config.timeout = 0;
-        break :blk config;
-    };
+    const config: DiffConfig = .default;
     try testing.checkAllAllocationFailures(testing.allocator, testDiffFnBisect, .{TBisect{
         .config = config,
         .before = "cat",
         .after = "map",
-        .deadline = std.math.maxInt(i64),
         .expected = &.{
             .{ .operation = .delete, .owned = false, .text = "c" },
             .{ .operation = .insert, .owned = false, .text = "m" },
@@ -2607,34 +2543,20 @@ test "DiffFn diffBisect" {
             .{ .operation = .insert, .owned = false, .text = "p" },
         },
     }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnBisect, .{TBisect{
-        .config = config,
-        .before = "cat",
-        .after = "map",
-        .deadline = 0,
-        .expected = &.{
-            .{ .operation = .delete, .owned = false, .text = "cat" },
-            .{ .operation = .insert, .owned = false, .text = "map" },
-        },
-    }});
 }
 
 test "DiffFn diffBisectSplit edge coverage" {
     const allocator = testing.allocator;
-    const config: DiffConfig = blk: {
-        var cfg: DiffConfig = .default;
-        cfg.timeout = 0;
-        break :blk cfg;
-    };
+    const config: DiffConfig = .default;
     {
         var difference = DefaultDiff.init(config);
-        var diffs = try difference.diffBisectSplit(allocator, "cat", "map", 0, 0, std.math.maxInt(i64));
+        var diffs = try difference.diffBisectSplit(allocator, "cat", "map", 0, 0);
         defer deinitDiffList(allocator, &diffs);
         try expectEqualDiff(&.{ Edit.asBorrow(.delete, "cat"), Edit.asBorrow(.insert, "map") }, diffs.items);
     }
     {
         var difference = DefaultDiff.init(config);
-        var diffs = try difference.diffBisectSplit(allocator, "cat", "map", 3, 3, std.math.maxInt(i64));
+        var diffs = try difference.diffBisectSplit(allocator, "cat", "map", 3, 3);
         defer deinitDiffList(allocator, &diffs);
         try expectEqualDiff(&.{ Edit.asBorrow(.delete, ""), Edit.asBorrow(.insert, "map") }, diffs.items);
     }
@@ -2649,7 +2571,6 @@ test "DiffFn diffBisectSplit edge coverage" {
 test "DiffFn diff" {
     const config: DiffConfig = blk: {
         var config: DiffConfig = .default;
-        config.timeout = 0;
         config.check_lines = false;
         break :blk config;
     };
@@ -2691,7 +2612,6 @@ test "DiffFn Unicode diffs" {
     const allocator = testing.allocator;
     const config: DiffConfig = blk: {
         var cfg: DiffConfig = .default;
-        cfg.timeout = 0;
         cfg.check_lines = false;
         break :blk cfg;
     };
@@ -2869,17 +2789,12 @@ test "DiffFn before and after text" {
 
 test "DiffFn diffLineMode coverage runs" {
     const allocator = testing.allocator;
-    const config: DiffConfig = blk: {
-        var cfg: DiffConfig = .default;
-        cfg.timeout = 0;
-        break :blk cfg;
-    };
+    const config: DiffConfig = .default;
     var difference = DefaultDiff.init(config);
     var diffs = try difference.diffLineMode(
         allocator,
         "alpha\nbeta\ngamma\ndelta\n",
         "alpha\nBETA\nGAMMA\ndelta\n",
-        std.math.maxInt(i64),
     );
     defer deinitDiffList(allocator, &diffs);
     const before = try diffBeforeText(allocator, diffs);
@@ -2927,7 +2842,6 @@ test "DiffFn beforeText regression for wikipedia ed script snippet" {
         var cfg: DiffConfig = .default;
         cfg.check_lines = false;
         cfg.check_line_threshold = 1024 * 1024;
-        cfg.timeout = 0;
         break :blk cfg;
     };
     const allocator = testing.allocator;
