@@ -229,19 +229,84 @@ pub fn DiffFn(config: anytype) type {
             return difference;
         }
 
+        /// Return text representing a pretty-formatted `Diff`.
+        /// See `DiffDecorations` for how to customize this output.
+        pub fn prettyFormat(difference: *const Diff, allocator: Allocator, deco: DiffDecorations) ![]const u8 {
+            return diffPrettyFormat(allocator, difference.edits, deco);
+        }
+
+        /// Return text representing a pretty-formatted `DiffList`, in Xterm format.
+        pub fn prettyFormatXTerm(difference: *const Diff, allocator: Allocator) ![]const u8 {
+            return diffPrettyFormatXTerm(allocator, difference.edits);
+        }
+
+        /// Write a pretty-formatted `Diff` to `writer`.  The `Allocator`
+        /// is only used if a custom text formatter is defined for
+        /// `DiffDecorations`.  Returns number of bytes written.
+        pub fn writePrettyFormat(
+            difference: *const Diff,
+            allocator: Allocator,
+            writer: anytype,
+            deco: DiffDecorations,
+        ) !usize {
+            return writeDiffPrettyFormat(allocator, writer, difference.edits, deco);
+        }
+
+        /// Create a Patch from the Diff with the default PatchOptions.
+        pub fn toPatch(difference: *const Diff, allocator: Allocator) OOM!Patch {
+            var the_patch: Patch = .default;
+            return the_patch.fromDiff(allocator, difference);
+        }
+
+        /// Create a Patch from the Diff with the provided PatchOptions.
+        pub fn toPatchConfig(
+            difference: *const Diff,
+            allocator: Allocator,
+            cfg: PatchConfig,
+        ) OOM!Patch {
+            var the_patch: Patch = .init(cfg);
+            return the_patch.fromDiff(allocator, difference);
+        }
+
+        /// Write a Diff in a zDelta format.  Currently supported are
+        /// formats `.a` and `.b`, see documentation for more details.
+        pub fn toZDelta(
+            difference: *const Diff,
+            allocator: Allocator,
+            version: ZDeltaVersion,
+        ) ZDeltaEncodeError![]const u8 {
+            return zdelta_mod.encode(allocator, difference.edits, version);
+        }
+
+        /// Populate a Diff from a zDelta string and the before text.
+        pub fn fromZDelta(
+            difference: *Diff,
+            allocator: Allocator,
+            before: []const u8,
+            zdelta: []const u8,
+        ) ZDeltaDecodeError!*Diff {
+            var edits = try zdelta_mod.toDiffList(Edit, DiffList, allocator, before, zdelta);
+            errdefer deinitDiffList(allocator, &edits);
+            if (difference.edits.items.len != 0) {
+                deinitDiffList(allocator, &difference.edits);
+            }
+            difference.edits = edits;
+            return difference;
+        }
+
         /// Compute and return the source text (all equalities and deletions).
-        pub fn beforeText(difference: *const Diff, allocator: Allocator) OOM![]const u8 {
+        pub fn beforeText(difference: Diff, allocator: Allocator) OOM![]const u8 {
             return diffBeforeText(allocator, difference.edits);
         }
 
         /// Compute and return the destination text (all equalities and insertions).
-        pub fn afterText(difference: *const Diff, allocator: Allocator) OOM![]const u8 {
+        pub fn afterText(difference: Diff, allocator: Allocator) OOM![]const u8 {
             return diffAfterText(allocator, difference.edits);
         }
 
         /// loc is a location in text1; compute and return the equivalent
         /// location in text2.
-        pub fn index(difference: *const Diff, loc: usize) usize {
+        pub fn index(difference: Diff, loc: usize) usize {
             return diffIndex(difference.edits, loc);
         }
 
@@ -1432,6 +1497,58 @@ pub fn DiffFn(config: anytype) type {
     };
 }
 
+/// Return text representing a pretty-formatted `DiffList`.
+/// See `DiffDecorations` for how to customize this output.
+fn diffPrettyFormat(
+    allocator: Allocator,
+    diffs: DiffList,
+    deco: DiffDecorations,
+) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    _ = try writeDiffPrettyFormat(allocator, &out.writer, diffs, deco);
+    return out.toOwnedSlice();
+}
+
+/// Pretty-print a diff for output to a terminal.
+fn diffPrettyFormatXTerm(allocator: Allocator, diffs: DiffList) ![]const u8 {
+    return try diffPrettyFormat(allocator, diffs, .xterm_classic);
+}
+
+/// Write a pretty-formatted `DiffList` to `writer`.  The `Allocator`
+/// is only used if a custom text formatter is defined for
+/// `DiffDecorations`.  Returns number of bytes written.
+fn writeDiffPrettyFormat(
+    allocator: Allocator,
+    writer: anytype,
+    diffs: DiffList,
+    deco: DiffDecorations,
+) !usize {
+    var written: usize = 0;
+    for (diffs.items) |edit| {
+        written += try diff_mod.writeDecoratedEdit(allocator, writer, deco, edit);
+    }
+    try flushWriter(writer);
+    return written;
+}
+
+fn flushWriter(writer: anytype) !void {
+    const Writer = @TypeOf(writer);
+    switch (@typeInfo(Writer)) {
+        .pointer => |pointer| {
+            if (@hasDecl(pointer.child, "flush")) {
+                try writer.flush();
+            }
+        },
+        else => {
+            if (@hasDecl(Writer, "flush")) {
+                var w = writer;
+                try w.flush();
+            }
+        },
+    }
+}
+
 /// Rehydrate the text in a diff from a string of segment hashes to real text.
 fn diffCharsToLines(
     allocator: Allocator,
@@ -2441,11 +2558,18 @@ const testing = std.testing;
 pub const DiffConfig = diff_mod.DiffConfig;
 pub const Edit = diff_mod.Edit;
 pub const DiffList = diff_mod.DiffList;
+pub const DiffDecorations = diff_mod.DiffDecorations;
 
 const common = @import("dmp/common.zig");
 const diff_mod = @import("dmp/diff.zig");
+const Patch = @import("dmp/Patch.zig");
+const PatchConfig = Patch.PatchConfig;
+const zdelta_mod = @import("zdelta.zig");
 
 const OOM = Allocator.Error;
+const ZDeltaVersion = zdelta_mod.ZDeltaVersion;
+const ZDeltaEncodeError = zdelta_mod.ZDeltaEncodeError;
+const ZDeltaDecodeError = zdelta_mod.ZDeltaDecodeError;
 const deinitDiffList = common.deinitDiffList;
 const diffRunAllBorrowed = common.diffRunAllBorrowed;
 const diffBorrowedRunSpan = common.diffBorrowedRunSpan;

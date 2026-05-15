@@ -227,7 +227,7 @@ pub fn fromTexts(
     allocator: Allocator,
     text1: []const u8,
     text2: []const u8,
-) error{OutOfMemory}!*Patch {
+) Diff.DiffError!*Patch {
     patch.deinit(allocator);
     patch.hunks = try patch.diffAndMakePatch(allocator, text1, text2);
     return patch;
@@ -258,7 +258,7 @@ pub fn apply(
     patch: *const Patch,
     allocator: Allocator,
     text: []const u8,
-) error{OutOfMemory}!struct { []const u8, bool } {
+) Diff.DiffError!struct { []const u8, bool } {
     return try patch.applyPatch(allocator, text);
 }
 
@@ -269,7 +269,7 @@ pub fn applyDestructive(
     patch: *Patch,
     allocator: Allocator,
     og_text: []const u8,
-) OOM!struct { []const u8, bool } {
+) Diff.DiffError!struct { []const u8, bool } {
     if (patch.hunks.items.len == 0) {
         return .{ try allocator.dupe(u8, og_text), true };
     }
@@ -658,7 +658,7 @@ fn diffAndMakePatch(
     allocator: Allocator,
     text1: []const u8,
     text2: []const u8,
-) error{OutOfMemory}!PatchList {
+) Diff.DiffError!PatchList {
     var diff_obj: Diff = .default;
     defer diff_obj.deinit(allocator);
     diff_obj.config.check_lines = true;
@@ -852,7 +852,7 @@ fn applyPatch(
     patch: *const Patch,
     allocator: Allocator,
     og_text: []const u8,
-) error{OutOfMemory}!struct { []const u8, bool } {
+) Diff.DiffError!struct { []const u8, bool } {
     if (patch.hunks.items.len == 0) {
         // As silly as this is, we dupe the text, because something
         // passing an empty patchset isn't going to check, and will
@@ -870,7 +870,7 @@ fn applyDestructiveImpl(
     patch: *Patch,
     allocator: Allocator,
     og_text: []const u8,
-) OOM!struct { []const u8, bool } {
+) Diff.DiffError!struct { []const u8, bool } {
     const pre, const post = patch.textMaxBounds(og_text.len);
     const null_padding = try patchAddPadding(patch.config, allocator, &patch.hunks);
     defer allocator.free(null_padding);
@@ -886,7 +886,7 @@ fn applyDestructiveImpl(
     for (patch.hunks.items) |hunk| {
         const expected_loc = cast(usize, cast(isize, hunk.start2) + delta);
         // TODO: make this a borrow when possible.
-        const text1 = try (Diff{ .edits = hunk.diffs }).beforeText(allocator);
+        const text1 = try (Diff{ .config = .default, .context = {}, .edits = hunk.diffs }).beforeText(allocator);
         defer allocator.free(text1);
         var maybe_start: ?usize = null;
         var maybe_end: ?usize = null;
@@ -926,7 +926,7 @@ fn applyDestructiveImpl(
             };
             if (std.mem.eql(u8, text1, text2)) {
                 // Perfect match, just shove the replacement text in.
-                const diff_text = try (Diff{ .edits = hunk.diffs }).afterText(allocator);
+                const diff_text = try (Diff{ .config = .default, .context = {}, .edits = hunk.diffs }).afterText(allocator);
                 defer allocator.free(diff_text);
                 tm.replaceRange(start, text1.len, diff_text);
             } else {
@@ -1293,7 +1293,7 @@ fn patchSplitMax(
                 }
             }
             // Append the end context for this patch.
-            const postcontext_backing = try (Diff{ .edits = bigpatch.diffs }).beforeText(allocator);
+            const postcontext_backing = try (Diff{ .config = .default, .context = {}, .edits = bigpatch.diffs }).beforeText(allocator);
             defer allocator.free(postcontext_backing);
             const postcontext_owned = true;
             const postcontext = if (postcontext_backing.len > patch_margin)
@@ -1303,7 +1303,7 @@ fn patchSplitMax(
             // Compute the head context for the next patch, if we're going to
             // need it.
             if (bigpatch.diffs.items.len != 0) {
-                const after_text = try (Diff{ .edits = hunk.diffs }).afterText(allocator);
+                const after_text = try (Diff{ .config = .default, .context = {}, .edits = hunk.diffs }).afterText(allocator);
                 if (precontext_owned) allocator.free(precontext_backing);
                 precontext_backing = after_text;
                 precontext_owned = true;
@@ -2735,7 +2735,7 @@ fn testMakePatch(allocator: Allocator) !void {
             .{ .operation = .insert, .owned = false, .text = "~!@#$%^&*()_+{}|:\"<>?" },
         });
         defer deinitDiffList(allocator, &diffs);
-        const difference = Diff{ .edits = diffs };
+        const difference = Diff{ .config = .default, .context = {}, .edits = diffs };
         _ = try patch.fromDiff(allocator, &difference);
         for (patch.hunks.items[0].diffs.items, 0..) |edit, idx| {
             try testing.expect(edit.eql(diffs.items[idx]));
