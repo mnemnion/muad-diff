@@ -664,7 +664,7 @@ fn renderForTest(
     show_lines: usize,
 ) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
-    errdefer out.deinit();
+    errdefer out.deinit(); // kcov-test-cleanup
     const bytes_written = try ctx.render(&out.writer, deco, "sample", show_lines);
     try testing.expectEqual(bytes_written, out.writer.end);
     return out.toOwnedSlice();

@@ -442,6 +442,63 @@ test "DeltaApplicator applyAll keeps pivot crossing replacement on ordinary path
     try testing.expectEqualStrings("abcdXYhij", tm.view());
 }
 
+test "DeltaApplicator adjacent delete followed by equal is ordinary path" {
+    const allocator = testing.allocator;
+    var tm = try DeltaApplicator.init(allocator, "abcdef", try testOwnedZDelta(allocator, "", &.{
+        .{ .equal = 2 },
+        .{ .delete = 2 },
+        .{ .equal = 2 },
+    }));
+    defer tm.deinit();
+
+    tm.t_idx = 2;
+    tm.z_idx = 1;
+    try testing.expect(!try tm.applyAdjacentMutationPair(.{ .delete = 2 }));
+}
+
+fn testDeltaApplicatorPrimitiveMutations(allocator: Allocator) !void {
+    var tm = try DeltaApplicator.initText(allocator, "abcdefghij");
+    defer tm.deinit();
+
+    try tm.insert(7, "XY");
+    try testing.expectEqualStrings("abcdefgXYhij", tm.view());
+
+    tm.delete(8, 2);
+    try testing.expectEqualStrings("abcdefgXij", tm.view());
+
+    try tm.replace(2, 5, "Q");
+    try testing.expectEqualStrings("abQXij", tm.view());
+}
+
+test "DeltaApplicator primitive mutations cover right and shrinking paths" {
+    try testing.checkAllAllocationFailures(testing.allocator, testDeltaApplicatorPrimitiveMutations, .{});
+}
+
+fn testDeltaApplicatorInitDestroysZDeltaOnLengthMismatch(allocator: Allocator) !void {
+    _ = try DeltaApplicator.init(allocator, "abc", try testOwnedZDelta(allocator, "", &.{
+        .{ .equal = 4 },
+    }));
+}
+
+test "DeltaApplicator init destroys zdelta on length mismatch" {
+    try testing.expectError(
+        error.ZDeltaTextLengthMismatch,
+        testDeltaApplicatorInitDestroysZDeltaOnLengthMismatch(testing.allocator),
+    );
+}
+
+fn testOwnedZDeltaAllocFailures(allocator: Allocator) !void {
+    var zdelta = try testOwnedZDelta(allocator, "abc", &.{.{ .insert = .{ .offset = 0, .len = 3 } }});
+    defer zdelta.destroy(allocator);
+
+    try testing.expectEqualStrings("abc", zdelta.insert_text);
+    try testing.expectEqualDeep(&[_]DeltaOp{.{ .insert = .{ .offset = 0, .len = 3 } }}, zdelta.ops);
+}
+
+test "testOwnedZDelta cleans up across allocation failures" {
+    try testing.checkAllAllocationFailures(testing.allocator, testOwnedZDeltaAllocFailures, .{});
+}
+
 test "streamApply streams after text without buffering before text" {
     const allocator = testing.allocator;
     var zdelta = try testOwnedZDelta(allocator, "XY!", &.{

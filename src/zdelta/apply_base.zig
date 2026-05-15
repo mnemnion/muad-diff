@@ -51,14 +51,67 @@ pub fn initialSlack(text_len: usize) !usize {
     return if (twenty_percent % 2 == 0)
         twenty_percent
     else
-        std.math.add(usize, twenty_percent, 1) catch error.ZDeltaTooLarge;
+        twenty_percent + 1;
 }
 
 pub fn checkedTextLen(text_len: usize) !u32 {
     return std.math.cast(u32, text_len) orelse error.ZDeltaTooLarge;
 }
 
+const TestState = struct {
+    allocator: std.mem.Allocator,
+    buffer: []u8,
+    start: u32,
+    end: u32,
+    budget: u32,
+
+    fn init(allocator: std.mem.Allocator) !TestState {
+        const buffer = try allocator.dupe(u8, "abcd__");
+        return .{
+            .allocator = allocator,
+            .buffer = buffer,
+            .start = 0,
+            .end = 4,
+            .budget = 2,
+        };
+    }
+
+    fn deinit(state: *TestState) void {
+        state.allocator.free(state.buffer);
+    }
+};
+
+fn testGrowForNeed(allocator: std.mem.Allocator) !void {
+    var state = try TestState.init(allocator);
+    defer state.deinit();
+
+    try growForNeed(&state, 3, 5);
+
+    try testing.expectEqual(@as(usize, 12), state.buffer.len);
+    try testing.expectEqual(@as(u32, 8), state.budget);
+}
+
+test "growForNeed grows slack budget" {
+    try testing.checkAllAllocationFailures(testing.allocator, testGrowForNeed, .{});
+}
+
+fn testEnsureHeadRoom(allocator: std.mem.Allocator) !void {
+    var state = try TestState.init(allocator);
+    defer state.deinit();
+
+    try ensureHeadRoom(&state, 3, 5);
+
+    try testing.expectEqual(@as(u32, 5), state.start);
+    try testing.expectEqual(@as(u32, 9), state.end);
+    try testing.expectEqualStrings("abcd", state.buffer[state.start..state.end]);
+}
+
+test "ensureHeadRoom grows and rebases when head slack is short" {
+    try testing.checkAllAllocationFailures(testing.allocator, testEnsureHeadRoom, .{});
+}
+
 const std = @import("std");
 const common = @import("../dmp/common.zig");
 const dbgassert = common.dbgassert;
 const cast = common.cast;
+const testing = std.testing;

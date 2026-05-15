@@ -282,6 +282,37 @@ pub fn plan9Width(c: u31) u3 {
     };
 }
 
+test "semantic score recognizes blank lines starting the right side" {
+    try testing.expectEqual(@as(usize, 5), diffCleanupSemanticScore("x", "\n\nnext"));
+    try testing.expectEqual(@as(usize, 5), diffCleanupSemanticScore("x", "\r\n\nnext"));
+    try testing.expectEqual(@as(usize, 5), diffCleanupSemanticScore("x", "\n\r\nnext"));
+}
+
+test "plan9Encode covers every width class" {
+    const cases = [_]struct {
+        value: u31,
+        expected: []const u8,
+    }{
+        .{ .value = 0x7f, .expected = &.{0x7f} },
+        .{ .value = 0x80, .expected = &.{ 0xc2, 0x80 } },
+        .{ .value = 0x800, .expected = &.{ 0xe0, 0xa0, 0x80 } },
+        .{ .value = 0x10000, .expected = &.{ 0xf0, 0x90, 0x80, 0x80 } },
+        .{ .value = 0x200000, .expected = &.{ 0xf8, 0x88, 0x80, 0x80, 0x80 } },
+        .{ .value = 0x4000000, .expected = &.{ 0xfc, 0x84, 0x80, 0x80, 0x80, 0x80 } },
+    };
+
+    for (cases) |case| {
+        var out: [6]u8 = undefined;
+        const len = plan9Encode(case.value, &out);
+        try testing.expectEqual(case.expected.len, len);
+        try testing.expectEqualSlices(u8, case.expected, out[0..len]);
+
+        var cursor: usize = 0;
+        try testing.expectEqual(@as(u32, case.value), plan9DecodeCursor(out[0..len], &cursor));
+        try testing.expectEqual(case.expected.len, cursor);
+    }
+}
+
 pub fn plan9DecodeCursor(bytes: []const u8, cursor: *usize) u32 {
     var byte: u16 = bytes[cursor.*];
     cursor.* += 1;
@@ -425,6 +456,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const assert = std.debug.assert;
+const testing = std.testing;
 
 const builtin = @import("builtin");
 const is_debug = builtin.mode == .Debug;

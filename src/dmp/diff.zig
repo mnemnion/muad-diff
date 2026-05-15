@@ -291,6 +291,35 @@ pub fn writeDecoratedEdit(
     return written;
 }
 
+fn preProcessUpper(allocator: Allocator, edit: Edit) OOM![]const u8 {
+    const text = try allocator.dupe(u8, edit.text);
+    for (text) |*byte| byte.* = std.ascii.toUpper(byte.*);
+    return text;
+}
+
+fn testWriteDecoratedEditPreProcess(allocator: Allocator) !void {
+    var buffer: [32]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+
+    const written = try writeDecoratedEdit(
+        allocator,
+        &out,
+        .{
+            .insert_start = "<ins>",
+            .insert_end = "</ins>",
+            .pre_process = preProcessUpper,
+        },
+        Edit.asBorrow(.insert, "abc"),
+    );
+
+    try testing.expectEqual(@as(usize, 14), written);
+    try testing.expectEqualStrings("<ins>ABC</ins>", buffer[0..out.end]);
+}
+
+test "writeDecoratedEdit frees pre-processed text" {
+    try testing.checkAllAllocationFailures(testing.allocator, testWriteDecoratedEditPreProcess, .{});
+}
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const OOM = Allocator.Error;
@@ -298,4 +327,5 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const diff_fn_mod = @import("../diff_fn.zig");
 const common = @import("common.zig");
 const zdelta_mod = @import("../zdelta.zig");
+const testing = std.testing;
 pub const diffCleanupSemanticScore = common.diffCleanupSemanticScore;

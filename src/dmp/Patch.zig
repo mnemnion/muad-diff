@@ -3158,6 +3158,21 @@ test "TextManager replaceRange equal length" {
     );
 }
 
+fn testPatchManagerRebalanceMovesActiveText(allocator: Allocator) !void {
+    var tm = try PatchManager.init(allocator, "abcdefghij", "", 0, 10);
+    errdefer tm.errDeinit(allocator);
+
+    tm.replaceRange(1, 0, "XYZ");
+
+    const out = try tm.finish(allocator);
+    defer allocator.free(out);
+    try testing.expectEqualStrings("aXYZbcdefghij", out);
+}
+
+test "TextManager rebalance moves active text when head room is needed" {
+    try testing.checkAllAllocationFailures(testing.allocator, testPatchManagerRebalanceMovesActiveText, .{});
+}
+
 fn testPatchSplitMaxCoverageLargeDeleteBranch(allocator: Allocator) !void {
     var patch = Patch.init(.default);
     defer patch.deinit(allocator);

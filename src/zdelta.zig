@@ -882,6 +882,20 @@ test "ZDelta encode rejects invalid text" {
     try testing.expectError(error.InvalidZDeltaText, encode(allocator, diff_b, .b));
 }
 
+fn testZDeltaEncodeLargeInsert(allocator: Allocator) !void {
+    const text = "abcdefghijklmnopqrstuvwxyz0123456789";
+    const edits = [_]TestEdit{TestEdit.asBorrow(.insert, text ** 8)};
+    const diff = .{ .items = edits[0..] };
+
+    const actual = try encode(allocator, diff, .b);
+    defer allocator.free(actual);
+    try testing.expectEqualStrings("zΔ⚡b|+" ++ text ** 8 ++ "|", actual);
+}
+
+test "ZDelta encode maps writer allocation failures to OutOfMemory" {
+    try testing.checkAllAllocationFailures(testing.allocator, testZDeltaEncodeLargeInsert, .{});
+}
+
 test "ZDelta round trip" {
     const allocator = testing.allocator;
     const before = "αβZ";
@@ -997,12 +1011,15 @@ test "ZDelta decode strict failures" {
     try testBadDecodeReifiedCase(allocator, "zΔ⚡q|", error.UnknownZDeltaVersion);
     try testBadDecodeReifiedCase(allocator, "zΔ⚡b|+%G0|", error.BadZDeltaEscape);
     try testBadDecodeReifiedCase(allocator, "zΔ⚡b|?1|", error.BadZDeltaOperation);
+    try testBadDecodeReifiedCase(allocator, "zΔ⚡a" ++ "\xff?1\xff", error.BadZDeltaOperation);
     try testBadDecodeReifiedCase(allocator, "zΔ⚡b|=gg|", error.BadZDeltaNumber);
     try testBadDecodeReifiedCase(allocator, "zΔ⚡\xef\xb8\x8eb|+%C0|", error.InvalidZDeltaText);
 }
 
 test "ZDelta decode count overflow maps to ZDeltaTooLarge" {
     try testBadDecodeReifiedCase(testing.allocator, "zΔ⚡b|=100000000|", error.ZDeltaTooLarge);
+    try testBadDecodeReifiedCase(testing.allocator, "zΔ⚡b|-100000000|", error.ZDeltaTooLarge);
+    try testBadDecodeReifiedCase(testing.allocator, "zΔ⚡b|=10000000000000000|", error.ZDeltaTooLarge);
 }
 
 test "ZDelta decode cumulative output overflow maps to ZDeltaTooLarge" {
@@ -1031,8 +1048,22 @@ test "ZDelta decode cumulative output limit accepts max u32" {
 }
 
 test "ZDelta decode insert overflow maps to BadZDeltaNumber" {
+    try testing.expectEqual(DeltaSpan{ .offset = 3, .len = 5 }, try makeDeltaSpan(3, 5));
     try testing.expectError(error.BadZDeltaNumber, makeDeltaSpan(std.math.maxInt(u32), 1));
     try testing.expectError(error.BadZDeltaNumber, makeDeltaSpan(0, @as(usize, std.math.maxInt(u32)) + 1));
+    try testing.expectError(error.BadZDeltaNumber, checkedU32(@as(usize, std.math.maxInt(u32)) + 1));
+}
+
+fn testZDeltaOwnsOpsOnInsertAllocFailure(allocator: Allocator) !void {
+    var actual = try testZDelta(allocator, "insert", &.{.{ .insert = .{ .offset = 0, .len = 6 } }});
+    defer actual.deinit(allocator);
+
+    try testing.expectEqualStrings("insert", actual.insert_text);
+    try testing.expectEqualDeep(&[_]DeltaOp{.{ .insert = .{ .offset = 0, .len = 6 } }}, actual.ops);
+}
+
+test "testZDelta frees duplicated ops when insert text allocation fails" {
+    try testing.checkAllAllocationFailures(testing.allocator, testZDeltaOwnsOpsOnInsertAllocFailure, .{});
 }
 
 test "ZDelta derived text numbers" {

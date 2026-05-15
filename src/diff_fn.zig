@@ -792,7 +792,7 @@ pub fn DiffFn(config: anytype) type {
                         count_insert += 1;
                         const text = diffs.items[pointer].text;
                         if (count_insert == 1) insert_run = text else {
-                            dbgassert(insert_run.ptr + insert_run.len == text.ptr);
+                            dbgassert(insert_run.ptr + insert_run.len == text.ptr); // kcov-miss: debug invariant guard.
                             insert_run = insert_run.ptr[0 .. insert_run.len + text.len];
                         }
                     },
@@ -800,7 +800,7 @@ pub fn DiffFn(config: anytype) type {
                         count_delete += 1;
                         const text = diffs.items[pointer].text;
                         if (count_delete == 1) delete_run = text else {
-                            dbgassert(delete_run.ptr + delete_run.len == text.ptr);
+                            dbgassert(delete_run.ptr + delete_run.len == text.ptr); // kcov-miss: debug invariant guard.
                             delete_run = delete_run.ptr[0 .. delete_run.len + text.len];
                         }
                     },
@@ -939,7 +939,7 @@ pub fn DiffFn(config: anytype) type {
                     try chars.appendSlice(allocator, char_buf[0..nbytes]);
                 } else {
                     if (codepoint == std.math.maxInt(u31) - CHAR_OFFSET) {
-                        return error.TooManySegments;
+                        return error.TooManySegments; // kcov-miss: requires exhausting the u31 segment namespace.
                     }
                     try segment_array.append(allocator, line);
                     try segment_hash.put(allocator, line, codepoint);
@@ -993,7 +993,7 @@ pub fn DiffFn(config: anytype) type {
                             };
                             var text_delete = if (all_borrowed)
                                 diffBorrowedRunSpan(delete_run.items) orelse blk: {
-                                    owned_delete = try diffMaterializeRun(allocator, delete_run.items);
+                                    owned_delete = try diffMaterializeRun(allocator, delete_run.items); // kcov-miss: non-contiguous borrowed delete-run fallback.
                                     break :blk owned_delete.?;
                                 }
                             else blk: {
@@ -1755,6 +1755,106 @@ fn testDiffFnHalfMatchLeak(allocator: Allocator) !void {
     deinitDiffList(allocator, &diffs);
 }
 
+fn testDiffFnHalfMatchAppendFailureCleanup(allocator: Allocator) !void {
+    const config: DiffConfig = blk: {
+        var cfg: DiffConfig = .default;
+        cfg.timeout = 1;
+        break :blk cfg;
+    };
+    const before_text =
+        "left-before:" ++
+        "COMMON-COMMON-COMMON-COMMON-COMMON-COMMON-" ++
+        "a0\nb0\nc0\nd0\ne0\nf0\ng0\nh0\ni0\nj0\n";
+    const after_text =
+        "left-after:" ++
+        "COMMON-COMMON-COMMON-COMMON-COMMON-COMMON-" ++
+        "a1\nb1\nc1\nd1\ne1\nf1\ng1\nh1\ni1\nj1\n";
+    var difference = DefaultDiff.init(config);
+    var diffs = try difference.diffCompute(
+        allocator,
+        before_text,
+        after_text,
+        std.math.maxInt(u64),
+    );
+    defer deinitDiffList(allocator, &diffs);
+
+    const actual_before = try diffBeforeText(allocator, diffs);
+    defer allocator.free(actual_before);
+    const actual_after = try diffAfterText(allocator, diffs);
+    defer allocator.free(actual_after);
+    try testing.expectEqualStrings(before_text, actual_before);
+    try testing.expectEqualStrings(after_text, actual_after);
+}
+
+fn testDiffFnLineCleanupFailureCleanup(allocator: Allocator) !void {
+    var config: DiffConfig = .default;
+    config.check_line_threshold = 8;
+    var difference = DefaultDiff.init(config);
+    var diffs = try difference.diffLine(
+        allocator,
+        "alpha\nbeta\ngamma\ndelta\nalpha\nbeta\ngamma\ndelta\n",
+        "alpha\nbeta\nGAMMA\ndelta\nalpha\nbeta\nGAMMA\ndelta\n",
+        std.math.maxInt(u64),
+    );
+    defer deinitDiffList(allocator, &diffs);
+
+    const before = try diffBeforeText(allocator, diffs);
+    defer allocator.free(before);
+    const after = try diffAfterText(allocator, diffs);
+    defer allocator.free(after);
+    try testing.expectEqualStrings("alpha\nbeta\ngamma\ndelta\nalpha\nbeta\ngamma\ndelta\n", before);
+    try testing.expectEqualStrings("alpha\nbeta\nGAMMA\ndelta\nalpha\nbeta\nGAMMA\ndelta\n", after);
+}
+
+fn expectFailingAllocatorBalanced(failing: std.testing.FailingAllocator) !void {
+    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "DiffFn targeted allocation failures clean up partial diff lists" {
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnHalfMatchAppendFailureCleanup, .{});
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnLineCleanupFailureCleanup, .{});
+
+    const cases = [_]struct {
+        config: DiffConfig,
+        before: []const u8,
+        after: []const u8,
+    }{
+        .{
+            .config = blk: {
+                var cfg: DiffConfig = .default;
+                cfg.timeout = 1;
+                break :blk cfg;
+            },
+            .before = "121231234123451234123121",
+            .after = "a1234123451234z",
+        },
+        .{
+            .config = blk: {
+                var cfg: DiffConfig = .default;
+                cfg.check_line_threshold = 8;
+                break :blk cfg;
+            },
+            .before = "alpha\nbeta\ngamma\ndelta\nalpha\nbeta\ngamma\ndelta\n",
+            .after = "alpha\nbeta\nGAMMA\ndelta\nalpha\nbeta\nGAMMA\ndelta\n",
+        },
+    };
+
+    for (cases) |case| {
+        for (0..40) |fail_index| {
+            var failing = std.testing.FailingAllocator.init(testing.allocator, .{
+                .fail_index = fail_index,
+            });
+            var diffs = diffFnListFromConfig(failing.allocator(), case.config, case.before, case.after) catch |err| {
+                try testing.expectEqual(error.OutOfMemory, err);
+                try expectFailingAllocatorBalanced(failing);
+                continue;
+            };
+            deinitDiffList(failing.allocator(), &diffs);
+            try expectFailingAllocatorBalanced(failing);
+        }
+    }
+}
+
 fn testDiffFnCharsToLines(
     allocator: Allocator,
     params: TCharLines,
@@ -1859,6 +1959,92 @@ fn testDiffFnCleanupSemanticLosslessBorrowedRoundTrip(
     }
 }
 
+fn testDiffFnCleanupSemanticLosslessOwnedEdges(allocator: Allocator) !void {
+    {
+        var diffs = try sliceToDiffList(allocator, &.{
+            Edit.asBorrow(.equal, "a"),
+            Edit.asBorrow(.insert, "a"),
+            Edit.asBorrow(.equal, "x"),
+        });
+        defer deinitDiffList(allocator, &diffs);
+        var difference: DefaultDiff = .default;
+        var pointer: usize = 1;
+        try difference.cleanupSemanticLosslessOwned(allocator, &diffs, &pointer);
+        try expectEqualDiff(&.{
+            Edit.asBorrow(.insert, "a"),
+            Edit.asBorrow(.equal, "ax"),
+        }, diffs.items);
+        try testing.expectEqual(@as(usize, 0), pointer);
+    }
+    {
+        var diffs = try sliceToDiffList(allocator, &.{
+            Edit.asBorrow(.equal, "x"),
+            Edit.asBorrow(.insert, "ay"),
+            Edit.asBorrow(.equal, "a"),
+        });
+        defer deinitDiffList(allocator, &diffs);
+        var difference: DefaultDiff = .default;
+        var pointer: usize = 1;
+        try difference.cleanupSemanticLosslessOwned(allocator, &diffs, &pointer);
+        try expectEqualDiff(&.{
+            Edit.asBorrow(.equal, "xa"),
+            Edit.asBorrow(.insert, "ya"),
+        }, diffs.items);
+        try testing.expectEqual(@as(usize, 0), pointer);
+    }
+}
+
+fn testDiffFnCleanupSemanticLosslessBorrowedEdges() !void {
+    {
+        const text = "aax";
+        var diffs = try DiffList.initCapacity(testing.allocator, 3);
+        defer deinitDiffList(testing.allocator, &diffs);
+        diffs.appendSliceAssumeCapacity(&.{
+            Edit.asBorrow(.equal, text[0..1]),
+            Edit.asBorrow(.insert, text[0..1]),
+            Edit.asBorrow(.equal, text[2..3]),
+        });
+        var difference: DefaultDiff = .default;
+        try difference.cleanupSemanticLosslessImpl(testing.allocator, &diffs);
+        try expectEqualDiff(&.{
+            Edit.asBorrow(.insert, "a"),
+            Edit.asBorrow(.equal, "ax"),
+        }, diffs.items);
+    }
+    {
+        const text = "abax";
+        var diffs = try DiffList.initCapacity(testing.allocator, 3);
+        defer deinitDiffList(testing.allocator, &diffs);
+        diffs.appendSliceAssumeCapacity(&.{
+            Edit.asBorrow(.equal, text[0..1]),
+            Edit.asBorrow(.insert, text[1..3]),
+            Edit.asBorrow(.equal, text[3..4]),
+        });
+        var difference: DefaultDiff = .default;
+        try difference.cleanupSemanticLosslessImpl(testing.allocator, &diffs);
+        try expectEqualDiff(&.{
+            Edit.asBorrow(.insert, "ab"),
+            Edit.asBorrow(.equal, "ax"),
+        }, diffs.items);
+    }
+    {
+        const text = "xaya";
+        var diffs = try DiffList.initCapacity(testing.allocator, 3);
+        defer deinitDiffList(testing.allocator, &diffs);
+        diffs.appendSliceAssumeCapacity(&.{
+            Edit.asBorrow(.equal, text[0..1]),
+            Edit.asBorrow(.insert, text[1..3]),
+            Edit.asBorrow(.equal, text[3..4]),
+        });
+        var difference: DefaultDiff = .default;
+        try difference.cleanupSemanticLosslessImpl(testing.allocator, &diffs);
+        try expectEqualDiff(&.{
+            Edit.asBorrow(.equal, "xa"),
+            Edit.asBorrow(.insert, "ya"),
+        }, diffs.items);
+    }
+}
+
 fn testDiffFnCleanupSemantic(
     allocator: Allocator,
     params: TestIO,
@@ -1894,6 +2080,32 @@ fn testDiffFnCleanupSemanticRoundTrip(
     }
     var difference: DefaultDiff = .default;
     try difference.cleanupSemanticImpl(allocator, &diffs);
+    const before = try diffBeforeText(allocator, diffs);
+    defer allocator.free(before);
+    const after = try diffAfterText(allocator, diffs);
+    defer allocator.free(after);
+    try testing.expectEqualStrings(expected_before, before);
+    try testing.expectEqualStrings(expected_after, after);
+}
+
+fn testDiffFnCleanupEfficiencyRoundTrip(
+    allocator: Allocator,
+    config: DiffConfig,
+    input: []const Edit,
+    expected_before: []const u8,
+    expected_after: []const u8,
+) !void {
+    var diffs = try DiffList.initCapacity(allocator, input.len);
+    defer deinitDiffList(allocator, &diffs);
+    for (input) |item| {
+        diffs.appendAssumeCapacity(.{
+            .operation = item.operation,
+            .owned = true,
+            .text = try allocator.dupe(u8, item.text),
+        });
+    }
+    var difference = DefaultDiff.init(config);
+    try difference.cleanupEfficiencyImpl(allocator, &diffs);
     const before = try diffBeforeText(allocator, diffs);
     defer allocator.free(before);
     const after = try diffAfterText(allocator, diffs);
@@ -2255,6 +2467,66 @@ test "DiffFn diffCleanupMerge" {
             .expected = &.{.{ .operation = .equal, .owned = false, .text = "abcdef" }},
         });
     }
+    {
+        const text = "abc";
+        try testDiffFnCleanupMergeBorrowed(.{
+            .input = &.{
+                Edit.asBorrow(.equal, text[0..1]),
+                Edit.asBorrow(.delete, text[1..3]),
+                Edit.asBorrow(.insert, "bd"),
+            },
+            .expected = &.{
+                Edit.asBorrow(.equal, "ab"),
+                Edit.asBorrow(.delete, "c"),
+                Edit.asBorrow(.insert, "d"),
+            },
+        });
+    }
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCleanupMerge, .{TestIO{
+        .input = &.{
+            Edit.asBorrow(.equal, "a"),
+            Edit.asBorrow(.delete, "bc"),
+            Edit.asBorrow(.insert, "bd"),
+        },
+        .expected = &.{
+            Edit.asBorrow(.equal, "ab"),
+            Edit.asBorrow(.delete, "c"),
+            Edit.asBorrow(.insert, "d"),
+        },
+    }});
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCleanupMerge, .{TestIO{
+        .input = &.{
+            Edit.asBorrow(.equal, "a"),
+            Edit.asBorrow(.insert, "ba"),
+            Edit.asBorrow(.equal, "c"),
+        },
+        .expected = &.{
+            Edit.asBorrow(.insert, "ab"),
+            Edit.asBorrow(.equal, "ac"),
+        },
+    }});
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCleanupMerge, .{TestIO{
+        .input = &.{
+            Edit.asBorrow(.equal, "a"),
+            Edit.asBorrow(.insert, "ba"),
+            Edit.asBorrow(.equal, "b"),
+        },
+        .expected = &.{
+            Edit.asBorrow(.insert, "ab"),
+            Edit.asBorrow(.equal, "ab"),
+        },
+    }});
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCleanupMerge, .{TestIO{
+        .input = &.{
+            Edit.asBorrow(.equal, "x"),
+            Edit.asBorrow(.insert, "ba"),
+            Edit.asBorrow(.equal, "b"),
+        },
+        .expected = &.{
+            Edit.asBorrow(.equal, "xb"),
+            Edit.asBorrow(.insert, "ab"),
+        },
+    }});
 }
 
 test "DiffFn diffCleanupSemanticLossless" {
@@ -2273,6 +2545,35 @@ test "DiffFn diffCleanupSemanticLossless" {
             after,
         );
     }
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCleanupSemanticLossless, .{TestIO{
+        .input = &.{
+            Edit.asBorrow(.equal, "a"),
+            Edit.asBorrow(.insert, "ab"),
+            Edit.asBorrow(.equal, "b"),
+        },
+        .expected = &.{
+            Edit.asBorrow(.equal, "a"),
+            Edit.asBorrow(.insert, "ab"),
+            Edit.asBorrow(.equal, "b"),
+        },
+    }});
+    {
+        const text = "abab";
+        try testDiffFnCleanupSemanticLosslessBorrowed(.{
+            .input = &.{
+                Edit.asBorrow(.equal, text[0..1]),
+                Edit.asBorrow(.insert, text[0..2]),
+                Edit.asBorrow(.equal, text[1..2]),
+            },
+            .expected = &.{
+                Edit.asBorrow(.equal, "a"),
+                Edit.asBorrow(.insert, "ab"),
+                Edit.asBorrow(.equal, "b"),
+            },
+        });
+    }
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCleanupSemanticLosslessOwnedEdges, .{});
+    try testDiffFnCleanupSemanticLosslessBorrowedEdges();
 }
 
 test "DiffFn rebuildtexts" {
@@ -2457,6 +2758,22 @@ test "DiffFn diffCleanupSemantic" {
             "12x34y56",
         },
     );
+    try testing.checkAllAllocationFailures(
+        testing.allocator,
+        testDiffFnCleanupSemanticRoundTrip,
+        .{
+            &[_]Edit{
+                Edit.asBorrow(.equal, "a"),
+                Edit.asBorrow(.insert, "x"),
+                Edit.asBorrow(.equal, "BBBB"),
+                Edit.asBorrow(.insert, "yyyy"),
+                Edit.asBorrow(.equal, "c"),
+                Edit.asBorrow(.insert, "z"),
+            },
+            "aBBBBc",
+            "axBBBByyyycz",
+        },
+    );
 }
 
 test "DiffFn diffCleanupEfficiency" {
@@ -2488,6 +2805,44 @@ test "DiffFn diffCleanupEfficiency" {
                     Edit.asBorrow(.insert, "12xyz34"),
                 },
             },
+        },
+    );
+    try testing.checkAllAllocationFailures(
+        allocator,
+        testDiffFnCleanupEfficiency,
+        .{
+            config,
+            TestIO{
+                .input = &[_]Edit{
+                    Edit.asBorrow(.insert, "A"),
+                    Edit.asBorrow(.delete, "B"),
+                    Edit.asBorrow(.equal, "x"),
+                    Edit.asBorrow(.insert, "C"),
+                    Edit.asBorrow(.equal, "y"),
+                    Edit.asBorrow(.insert, "D"),
+                },
+                .expected = &[_]Edit{
+                    Edit.asBorrow(.delete, "Bxy"),
+                    Edit.asBorrow(.insert, "AxCyD"),
+                },
+            },
+        },
+    );
+    try testing.checkAllAllocationFailures(
+        allocator,
+        testDiffFnCleanupEfficiencyRoundTrip,
+        .{
+            config,
+            &[_]Edit{
+                Edit.asBorrow(.insert, "A"),
+                Edit.asBorrow(.equal, "x"),
+                Edit.asBorrow(.insert, "B"),
+                Edit.asBorrow(.equal, "y"),
+                Edit.asBorrow(.insert, "D"),
+                Edit.asBorrow(.delete, "C"),
+            },
+            "xyC",
+            "AxByD",
         },
     );
 }
