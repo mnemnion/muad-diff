@@ -230,18 +230,18 @@ pub fn DiffFn(config: anytype) type {
         }
 
         /// Compute and return the source text (all equalities and deletions).
-        pub fn beforeText(difference: Diff, allocator: Allocator) OOM![]const u8 {
+        pub fn beforeText(difference: *const Diff, allocator: Allocator) OOM![]const u8 {
             return diffBeforeText(allocator, difference.edits);
         }
 
         /// Compute and return the destination text (all equalities and insertions).
-        pub fn afterText(difference: Diff, allocator: Allocator) OOM![]const u8 {
+        pub fn afterText(difference: *const Diff, allocator: Allocator) OOM![]const u8 {
             return diffAfterText(allocator, difference.edits);
         }
 
         /// loc is a location in text1; compute and return the equivalent
         /// location in text2.
-        pub fn index(difference: Diff, loc: usize) usize {
+        pub fn index(difference: *const Diff, loc: usize) usize {
             return diffIndex(difference.edits, loc);
         }
 
