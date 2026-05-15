@@ -69,12 +69,12 @@ const BorrowedLosslessWindow = struct {
 };
 
 /// Result of line- or segment-based compression prior to rediffing.
-const LinesToCharsResult = struct {
+const SegmentsToCharsResult = struct {
     chars_1: []const u8,
     chars_2: []const u8,
     line_array: ArrayListUnmanaged([]const u8),
 
-    pub fn deinit(result: *LinesToCharsResult, allocator: Allocator) void {
+    pub fn deinit(result: *SegmentsToCharsResult, allocator: Allocator) void {
         allocator.free(result.chars_1);
         allocator.free(result.chars_2);
         result.line_array.deinit(allocator);
@@ -90,7 +90,7 @@ const LinesToCharsResult = struct {
 pub fn DiffFn(config: anytype) type {
     const Config = @TypeOf(config);
     const Context = if (@hasField(Config, "context")) config.context else void;
-    const LineIterator = if (@hasField(Config, "LineIterator"))
+    const SegmentIterator = if (@hasField(Config, "LineIterator"))
         config.LineIterator
     else
         DefaultLineIterator;
@@ -110,7 +110,7 @@ pub fn DiffFn(config: anytype) type {
         const Diff = @This();
 
         pub const ContextType = Context;
-        pub const IteratorType = LineIterator;
+        pub const IteratorType = SegmentIterator;
 
         pub const DiffError = OOM || error{TooManySegments};
 
@@ -325,9 +325,9 @@ pub fn DiffFn(config: anytype) type {
         }
 
         /// Resolve the stored default context for this specialization.
-        fn makeIterator(text: []const u8) LineIterator {
-            if (@hasDecl(LineIterator, "init")) {
-                return LineIterator.init(text);
+        fn makeIterator(text: []const u8) SegmentIterator {
+            if (@hasDecl(SegmentIterator, "init")) {
+                return SegmentIterator.init(text);
             }
             return .{ .text = text };
         }
@@ -895,7 +895,7 @@ pub fn DiffFn(config: anytype) type {
             allocator: Allocator,
             text1: []const u8,
             text2: []const u8,
-        ) DiffError!LinesToCharsResult {
+        ) DiffError!SegmentsToCharsResult {
             var line_array: ArrayListUnmanaged([]const u8) = .empty;
             errdefer line_array.deinit(allocator);
             line_array.items.len = 0;
