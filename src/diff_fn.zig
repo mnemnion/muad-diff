@@ -728,7 +728,7 @@ pub fn DiffFn(config: anytype) type {
             text2_in: []const u8,
         ) DiffError!DiffList {
             var text_mode = difference.copyForTextMode();
-            var a = try difference.diffLinesToChars(allocator, text1_in, text2_in);
+            var a = try difference.diffSegmentsToChars(allocator, text1_in, text2_in);
             defer a.deinit(allocator);
             var diffs: DiffList = diff_munge: {
                 var char_diffs = try text_mode.diffInternal(allocator, a.chars_1, a.chars_2);
@@ -861,7 +861,7 @@ pub fn DiffFn(config: anytype) type {
 
         /// Split two texts into a list of unique segments and encode them as
         /// a string of Unicode code points.
-        fn diffLinesToChars(
+        fn diffSegmentsToChars(
             difference: *Diff,
             allocator: Allocator,
             text1: []const u8,
@@ -873,14 +873,14 @@ pub fn DiffFn(config: anytype) type {
             var line_hash = std.StringHashMapUnmanaged(u31){};
             defer line_hash.deinit(allocator);
 
-            const chars1 = try difference.diffLinesToCharsMunge(allocator, text1, &line_array, &line_hash);
+            const chars1 = try difference.diffSegmentsToCharsMunge(allocator, text1, &line_array, &line_hash);
             errdefer allocator.free(chars1);
-            const chars2 = try difference.diffLinesToCharsMunge(allocator, text2, &line_array, &line_hash);
+            const chars2 = try difference.diffSegmentsToCharsMunge(allocator, text2, &line_array, &line_hash);
             return .{ .chars_1 = chars1, .chars_2 = chars2, .line_array = line_array };
         }
 
         /// Encode one text by iterating configured segments.
-        fn diffLinesToCharsMunge(
+        fn diffSegmentsToCharsMunge(
             difference: *Diff,
             allocator: Allocator,
             text: []const u8,
@@ -2336,7 +2336,7 @@ test "DiffFn diffLinesToChars" {
     try tmp_array_list.append("beta\n");
 
     var difference: DefaultDiff = .default;
-    var result = try difference.diffLinesToChars(allocator, "alpha\nbeta\nalpha\n", "beta\nalpha\nbeta\n");
+    var result = try difference.diffSegmentsToChars(allocator, "alpha\nbeta\nalpha\n", "beta\nalpha\nbeta\n");
     try testing.expectEqualStrings(" ! ", result.chars_1);
     try testing.expectEqualStrings("! !", result.chars_2);
     try testing.expectEqualDeep(tmp_array_list.items, result.line_array.items);
@@ -2346,7 +2346,7 @@ test "DiffFn diffLinesToChars" {
     try tmp_array_list.append("alpha\r\n");
     try tmp_array_list.append("beta\r\n");
     try tmp_array_list.append("\r\n");
-    result = try difference.diffLinesToChars(allocator, "", "alpha\r\nbeta\r\n\r\n\r\n");
+    result = try difference.diffSegmentsToChars(allocator, "", "alpha\r\nbeta\r\n\r\n\r\n");
     try testing.expectEqualStrings("", result.chars_1);
     try testing.expectEqualStrings(" !\"\"", result.chars_2);
     try testing.expectEqualDeep(tmp_array_list.items, result.line_array.items);
@@ -2355,7 +2355,7 @@ test "DiffFn diffLinesToChars" {
     tmp_array_list.items.len = 0;
     try tmp_array_list.append("a");
     try tmp_array_list.append("b");
-    result = try difference.diffLinesToChars(allocator, "a", "b");
+    result = try difference.diffSegmentsToChars(allocator, "a", "b");
     try testing.expectEqualStrings(" ", result.chars_1);
     try testing.expectEqualStrings("!", result.chars_2);
     try testing.expectEqualDeep(tmp_array_list.items, result.line_array.items);
