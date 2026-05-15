@@ -572,22 +572,14 @@ pub fn DiffFn(config: anytype) type {
             const v_offset = max_d;
             const v_length = 2 * max_d;
 
-            // TODO: just alloc here yeah?  The ArrayList is pointless..
-            var v1 = try ArrayListUnmanaged(isize).initCapacity(allocator, i2u(v_length));
-            defer v1.deinit(allocator);
-            v1.items.len = @intCast(v_length);
-            var v2 = try ArrayListUnmanaged(isize).initCapacity(allocator, i2u(v_length));
-            defer v2.deinit(allocator);
-            v2.items.len = @intCast(v_length);
-
-            var x: usize = 0;
-            // TODO: uhhhh @memset?
-            while (x < v_length) : (x += 1) {
-                v1.items[x] = -1;
-                v2.items[x] = -1;
-            }
-            v1.items[i2u(v_offset + 1)] = 0;
-            v2.items[i2u(v_offset + 1)] = 0;
+            const v1 = try allocator.alloc(isize, i2u(v_length));
+            defer allocator.free(v1);
+            const v2 = try allocator.alloc(isize, i2u(v_length));
+            defer allocator.free(v2);
+            @memset(v1, -1);
+            @memset(v2, -1);
+            v1[i2u(v_offset + 1)] = 0;
+            v2[i2u(v_offset + 1)] = 0;
             const delta = before_length - after_length;
             const front = (@mod(delta, 2) != 0);
             var k1start: isize = 0;
@@ -601,10 +593,10 @@ pub fn DiffFn(config: anytype) type {
                 while (k1 <= d - k1end) : (k1 += 2) {
                     const k1_offset = v_offset + k1;
                     var x1: isize = 0;
-                    if (k1 == -d or (k1 != d and v1.items[i2u(k1_offset - 1)] < v1.items[i2u(k1_offset + 1)])) {
-                        x1 = v1.items[i2u(k1_offset + 1)];
+                    if (k1 == -d or (k1 != d and v1[i2u(k1_offset - 1)] < v1[i2u(k1_offset + 1)])) {
+                        x1 = v1[i2u(k1_offset + 1)];
                     } else {
-                        x1 = v1.items[i2u(k1_offset - 1)] + 1;
+                        x1 = v1[i2u(k1_offset - 1)] + 1;
                     }
                     var y1 = x1 - k1;
                     while (x1 < before_length and y1 < after_length) {
@@ -613,15 +605,15 @@ pub fn DiffFn(config: anytype) type {
                             y1 += 1;
                         } else break;
                     }
-                    v1.items[i2u(k1_offset)] = x1;
+                    v1[i2u(k1_offset)] = x1;
                     if (x1 > before_length) {
                         k1end += 2;
                     } else if (y1 > after_length) {
                         k1start += 2;
                     } else if (front) {
                         const k2_offset = v_offset + delta - k1;
-                        if (k2_offset >= 0 and k2_offset < v_length and v2.items[i2u(k2_offset)] != -1) {
-                            const x2 = before_length - v2.items[i2u(k2_offset)];
+                        if (k2_offset >= 0 and k2_offset < v_length and v2[i2u(k2_offset)] != -1) {
+                            const x2 = before_length - v2[i2u(k2_offset)];
                             if (x1 >= x2) {
                                 return difference.diffBisectSplit(allocator, before, after, x1, y1);
                             }
@@ -633,10 +625,10 @@ pub fn DiffFn(config: anytype) type {
                 while (k2 <= d - k2end) : (k2 += 2) {
                     const k2_offset = v_offset + k2;
                     var x2: isize = 0;
-                    if (k2 == -d or (k2 != d and v2.items[i2u(k2_offset - 1)] < v2.items[i2u(k2_offset + 1)])) {
-                        x2 = v2.items[i2u(k2_offset + 1)];
+                    if (k2 == -d or (k2 != d and v2[i2u(k2_offset - 1)] < v2[i2u(k2_offset + 1)])) {
+                        x2 = v2[i2u(k2_offset + 1)];
                     } else {
-                        x2 = v2.items[i2u(k2_offset - 1)] + 1;
+                        x2 = v2[i2u(k2_offset - 1)] + 1;
                     }
                     var y2: isize = x2 - k2;
                     while (x2 < before_length and y2 < after_length) {
@@ -645,17 +637,17 @@ pub fn DiffFn(config: anytype) type {
                             y2 += 1;
                         } else break;
                     }
-                    v2.items[i2u(k2_offset)] = x2;
+                    v2[i2u(k2_offset)] = x2;
                     if (x2 > before_length) {
                         k2end += 2;
                     } else if (y2 > after_length) {
                         k2start += 2;
                     } else if (!front) {
                         const k1_offset = v_offset + delta - k2;
-                        if (k1_offset >= 0 and k1_offset < v_length and v1.items[i2u(k1_offset)] != -1) {
-                            const x1 = v1.items[i2u(k1_offset)];
+                        if (k1_offset >= 0 and k1_offset < v_length and v1[i2u(k1_offset)] != -1) {
+                            const x1 = v1[i2u(k1_offset)];
                             const y1 = v_offset + x1 - k1_offset;
-                            x2 = before_length - v2.items[i2u(k2_offset)];
+                            x2 = before_length - v2[i2u(k2_offset)];
                             if (x1 >= x2) {
                                 return difference.diffBisectSplit(allocator, before, after, x1, y1);
                             }
