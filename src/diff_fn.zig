@@ -1191,8 +1191,16 @@ pub fn DiffFn(config: anytype) type {
                             @as(f32, @floatFromInt(overlap_length1)) >= @as(f32, @floatFromInt(insertion.len)) / 2.0)
                         {
                             try diffs.ensureUnusedCapacity(allocator, 1);
-                            diffs.insertAssumeCapacity(pointer, try Edit.asBool(allocator, .equal, delete_edit.owned, deletion[deletion.len - overlap_length1 ..]));
-                            var new_minus = try Edit.asBool(allocator, .delete, delete_edit.owned, deletion[0 .. deletion.len - overlap_length1]);
+                            diffs.insertAssumeCapacity(
+                                pointer,
+                                try Edit.asBool(allocator, .equal, delete_edit.owned, deletion[deletion.len - overlap_length1 ..]),
+                            );
+                            var new_minus = try Edit.asBool(
+                                allocator,
+                                .delete,
+                                delete_edit.owned,
+                                deletion[0 .. deletion.len - overlap_length1],
+                            );
                             errdefer new_minus.deinit(allocator);
                             const new_plus = try Edit.asBool(allocator, .insert, insert_edit.owned, insertion[overlap_length1..]);
                             var delete_to_deinit = delete_edit;
@@ -1207,8 +1215,18 @@ pub fn DiffFn(config: anytype) type {
                         @as(f32, @floatFromInt(overlap_length2)) >= @as(f32, @floatFromInt(insertion.len)) / 2.0)
                     {
                         try diffs.ensureUnusedCapacity(allocator, 1);
-                        diffs.insertAssumeCapacity(pointer, try Edit.asBool(allocator, .equal, delete_edit.owned, deletion[0..overlap_length2]));
-                        var new_minus = try Edit.asBool(allocator, .insert, insert_edit.owned, insertion[0 .. insertion.len - overlap_length2]);
+                        diffs.insertAssumeCapacity(pointer, try Edit.asBool(
+                            allocator,
+                            .equal,
+                            delete_edit.owned,
+                            deletion[0..overlap_length2],
+                        ));
+                        var new_minus = try Edit.asBool(
+                            allocator,
+                            .insert,
+                            insert_edit.owned,
+                            insertion[0 .. insertion.len - overlap_length2],
+                        );
                         errdefer new_minus.deinit(allocator);
                         const new_plus = try Edit.asBool(allocator, .delete, delete_edit.owned, deletion[overlap_length2..]);
                         var delete_to_deinit = delete_edit;
@@ -1285,7 +1303,9 @@ pub fn DiffFn(config: anytype) type {
             defer best_equality_2.deinit(allocator);
             try best_equality_2.appendSlice(allocator, equality_2.items);
 
-            var best_score = difference.cleanupSemanticScore(equality_1.items, edit.items) + difference.cleanupSemanticScore(edit.items, equality_2.items);
+            const score_l = difference.cleanupSemanticScore(equality_1.items, edit.items);
+            const score_r = difference.cleanupSemanticScore(edit.items, equality_2.items);
+            var best_score = score_l + score_r;
 
             while (hasSharedPrefixLen(edit.items, equality_2.items)) |cp_len| {
                 var cp_buf: [4]u8 = undefined;
@@ -1299,7 +1319,9 @@ pub fn DiffFn(config: anytype) type {
                 std.mem.copyForwards(u8, equality_2.items[0 .. equality_2.items.len - cp_len], equality_2.items[cp_len..]);
                 equality_2.items.len -= cp_len;
 
-                const score = difference.cleanupSemanticScore(equality_1.items, edit.items) + difference.cleanupSemanticScore(edit.items, equality_2.items);
+                const score_left = difference.cleanupSemanticScore(equality_1.items, edit.items);
+                const score_right = difference.cleanupSemanticScore(edit.items, equality_2.items);
+                const score = score_left + score_right;
                 if (score >= best_score) {
                     best_score = score;
                     best_equality_1.items.len = 0;
@@ -1361,7 +1383,9 @@ pub fn DiffFn(config: anytype) type {
             var best_equality_1 = equality_1;
             var best_edit = edit;
             var best_equality_2 = equality_2;
-            var best_score = difference.cleanupSemanticScore(equality_1, edit) + difference.cleanupSemanticScore(edit, equality_2);
+            const score_l = difference.cleanupSemanticScore(equality_1, edit);
+            const score_r = difference.cleanupSemanticScore(edit, equality_2);
+            var best_score = score_l + score_r;
 
             while (hasSharedPrefixLen(edit, equality_2)) |cp_len| {
                 const old_edit = edit;
@@ -1369,7 +1393,9 @@ pub fn DiffFn(config: anytype) type {
                 edit = old_edit[cp_len..].ptr[0..old_edit.len];
                 equality_2 = equality_2[cp_len..];
 
-                const score = difference.cleanupSemanticScore(equality_1, edit) + difference.cleanupSemanticScore(edit, equality_2);
+                const score_left = difference.cleanupSemanticScore(equality_1, edit);
+                const score_right = difference.cleanupSemanticScore(edit, equality_2);
+                const score = score_left + score_right;
                 if (score >= best_score) {
                     best_score = score;
                     best_equality_1 = equality_1;
