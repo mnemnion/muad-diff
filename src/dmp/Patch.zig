@@ -662,10 +662,10 @@ fn diffAndMakePatch(
     var diff_obj: Diff = .default;
     defer diff_obj.deinit(allocator);
     diff_obj.config.check_lines = true;
-    _ = try diff_obj.diff(allocator, text1, text2);
+    try diff_obj.diff(allocator, text1, text2);
     if (diff_obj.edits.items.len > 2) {
-        _ = try diff_obj.cleanupSemantic(allocator);
-        _ = try diff_obj.cleanupEfficiency(allocator);
+        try diff_obj.cleanupSemantic(allocator);
+        try diff_obj.cleanupEfficiency(allocator);
     }
     return try makePatchInternal(patch.config, allocator, text1, &diff_obj);
 }
@@ -935,7 +935,7 @@ fn applyDestructiveImpl(
                 var diff_obj: Diff = .default;
                 defer diff_obj.deinit(allocator);
                 diff_obj.config.check_lines = false;
-                _ = try diff_obj.diff(
+                try diff_obj.diff(
                     allocator,
                     text1,
                     text2,
@@ -952,11 +952,11 @@ fn applyDestructiveImpl(
                     // the byte count, but it's worth asserting.
                     if (is_debug) {
                         const before = diff_obj.changeInBytes();
-                        _ = try diff_obj.cleanupSemanticLossless(allocator);
+                        try diff_obj.cleanupSemanticLossless(allocator);
                         const after = diff_obj.changeInBytes();
                         assert(before == after);
                     } else {
-                        _ = try diff_obj.cleanupSemanticLossless(allocator);
+                        try diff_obj.cleanupSemanticLossless(allocator);
                     }
                     var index1: usize = 0;
                     for (hunk.diffs.items) |edit| {
@@ -2050,7 +2050,7 @@ fn testPatchIssue157GeneratedPatchRoundTrip(allocator: Allocator) !void {
 
     var diff = Diff.init(.default);
     defer diff.deinit(allocator);
-    _ = try diff.diff(allocator, original_json, expected_json);
+    try diff.diff(allocator, original_json, expected_json);
 
     var patch: Patch = .default;
     defer patch.deinit(allocator);
@@ -2712,7 +2712,7 @@ fn testMakePatch(allocator: Allocator) !void {
         };
         var diff = Diff.init(config);
         defer diff.deinit(allocator);
-        _ = try diff.diff(allocator, text1, text2);
+        try diff.diff(allocator, text1, text2);
         _ = try patch.make(allocator, text1, &diff);
         const patch_text_2 = try patch.toTextPatch(allocator);
         defer allocator.free(patch_text_2);

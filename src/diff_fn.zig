@@ -140,11 +140,10 @@ pub fn DiffFn(config: anytype) type {
 
         /// Own all edits in the Diff.  After this operation it is safe
         /// to dispose of the original strings.
-        pub fn own(difference: *Diff, allocator: Allocator) OOM!*Diff {
+        pub fn own(difference: *Diff, allocator: Allocator) OOM!void {
             for (difference.edits.items) |*e| {
                 try e.own(allocator);
             }
-            return difference;
         }
 
         /// Clone this `Diff`, including its owned edits.
@@ -174,59 +173,50 @@ pub fn DiffFn(config: anytype) type {
         /// Find the differences between two texts.
         /// @param before Old string to be diffed.
         /// @param after New string to be diffed.
-        /// @return difference.
         pub fn diff(
             difference: *Diff,
             allocator: Allocator,
             before: []const u8,
             after: []const u8,
-        ) DiffError!*Diff {
+        ) DiffError!void {
             if (difference.edits.items.len != 0) {
                 deinitDiffList(allocator, &difference.edits);
                 difference.edits = .empty;
             }
             difference.edits = try difference.diffImpl(allocator, before, after);
-            return difference;
         }
 
-        /// Run only the iterator-backed speedup path and return the result.
+        /// Run only the iterator-backed speedup path.
         pub fn diffLines(
             difference: *Diff,
             allocator: Allocator,
             before: []const u8,
             after: []const u8,
-        ) DiffError!*Diff {
+        ) DiffError!void {
             if (difference.edits.items.len != 0) {
                 deinitDiffList(allocator, &difference.edits);
                 difference.edits = .empty;
             }
             difference.edits = try difference.diffLine(allocator, before, after);
-            return difference;
         }
 
         /// Reduce the number of edits by eliminating semantically trivial
         /// equalities.
-        /// @return difference.
-        pub fn cleanupSemantic(difference: *Diff, allocator: Allocator) OOM!*Diff {
+        pub fn cleanupSemantic(difference: *Diff, allocator: Allocator) OOM!void {
             try difference.cleanupSemanticImpl(allocator, &difference.edits);
-            return difference;
         }
 
         /// Look for single edits surrounded on both sides by equalities
         /// which can be shifted sideways to align the edit to a word boundary.
         /// e.g: The c<ins>at c</ins>ame. -> The <ins>cat </ins>came.
-        /// @return difference.
-        pub fn cleanupSemanticLossless(difference: *Diff, allocator: Allocator) OOM!*Diff {
+        pub fn cleanupSemanticLossless(difference: *Diff, allocator: Allocator) OOM!void {
             try difference.cleanupSemanticLosslessImpl(allocator, &difference.edits);
-            return difference;
         }
 
         /// Reduce the number of edits by eliminating operationally trivial
         /// equalities.
-        /// @return difference.
-        pub fn cleanupEfficiency(difference: *Diff, allocator: Allocator) OOM!*Diff {
+        pub fn cleanupEfficiency(difference: *Diff, allocator: Allocator) OOM!void {
             try difference.cleanupEfficiencyImpl(allocator, &difference.edits);
-            return difference;
         }
 
         /// Return text representing a pretty-formatted `Diff`.
@@ -284,14 +274,13 @@ pub fn DiffFn(config: anytype) type {
             allocator: Allocator,
             before: []const u8,
             zdelta: []const u8,
-        ) ZDeltaDecodeError!*Diff {
+        ) ZDeltaDecodeError!void {
             var edits = try zdelta_mod.toDiffList(Edit, DiffList, allocator, before, zdelta);
             errdefer deinitDiffList(allocator, &edits);
             if (difference.edits.items.len != 0) {
                 deinitDiffList(allocator, &difference.edits);
             }
             difference.edits = edits;
-            return difference;
         }
 
         /// Compute and return the source text (all equalities and deletions).
@@ -1675,7 +1664,7 @@ fn diffFnListFromConfig(
 ) !DiffList {
     var diff_obj = DefaultDiff.init(config);
     defer diff_obj.deinit(allocator);
-    _ = try diff_obj.diff(allocator, before, after);
+    try diff_obj.diff(allocator, before, after);
     const diffs = diff_obj.edits;
     diff_obj.edits = .empty;
     return diffs;
@@ -2260,7 +2249,7 @@ test "DiffFn lifecycle" {
     {
         var diff_obj = DefaultDiff.init(.default);
         defer diff_obj.deinit(allocator);
-        _ = try diff_obj.diff(allocator, "cat", "coat");
+        try diff_obj.diff(allocator, "cat", "coat");
         var cloned = try diff_obj.clone(allocator);
         defer cloned.deinit(allocator);
         try testing.expectEqualDeep(diff_obj.config, cloned.config);
@@ -2270,7 +2259,7 @@ test "DiffFn lifecycle" {
     {
         var diff_obj = DefaultDiff.init(.default);
         defer diff_obj.deinit(allocator);
-        _ = try diff_obj.diff(allocator, "abc", "axc");
+        try diff_obj.diff(allocator, "abc", "axc");
         var copied = try diff_obj.copy(allocator);
         defer copied.deinit(allocator);
         try testing.expectEqualDeep(diff_obj.config, copied.config);
@@ -2281,13 +2270,13 @@ test "DiffFn lifecycle" {
         var diff_obj: DefaultDiff = .default;
         defer diff_obj.deinit(allocator);
         try diff_obj.edits.append(allocator, Edit.asBorrow(.delete, "abc"));
-        _ = try diff_obj.own(allocator);
+        try diff_obj.own(allocator);
         try testing.expect(diff_obj.edits.items[0].owned);
     }
 
     {
         var diff_obj = DefaultDiff.init(.default);
-        _ = try diff_obj.diff(allocator, "abc", "axc");
+        try diff_obj.diff(allocator, "abc", "axc");
         try testing.expect(diff_obj.edits.items.len != 0);
         diff_obj.deinit(allocator);
         try testing.expectEqual(@as(usize, 0), diff_obj.edits.items.len);
@@ -2296,9 +2285,9 @@ test "DiffFn lifecycle" {
     {
         var diff_obj = DefaultDiff.init(.default);
         defer diff_obj.deinit(allocator);
-        _ = try diff_obj.diff(allocator, "abc", "axc");
+        try diff_obj.diff(allocator, "abc", "axc");
         const first_len = diff_obj.edits.items.len;
-        _ = try diff_obj.diff(allocator, "abc", "abc");
+        try diff_obj.diff(allocator, "abc", "abc");
         try testing.expect(first_len != diff_obj.edits.items.len);
         try expectEqualDiff(&.{Edit.asBorrow(.equal, "abc")}, diff_obj.edits.items);
         try testing.expectEqual(@as(isize, 0), diff_obj.changeInBytes());
@@ -2796,7 +2785,7 @@ test "DiffFn before and after text" {
     const after = "The bat in the belfry.";
     var difference = DefaultDiff.init(config);
     defer difference.deinit(allocator);
-    _ = try difference.diff(allocator, before, after);
+    try difference.diff(allocator, before, after);
     const before1 = try difference.beforeText(allocator);
     defer allocator.free(before1);
     const after1 = try difference.afterText(allocator);
@@ -2836,7 +2825,7 @@ test "DiffFn diffIndex" {
 
     var difference = DefaultDiff.init(config);
     defer difference.deinit(testing.allocator);
-    _ = try difference.diff(testing.allocator, "The midnight train", "The blue midnight train");
+    try difference.diff(testing.allocator, "The midnight train", "The blue midnight train");
     try testing.expectEqual(@as(usize, 9), difference.index(4));
 }
 
@@ -2849,7 +2838,7 @@ test "DiffFn fromZDelta replaces existing edits" {
         Edit.asBorrow(.delete, "stale"),
     });
 
-    _ = try difference.fromZDelta(allocator, "abc", "zΔ⚡b|=3|");
+    try difference.fromZDelta(allocator, "abc", "zΔ⚡b|=3|");
     try expectEqualDiff(&.{Edit.asBorrow(.equal, "abc")}, difference.edits.items);
 }
 
@@ -2870,7 +2859,7 @@ test "DiffFn beforeText regression for wikipedia ed script snippet" {
 
     var difference = DefaultDiff.init(config);
     defer difference.deinit(allocator);
-    _ = try difference.diff(allocator, before, after);
+    try difference.diff(allocator, before, after);
 
     const rebuilt_before = try difference.beforeText(allocator);
     defer allocator.free(rebuilt_before);
@@ -2898,8 +2887,8 @@ test "DiffFn prettyFormat" {
     const allocator = testing.allocator;
     var difference = DefaultDiff.init(config);
     defer difference.deinit(allocator);
-    _ = try difference.diff(allocator, "A thing of beauty is a joy forever", "Singular beauty is enjoyed forever");
-    _ = try difference.cleanupSemantic(allocator);
+    try difference.diff(allocator, "A thing of beauty is a joy forever", "Singular beauty is enjoyed forever");
+    try difference.cleanupSemantic(allocator);
     const out_text = try difference.prettyFormat(allocator, test_deco);
     defer allocator.free(out_text);
     try testing.expectEqualStrings(

@@ -393,7 +393,7 @@ fn runDiff(
 
     var diff: dmp.Diff = .default;
     defer diff.deinit(allocator);
-    _ = try diff.diff(allocator, before, after);
+    try diff.diff(allocator, before, after);
     try applyCleanupMode(&diff, allocator, res.args.cleanup orelse .semantic);
 
     var ctx = try dmp.DiffContext.fromDiff(allocator, diff);
@@ -538,7 +538,7 @@ fn runZDeltaEncode(
 
     var diff: dmp.Diff = .default;
     defer diff.deinit(allocator);
-    _ = try diff.diff(allocator, before, after);
+    try diff.diff(allocator, before, after);
 
     const version = switch (res.args.version orelse .b) {
         .a => dmp.ZDeltaVersion.a,
@@ -586,7 +586,7 @@ fn runZDeltaDecode(
 
     var diff: dmp.Diff = .default;
     defer diff.deinit(allocator);
-    _ = try diff.fromZDelta(allocator, before, zdelta);
+    try diff.fromZDelta(allocator, before, zdelta);
 
     const after = try diff.afterText(allocator);
     defer allocator.free(after);
@@ -601,12 +601,12 @@ fn applyCleanupMode(
 ) !void {
     switch (mode) {
         .none => {},
-        .semantic => _ = try diff.cleanupSemantic(allocator),
+        .semantic => try diff.cleanupSemantic(allocator),
         .lossless => {
-            _ = try diff.cleanupSemantic(allocator);
-            _ = try diff.cleanupSemanticLossless(allocator);
+            try diff.cleanupSemantic(allocator);
+            try diff.cleanupSemanticLossless(allocator);
         },
-        .efficiency => _ = try diff.cleanupEfficiency(allocator),
+        .efficiency => try diff.cleanupEfficiency(allocator),
     }
 }
 

@@ -278,7 +278,7 @@ fn assertRevisionPairInvariant(
 ) !void {
     var diff = Diff.init(diff_config);
     defer diff.deinit(testing.allocator);
-    _ = try diff.diff(testing.allocator, before.body, after.body);
+    try diff.diff(testing.allocator, before.body, after.body);
     try expectDiffListUtf8(diff.edits);
 
     const rebuilt_before = try diff.beforeText(testing.allocator);
