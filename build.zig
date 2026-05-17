@@ -48,13 +48,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const muaddiff_mod = b.createModule(.{
-        .root_source_file = b.path("src/muad_diff.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    muaddiff_mod.addImport("dmp", dmp_module);
-
     const delta_maker_mod = b.createModule(.{
         .root_source_file = b.path("tools/delta_maker.zig"),
         .target = target,
@@ -70,14 +63,6 @@ pub fn build(b: *std.Build) void {
     });
     all_tests_mod.addImport("corpus_contract", corpus_contract_mod);
 
-    if (b.lazyDependency("clap", .{
-        .target = target,
-        .optimize = optimize,
-    })) |clap_dep| {
-        muaddiff_mod.addImport("clap", clap_dep.module("clap"));
-        all_tests_mod.addImport("clap", clap_dep.module("clap"));
-    }
-
     const all_unit_tests = b.addTest(.{
         .name = "all",
         .root_module = all_tests_mod,
@@ -86,22 +71,6 @@ pub fn build(b: *std.Build) void {
 
     const run_all_unit_tests = b.addRunArtifact(all_unit_tests);
     test_step.dependOn(&run_all_unit_tests.step);
-
-    const muad_diff = b.addExecutable(.{
-        .name = "muad-diff",
-        .root_module = muaddiff_mod,
-    });
-
-    b.installArtifact(muad_diff);
-
-    const run_cmd = b.addRunArtifact(muad_diff);
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
-    const run_step = b.step("run", "Run the muad-diff CLI");
-    run_step.dependOn(&run_cmd.step);
 
     const delta_maker = b.addExecutable(.{
         .name = "delta-maker",
