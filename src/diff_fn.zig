@@ -112,7 +112,7 @@ pub fn DiffFn(config: anytype) type {
         pub const ContextType = Context;
         pub const IteratorType = SegmentIterator;
 
-        pub const DiffError = OOM || error{TooManySegments};
+        pub const DiffError = OOM || error{TooManySegments} || iteratorInitError(SegmentIterator);
 
         pub const default: Diff = .{
             .config = .default,
@@ -198,6 +198,20 @@ pub fn DiffFn(config: anytype) type {
                 difference.edits = .empty;
             }
             difference.edits = try difference.diffLine(allocator, before, after);
+        }
+
+        /// Run only the iterator-backed segment diff path, without cleanups.
+        pub fn diffBySegment(
+            difference: *Diff,
+            allocator: Allocator,
+            before: []const u8,
+            after: []const u8,
+        ) DiffError!void {
+            if (difference.edits.items.len != 0) {
+                deinitDiffList(allocator, &difference.edits);
+                difference.edits = .empty;
+            }
+            difference.edits = try difference.diffSegment(allocator, before, after);
         }
 
         /// Reduce the number of edits by eliminating semantically trivial
@@ -313,12 +327,66 @@ pub fn DiffFn(config: anytype) type {
             return count;
         }
 
-        /// Resolve the stored default context for this specialization.
-        fn makeIterator(text: []const u8) SegmentIterator {
+        /// Initialize the configured segment iterator.
+        fn makeIterator(
+            difference: *Diff,
+            allocator: Allocator,
+            text: []const u8,
+        ) DiffError!SegmentIterator {
             if (@hasDecl(SegmentIterator, "init")) {
-                return SegmentIterator.init(text);
+                const fn_info = @typeInfo(@TypeOf(SegmentIterator.init)).@"fn";
+                switch (fn_info.params.len) {
+                    1 => return try unwrapIteratorInit(SegmentIterator, SegmentIterator.init(text)),
+                    2 => {
+                        if (fnParamType(fn_info, 0) == Allocator) {
+                            return try unwrapIteratorInit(SegmentIterator, SegmentIterator.init(allocator, text));
+                        }
+                        return try unwrapIteratorInit(SegmentIterator, SegmentIterator.init(difference.context, text));
+                    },
+                    3 => {
+                        if (fnParamType(fn_info, 0) == Allocator) {
+                            return try unwrapIteratorInit(SegmentIterator, SegmentIterator.init(allocator, difference.context, text));
+                        }
+                        if (fnParamType(fn_info, 1) == Allocator) {
+                            return try unwrapIteratorInit(SegmentIterator, SegmentIterator.init(difference.context, allocator, text));
+                        }
+                        @compileError("unsupported segment iterator init signature");
+                    },
+                    else => @compileError("unsupported segment iterator init signature"),
+                }
             }
             return .{ .text = text };
+        }
+
+        /// Release the configured segment iterator.
+        fn deinitIterator(
+            difference: *Diff,
+            allocator: Allocator,
+            iterator: *SegmentIterator,
+        ) void {
+            if (@hasDecl(SegmentIterator, "deinit")) {
+                const fn_info = @typeInfo(@TypeOf(SegmentIterator.deinit)).@"fn";
+                switch (fn_info.params.len) {
+                    1 => iterator.deinit(),
+                    2 => {
+                        if (fnParamType(fn_info, 1) == Allocator) {
+                            iterator.deinit(allocator);
+                        } else {
+                            iterator.deinit(difference.context);
+                        }
+                    },
+                    3 => {
+                        if (fnParamType(fn_info, 1) == Allocator) {
+                            iterator.deinit(allocator, difference.context);
+                        } else if (fnParamType(fn_info, 2) == Allocator) {
+                            iterator.deinit(difference.context, allocator);
+                        } else {
+                            @compileError("unsupported segment iterator deinit signature");
+                        }
+                    },
+                    else => @compileError("unsupported segment iterator deinit signature"),
+                }
+            }
         }
 
         /// Apply the configured semantic scoring function.
@@ -729,6 +797,31 @@ pub fn DiffFn(config: anytype) type {
             return diffs;
         }
 
+        /// Perform a segment-level diff and rehydrate it without cleanup.
+        fn diffSegment(
+            difference: *Diff,
+            allocator: Allocator,
+            text1_in: []const u8,
+            text2_in: []const u8,
+        ) DiffError!DiffList {
+            if (std.mem.eql(u8, text1_in, text2_in)) {
+                var diffs: DiffList = .empty;
+                errdefer deinitDiffList(allocator, &diffs);
+                if (text1_in.len != 0) {
+                    try diffs.ensureUnusedCapacity(allocator, 1);
+                    diffs.appendAssumeCapacity(Edit.asBorrow(.equal, text1_in));
+                }
+                return diffs;
+            }
+
+            var text_mode = difference.copyForTextMode();
+            var a = try difference.diffSegmentsToChars(allocator, text1_in, text2_in);
+            defer a.deinit(allocator);
+            var char_diffs = try text_mode.diffInternal(allocator, a.chars_1, a.chars_2);
+            defer deinitDiffList(allocator, &char_diffs);
+            return diffCharsToLines(allocator, &char_diffs, a.line_array.items, text1_in, text2_in);
+        }
+
         /// Rediff replacement blocks character-by-character after the
         /// iterator-level speedup.
         fn diffLineCleanup(
@@ -876,7 +969,8 @@ pub fn DiffFn(config: anytype) type {
             line_array: *ArrayListUnmanaged([]const u8),
             line_hash: *std.StringHashMapUnmanaged(u31),
         ) DiffError![]const u8 {
-            var iter = makeIterator(text);
+            var iter = try difference.makeIterator(allocator, text);
+            defer difference.deinitIterator(allocator, &iter);
             return difference.diffIteratorToCharsMunge(allocator, line_array, line_hash, &iter);
         }
 
@@ -1641,6 +1735,27 @@ fn typeCanHaveDecls(comptime T: type) bool {
     };
 }
 
+fn iteratorInitError(comptime Iterator: type) type {
+    if (!@hasDecl(Iterator, "init")) return error{};
+    const fn_info = @typeInfo(@TypeOf(Iterator.init)).@"fn";
+    const Return = fn_info.return_type orelse @compileError("segment iterator init must return an iterator");
+    return switch (@typeInfo(Return)) {
+        .error_union => |eu| eu.error_set,
+        else => error{},
+    };
+}
+
+fn fnParamType(comptime fn_info: anytype, comptime index: usize) type {
+    return fn_info.params[index].type orelse @compileError("segment iterator function parameters must be typed");
+}
+
+fn unwrapIteratorInit(comptime Iterator: type, result: anytype) iteratorInitError(Iterator)!Iterator {
+    return switch (@typeInfo(@TypeOf(result))) {
+        .error_union => try result,
+        else => result,
+    };
+}
+
 pub const TestDiff = DiffFn(.{
     .context = void,
     .LineIterator = diff_mod.LineIterator,
@@ -1721,6 +1836,63 @@ const TDiff = struct {
     before: []const u8,
     after: []const u8,
     expected: []const Edit,
+};
+
+// Test-only context for exercising segment iterator lifecycle hooks.
+const LifecycleSegmentContext = struct {
+    marker: u8,
+    deinit_count: *usize,
+    fail_text: []const u8 = "",
+};
+
+// Test-only iterator used to verify that segment initialization can allocate,
+// read context, fail, and still be paired with deinit on initialized sides.
+const LifecycleSegmentIterator = struct {
+    cursor: usize = 0,
+    text: []const u8,
+    scratch: []u8,
+
+    pub fn init(
+        allocator: Allocator,
+        context: LifecycleSegmentContext,
+        text: []const u8,
+    ) !LifecycleSegmentIterator {
+        if (std.mem.eql(u8, text, context.fail_text)) {
+            return error.TestSegmentInitFailed;
+        }
+        const scratch = try allocator.alloc(u8, 1);
+        scratch[0] = context.marker;
+        return .{ .text = text, .scratch = scratch };
+    }
+
+    pub fn next(iter: *LifecycleSegmentIterator) ?[]const u8 {
+        if (iter.cursor == iter.text.len) return null;
+        const maybe_separator = std.mem.indexOfScalarPos(
+            u8,
+            iter.text,
+            iter.cursor,
+            '|',
+        );
+        if (maybe_separator) |separator| {
+            const segment = iter.text[iter.cursor .. separator + 1];
+            iter.cursor = separator + 1;
+            return segment;
+        }
+        const segment = iter.text[iter.cursor..];
+        iter.cursor = iter.text.len;
+        return segment;
+    }
+
+    pub fn deinit(
+        iter: *LifecycleSegmentIterator,
+        allocator: Allocator,
+        context: LifecycleSegmentContext,
+    ) void {
+        assert(iter.scratch.len == 1);
+        assert(iter.scratch[0] == context.marker);
+        context.deinit_count.* += 1;
+        allocator.free(iter.scratch);
+    }
 };
 
 fn testDiffFnHalfMatch(
@@ -2810,6 +2982,66 @@ test "DiffFn diffLineMode coverage runs" {
     defer allocator.free(after);
     try testing.expectEqualStrings("alpha\nbeta\ngamma\ndelta\n", before);
     try testing.expectEqualStrings("alpha\nBETA\nGAMMA\ndelta\n", after);
+}
+
+test "DiffFn diffBySegment" {
+    const allocator = testing.allocator;
+    var difference = DefaultDiff.init(.default);
+    defer difference.deinit(allocator);
+
+    difference.edits = try sliceToDiffList(allocator, &.{
+        Edit.asBorrow(.delete, "stale"),
+    });
+
+    try difference.diffBySegment(allocator, "abc\n", "abc\n");
+    try expectEqualDiff(&.{Edit.asBorrow(.equal, "abc\n")}, difference.edits.items);
+
+    try difference.diffBySegment(allocator, "", "");
+    try expectEqualDiff(&.{}, difference.edits.items);
+
+    try difference.diffBySegment(allocator, "abcxxx\n", "xxxdef\n");
+    try expectEqualDiff(&.{
+        Edit.asBorrow(.delete, "abcxxx\n"),
+        Edit.asBorrow(.insert, "xxxdef\n"),
+    }, difference.edits.items);
+}
+
+test "DiffFn diffBySegment supports iterator lifecycle" {
+    const allocator = testing.allocator;
+    const LifecycleDiff = DiffFn(.{
+        .context = LifecycleSegmentContext,
+        .LineIterator = LifecycleSegmentIterator,
+    });
+
+    var deinit_count: usize = 0;
+    var difference = LifecycleDiff.initContext(.default, .{
+        .marker = '!',
+        .deinit_count = &deinit_count,
+    });
+    defer difference.deinit(allocator);
+
+    try difference.diffBySegment(allocator, "alpha|beta|", "alpha|BETA|");
+    try testing.expectEqual(@as(usize, 2), deinit_count);
+
+    const before = try difference.beforeText(allocator);
+    defer allocator.free(before);
+    const after = try difference.afterText(allocator);
+    defer allocator.free(after);
+    try testing.expectEqualStrings("alpha|beta|", before);
+    try testing.expectEqualStrings("alpha|BETA|", after);
+
+    deinit_count = 0;
+    difference.context = .{
+        .marker = '!',
+        .deinit_count = &deinit_count,
+        .fail_text = "fail|",
+    };
+    try testing.expectError(
+        error.TestSegmentInitFailed,
+        difference.diffBySegment(allocator, "ok|", "fail|"),
+    );
+    try testing.expectEqual(@as(usize, 1), deinit_count);
+    try expectEqualDiff(&.{}, difference.edits.items);
 }
 
 test "DiffFn diffIndex" {
