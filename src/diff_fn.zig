@@ -186,20 +186,6 @@ pub fn DiffFn(config: anytype) type {
             difference.edits = try difference.diffImpl(allocator, before, after);
         }
 
-        /// Run only the iterator-backed speedup path.
-        pub fn diffLines(
-            difference: *Diff,
-            allocator: Allocator,
-            before: []const u8,
-            after: []const u8,
-        ) DiffError!void {
-            if (difference.edits.items.len != 0) {
-                deinitDiffList(allocator, &difference.edits);
-                difference.edits = .empty;
-            }
-            difference.edits = try difference.diffLine(allocator, before, after);
-        }
-
         /// Run only the iterator-backed segment diff path, without cleanups.
         pub fn diffBySegment(
             difference: *Diff,
@@ -516,7 +502,7 @@ pub fn DiffFn(config: anytype) type {
                 before.len > difference.config.check_line_threshold and
                 after.len > difference.config.check_line_threshold)
             {
-                return difference.diffLineMode(allocator, before, after);
+                return difference.diffSegmentMode(allocator, before, after);
             }
             return difference.diffBisect(allocator, before, after);
         }
@@ -766,19 +752,19 @@ pub fn DiffFn(config: anytype) type {
 
         /// Do a quick iterator-level diff on both strings, then rediff the
         /// changed parts for greater accuracy.
-        fn diffLineMode(
+        fn diffSegmentMode(
             difference: *Diff,
             allocator: Allocator,
             text1_in: []const u8,
             text2_in: []const u8,
         ) DiffError!DiffList {
-            var diffs = try difference.diffLine(allocator, text1_in, text2_in);
+            var diffs = try difference.diffSegmentInternal(allocator, text1_in, text2_in);
             errdefer deinitDiffList(allocator, &diffs);
-            return difference.diffLineCleanup(&diffs, allocator, text1_in, text2_in);
+            return difference.diffSegmentCleanup(&diffs, allocator, text1_in, text2_in);
         }
 
         /// Perform only the iterator-based diff speedup, returning what we get.
-        fn diffLine(
+        fn diffSegmentInternal(
             difference: *Diff,
             allocator: Allocator,
             text1_in: []const u8,
@@ -790,7 +776,7 @@ pub fn DiffFn(config: anytype) type {
             var diffs: DiffList = diff_munge: {
                 var char_diffs = try text_mode.diffInternal(allocator, a.chars_1, a.chars_2);
                 defer deinitDiffList(allocator, &char_diffs);
-                break :diff_munge try diffCharsToLines(allocator, &char_diffs, a.line_array.items, text1_in, text2_in);
+                break :diff_munge try diffCharsToSegments(allocator, &char_diffs, a.line_array.items, text1_in, text2_in);
             };
             errdefer deinitDiffList(allocator, &diffs);
             try difference.cleanupSemanticImpl(allocator, &diffs);
@@ -819,12 +805,12 @@ pub fn DiffFn(config: anytype) type {
             defer a.deinit(allocator);
             var char_diffs = try text_mode.diffInternal(allocator, a.chars_1, a.chars_2);
             defer deinitDiffList(allocator, &char_diffs);
-            return diffCharsToLines(allocator, &char_diffs, a.line_array.items, text1_in, text2_in);
+            return diffCharsToSegments(allocator, &char_diffs, a.line_array.items, text1_in, text2_in);
         }
 
         /// Rediff replacement blocks character-by-character after the
         /// iterator-level speedup.
-        fn diffLineCleanup(
+        fn diffSegmentCleanup(
             difference: *Diff,
             diffs: *DiffList,
             allocator: Allocator,
@@ -1630,7 +1616,7 @@ fn flushWriter(writer: anytype) !void {
 }
 
 /// Rehydrate the text in a diff from a string of segment hashes to real text.
-fn diffCharsToLines(
+fn diffCharsToSegments(
     allocator: Allocator,
     char_diffs: *DiffList,
     line_array: []const []const u8,
@@ -1941,7 +1927,7 @@ fn testDiffFnLineCleanupFailureCleanup(allocator: Allocator) !void {
     var config: DiffConfig = .default;
     config.check_line_threshold = 8;
     var difference = DefaultDiff.init(config);
-    var diffs = try difference.diffLine(
+    var diffs = try difference.diffSegmentInternal(
         allocator,
         "alpha\nbeta\ngamma\ndelta\nalpha\nbeta\ngamma\ndelta\n",
         "alpha\nbeta\nGAMMA\ndelta\nalpha\nbeta\nGAMMA\ndelta\n",
@@ -2016,7 +2002,7 @@ fn testDiffFnCharsToLines(
         });
     }
 
-    var diffs = try diffCharsToLines(allocator, &char_diffs, params.line_array, params.before, params.after);
+    var diffs = try diffCharsToSegments(allocator, &char_diffs, params.line_array, params.before, params.after);
     defer deinitDiffList(allocator, &diffs);
     try expectEqualDiff(params.expected, diffs.items);
 }
@@ -2515,7 +2501,7 @@ test "DiffFn diffHalfMatch" {
     });
 }
 
-test "DiffFn diffLinesToChars" {
+test "DiffFn diffSegmentsToChars" {
     const allocator = testing.allocator;
     var tmp_array_list = ArrayList([]const u8).init(allocator);
     defer tmp_array_list.deinit();
@@ -2970,7 +2956,7 @@ test "DiffFn diffLineMode coverage runs" {
     const allocator = testing.allocator;
     const config: DiffConfig = .default;
     var difference = DefaultDiff.init(config);
-    var diffs = try difference.diffLineMode(
+    var diffs = try difference.diffSegmentMode(
         allocator,
         "alpha\nbeta\ngamma\ndelta\n",
         "alpha\nBETA\nGAMMA\ndelta\n",
