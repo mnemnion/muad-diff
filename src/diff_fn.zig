@@ -735,7 +735,7 @@ pub fn DiffFn(config: anytype) type {
                 var diffs: DiffList = .empty;
                 errdefer deinitDiffList(allocator, &diffs);
                 try diffs.ensureUnusedCapacity(allocator, 2);
-                diffs.appendAssumeCapacity(Edit.asBorrow(.delete, text2b));
+                diffs.appendAssumeCapacity(Edit.asBorrow(.delete, text1a));
                 diffs.appendAssumeCapacity(Edit.asBorrow(.insert, text2a));
                 return diffs;
             }
@@ -2723,7 +2723,7 @@ test "DiffFn diffBisectSplit edge coverage" {
         var difference = DefaultDiff.init(config);
         var diffs = try difference.diffBisectSplit(allocator, "cat", "map", 3, 3);
         defer deinitDiffList(allocator, &diffs);
-        try expectEqualDiff(&.{ Edit.asBorrow(.delete, ""), Edit.asBorrow(.insert, "map") }, diffs.items);
+        try expectEqualDiff(&.{ Edit.asBorrow(.delete, "cat"), Edit.asBorrow(.insert, "map") }, diffs.items);
     }
     try testing.checkAllAllocationFailures(allocator, testDiffFnCloneDiffList, .{&.{ Edit.asBorrow(.equal, "alpha"), Edit.asBorrow(.delete, "beta"), Edit.asBorrow(.insert, "gamma") }});
     try testing.checkAllAllocationFailures(allocator, testDiffFnSliceToDiffList, .{&.{ Edit.asBorrow(.equal, "alpha"), Edit.asBorrow(.delete, "beta"), Edit.asBorrow(.insert, "gamma") }});
