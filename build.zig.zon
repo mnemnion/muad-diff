@@ -8,7 +8,9 @@
 
     .fingerprint = 0xcf462719a1974fa7,
 
-    .dependencies = .{},
+    .dependencies = .{
+        .ztap = .{ .path = "../ztap" },
+    },
 
     .paths = .{
         "all_tests.zig",

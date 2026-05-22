@@ -72,6 +72,30 @@ pub fn build(b: *std.Build) void {
     const run_all_unit_tests = b.addRunArtifact(all_unit_tests);
     test_step.dependOn(&run_all_unit_tests.step);
 
+    const ztap_dep = b.dependency("ztap", .{
+        .target = target,
+        .optimize = optimize,
+        .timed = true,
+        .threaded = true,
+    });
+
+    const ztap_unit_tests = b.addTest(.{
+        .name = "ztap-run",
+        .root_module = all_tests_mod,
+        .filters = test_filters,
+        .test_runner = .{
+            .path = ztap_dep.namedLazyPath("runner"),
+            .mode = .simple,
+        },
+    });
+    ztap_unit_tests.root_module.addImport("ztap", ztap_dep.module("ztap"));
+
+    const run_ztap_unit_tests = b.addRunArtifact(ztap_unit_tests);
+    run_ztap_unit_tests.has_side_effects = true;
+
+    const ztap_step = b.step("ztap", "Run tests with timed, threaded ZTAP output");
+    ztap_step.dependOn(&run_ztap_unit_tests.step);
+
     const delta_maker = b.addExecutable(.{
         .name = "delta-maker",
         .root_module = delta_maker_mod,
