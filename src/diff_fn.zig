@@ -2556,11 +2556,11 @@ test "DiffFn diffCharsToLines" {
 }
 
 test "DiffFn diffCleanupMerge" {
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCleanupMerge, .{TestIO{ .input = &.{ .{ .operation = .equal, .owned = false, .text = "a" }, .{ .operation = .delete, .owned = false, .text = "b" }, .{ .operation = .insert, .owned = false, .text = "c" } }, .expected = &.{ .{ .operation = .equal, .owned = false, .text = "a" }, .{ .operation = .delete, .owned = false, .text = "b" }, .{ .operation = .insert, .owned = false, .text = "c" } } }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCleanupMerge, .{TestIO{ .input = &.{ .{ .operation = .equal, .owned = false, .text = "a" }, .{ .operation = .equal, .owned = false, .text = "b" }, .{ .operation = .equal, .owned = false, .text = "c" } }, .expected = &.{.{ .operation = .equal, .owned = false, .text = "abc" }} }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCleanupMerge, .{TestIO{ .input = &.{ .{ .operation = .delete, .owned = false, .text = "a" }, .{ .operation = .delete, .owned = false, .text = "b" }, .{ .operation = .delete, .owned = false, .text = "c" } }, .expected = &.{.{ .operation = .delete, .owned = false, .text = "abc" }} }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCleanupMerge, .{TestIO{ .input = &.{ .{ .operation = .insert, .owned = false, .text = "a" }, .{ .operation = .insert, .owned = false, .text = "b" }, .{ .operation = .insert, .owned = false, .text = "c" } }, .expected = &.{.{ .operation = .insert, .owned = false, .text = "abc" }} }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCleanupMerge, .{TestIO{ .input = &.{ .{ .operation = .delete, .owned = false, .text = "a" }, .{ .operation = .insert, .owned = false, .text = "abc" }, .{ .operation = .delete, .owned = false, .text = "dc" } }, .expected = &.{ .{ .operation = .equal, .owned = false, .text = "a" }, .{ .operation = .delete, .owned = false, .text = "d" }, .{ .operation = .insert, .owned = false, .text = "b" }, .{ .operation = .equal, .owned = false, .text = "c" } } }});
+    try testDiffFnCleanupMerge(testing.allocator, TestIO{ .input = &.{ .{ .operation = .equal, .owned = false, .text = "a" }, .{ .operation = .delete, .owned = false, .text = "b" }, .{ .operation = .insert, .owned = false, .text = "c" } }, .expected = &.{ .{ .operation = .equal, .owned = false, .text = "a" }, .{ .operation = .delete, .owned = false, .text = "b" }, .{ .operation = .insert, .owned = false, .text = "c" } } });
+    try testDiffFnCleanupMerge(testing.allocator, TestIO{ .input = &.{ .{ .operation = .equal, .owned = false, .text = "a" }, .{ .operation = .equal, .owned = false, .text = "b" }, .{ .operation = .equal, .owned = false, .text = "c" } }, .expected = &.{.{ .operation = .equal, .owned = false, .text = "abc" }} });
+    try testDiffFnCleanupMerge(testing.allocator, TestIO{ .input = &.{ .{ .operation = .delete, .owned = false, .text = "a" }, .{ .operation = .delete, .owned = false, .text = "b" }, .{ .operation = .delete, .owned = false, .text = "c" } }, .expected = &.{.{ .operation = .delete, .owned = false, .text = "abc" }} });
+    try testDiffFnCleanupMerge(testing.allocator, TestIO{ .input = &.{ .{ .operation = .insert, .owned = false, .text = "a" }, .{ .operation = .insert, .owned = false, .text = "b" }, .{ .operation = .insert, .owned = false, .text = "c" } }, .expected = &.{.{ .operation = .insert, .owned = false, .text = "abc" }} });
+    try testDiffFnCleanupMerge(testing.allocator, TestIO{ .input = &.{ .{ .operation = .delete, .owned = false, .text = "a" }, .{ .operation = .insert, .owned = false, .text = "abc" }, .{ .operation = .delete, .owned = false, .text = "dc" } }, .expected = &.{ .{ .operation = .equal, .owned = false, .text = "a" }, .{ .operation = .delete, .owned = false, .text = "d" }, .{ .operation = .insert, .owned = false, .text = "b" }, .{ .operation = .equal, .owned = false, .text = "c" } } });
 
     {
         const text = "abcdef";
@@ -2588,7 +2588,7 @@ test "DiffFn diffCleanupMerge" {
             },
         });
     }
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCleanupMerge, .{TestIO{
+    try testDiffFnCleanupMerge(testing.allocator, TestIO{
         .input = &.{
             Edit.asBorrow(.equal, "a"),
             Edit.asBorrow(.delete, "bc"),
@@ -2599,8 +2599,8 @@ test "DiffFn diffCleanupMerge" {
             Edit.asBorrow(.delete, "c"),
             Edit.asBorrow(.insert, "d"),
         },
-    }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCleanupMerge, .{TestIO{
+    });
+    try testDiffFnCleanupMerge(testing.allocator, TestIO{
         .input = &.{
             Edit.asBorrow(.equal, "a"),
             Edit.asBorrow(.insert, "ba"),
@@ -2610,8 +2610,8 @@ test "DiffFn diffCleanupMerge" {
             Edit.asBorrow(.insert, "ab"),
             Edit.asBorrow(.equal, "ac"),
         },
-    }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCleanupMerge, .{TestIO{
+    });
+    try testDiffFnCleanupMerge(testing.allocator, TestIO{
         .input = &.{
             Edit.asBorrow(.equal, "a"),
             Edit.asBorrow(.insert, "ba"),
@@ -2621,8 +2621,8 @@ test "DiffFn diffCleanupMerge" {
             Edit.asBorrow(.insert, "ab"),
             Edit.asBorrow(.equal, "ab"),
         },
-    }});
-    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCleanupMerge, .{TestIO{
+    });
+    try testDiffFnCleanupMerge(testing.allocator, TestIO{
         .input = &.{
             Edit.asBorrow(.equal, "x"),
             Edit.asBorrow(.insert, "ba"),
@@ -2632,7 +2632,7 @@ test "DiffFn diffCleanupMerge" {
             Edit.asBorrow(.equal, "xb"),
             Edit.asBorrow(.insert, "ab"),
         },
-    }});
+    });
 }
 
 test "DiffFn diffCleanupSemanticLossless" {
@@ -2747,14 +2747,11 @@ test "DiffFn diff" {
 }
 
 test "DiffFn diffLineMode" {
-    try testing.checkAllAllocationFailures(
+    try testDiffFnLineMode(
         testing.allocator,
-        testDiffFnLineMode,
-        .{
-            @as(u32, 20),
-            "1234567890\n1234567890\n1234567890",
-            "abcdefghij\nabcdefghij\nabcdefghij",
-        },
+        @as(u32, 20),
+        "1234567890\n1234567890\n1234567890",
+        "abcdefghij\nabcdefghij\nabcdefghij",
     );
 }
 
@@ -2968,6 +2965,51 @@ test "DiffFn diffLineMode coverage runs" {
     defer allocator.free(after);
     try testing.expectEqualStrings("alpha\nbeta\ngamma\ndelta\n", before);
     try testing.expectEqualStrings("alpha\nBETA\nGAMMA\ndelta\n", after);
+}
+
+fn testDiffFnSegmentModeFailureCleanup(allocator: Allocator) !void {
+    const config: DiffConfig = .default;
+    var difference = DefaultDiff.init(config);
+    var diffs = try difference.diffSegmentMode(
+        allocator,
+        "alpha\nbeta\ngamma\ndelta\n",
+        "alpha\nBETA\nGAMMA\ndelta\n",
+    );
+    defer deinitDiffList(allocator, &diffs);
+}
+
+fn testDiffFnCopyFailureCleanup(allocator: Allocator) !void {
+    var source_edits = try sliceToDiffList(testing.allocator, &.{
+        Edit.asBorrow(.equal, "alpha"),
+        Edit.asBorrow(.delete, "beta"),
+        Edit.asBorrow(.insert, "gamma"),
+    });
+    defer deinitDiffList(testing.allocator, &source_edits);
+
+    const source = DefaultDiff{
+        .config = .default,
+        .context = {},
+        .edits = source_edits,
+    };
+    var copied = try source.copy(allocator);
+    defer copied.deinit(allocator);
+}
+
+fn testDiffFnSegmentCleanupSubDiffFailureCleanup(allocator: Allocator) !void {
+    var diffs = try DiffList.initCapacity(allocator, 3);
+    errdefer deinitDiffList(allocator, &diffs);
+    diffs.appendAssumeCapacity(Edit.asBorrow(.delete, "beta"));
+    diffs.appendAssumeCapacity(Edit.asBorrow(.insert, "BETA"));
+
+    var difference = DefaultDiff.init(.default);
+    var cleaned = try difference.diffSegmentCleanup(&diffs, allocator, "beta", "BETA");
+    defer deinitDiffList(allocator, &cleaned);
+}
+
+test "DiffFn allocation cleanup coverage probes" {
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnSegmentModeFailureCleanup, .{});
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCopyFailureCleanup, .{});
+    try testing.checkAllAllocationFailures(testing.allocator, testDiffFnSegmentCleanupSubDiffFailureCleanup, .{});
 }
 
 test "DiffFn diffBySegment" {

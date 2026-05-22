@@ -2757,11 +2757,7 @@ fn testMakePatch(allocator: Allocator) !void {
 }
 
 test "makePatch" {
-    try testing.checkAllAllocationFailures(
-        testing.allocator,
-        testMakePatch,
-        .{},
-    );
+    try testMakePatch(testing.allocator);
 }
 
 fn testPatchSplitMax(allocator: Allocator) !void {
@@ -2838,11 +2834,6 @@ fn testPatchSplitMax(allocator: Allocator) !void {
 }
 
 test patchSplitMax {
-    try testing.checkAllAllocationFailures(
-        testing.allocator,
-        testPatchSplitMax,
-        .{},
-    );
     try testPatchSplitMax(testing.allocator);
 }
 
@@ -2927,173 +2918,176 @@ test "testPatchApply" {
     config.match_threshold = 0.5;
     config.delete_threshold = 0.5;
     // Null case.
-    try testing.checkAllAllocationFailures(
+    try testPatchApply(
         testing.allocator,
-        testPatchApply,
-        .{
-            config,
-            "",
-            "",
-            "Hello World",
-            "Hello World",
-            true,
-        },
+        config,
+        "",
+        "",
+        "Hello World",
+        "Hello World",
+        true,
     );
     // Exact match.
-    try testing.checkAllAllocationFailures(
+    try testPatchApply(
         testing.allocator,
-        testPatchApply,
-        .{
-            config,
-            "The quick brown fox jumps over the lazy dog.",
-            "That quick brown fox jumped over a lazy dog.",
-            "The quick brown fox jumps over the lazy dog.",
-            "That quick brown fox jumped over a lazy dog.",
-            true,
-        },
+        config,
+        "The quick brown fox jumps over the lazy dog.",
+        "That quick brown fox jumped over a lazy dog.",
+        "The quick brown fox jumps over the lazy dog.",
+        "That quick brown fox jumped over a lazy dog.",
+        true,
     );
     // Partial match.
-    try testing.checkAllAllocationFailures(
+    try testPatchApply(
         testing.allocator,
-        testPatchApply,
-        .{
-            config,
-            "The quick brown fox jumps over the lazy dog.",
-            "That quick brown fox jumped over a lazy dog.",
-            "The quick red rabbit jumps over the tired tiger.",
-            "That quick red rabbit jumped over a tired tiger.",
-            true,
-        },
+        config,
+        "The quick brown fox jumps over the lazy dog.",
+        "That quick brown fox jumped over a lazy dog.",
+        "The quick red rabbit jumps over the tired tiger.",
+        "That quick red rabbit jumped over a tired tiger.",
+        true,
     );
     // Failed match.
-    try testing.checkAllAllocationFailures(
+    try testPatchApply(
         testing.allocator,
-        testPatchApply,
-        .{
-            config,
-            "The quick brown fox jumps over the lazy dog.",
-            "That quick brown fox jumped over a lazy dog.",
-            "I am the very model of a modern major general.",
-            "I am the very model of a modern major general.",
-            false,
-        },
+        config,
+        "The quick brown fox jumps over the lazy dog.",
+        "That quick brown fox jumped over a lazy dog.",
+        "I am the very model of a modern major general.",
+        "I am the very model of a modern major general.",
+        false,
     );
     // Big delete, small change.
-    try testing.checkAllAllocationFailures(
+    try testPatchApply(
         testing.allocator,
-        testPatchApply,
-        .{
-            config,
-            "x1234567890123456789012345678901234567890123456789012345678901234567890y",
-            "xabcy",
-            "x123456789012345678901234567890-----++++++++++-----123456789012345678901234567890y",
-            if (match_max_bits == 32) "xabcy" else "xabc1234567890y",
-            true,
-        },
+        config,
+        "x1234567890123456789012345678901234567890123456789012345678901234567890y",
+        "xabcy",
+        "x123456789012345678901234567890-----++++++++++-----123456789012345678901234567890y",
+        if (match_max_bits == 32) "xabcy" else "xabc1234567890y",
+        true,
     );
     // Large pattern exact match.
-    try testing.checkAllAllocationFailures(
+    try testPatchApply(
         testing.allocator,
-        testPatchApply,
-        .{
-            config,
-            "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-            "abcdefghijklmnopqrstuvwxyzHELLO6789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-            "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-            "abcdefghijklmnopqrstuvwxyzHELLO6789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-            true,
-        },
+        config,
+        "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        "abcdefghijklmnopqrstuvwxyzHELLO6789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        "abcdefghijklmnopqrstuvwxyzHELLO6789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        true,
     );
     // Big delete, big change 1.
-    try testing.checkAllAllocationFailures(
+    try testPatchApply(
         testing.allocator,
-        testPatchApply,
-        .{
-            config,
-            "x1234567890123456789012345678901234567890123456789012345678901234567890y",
-            "xabcy",
-            "x12345678901234567890---------------++++++++++---------------12345678901234567890y",
-            if (match_max_bits == 32)
-                "xabc12345678901234567890---------------++++++++++---------------12345678901234567890y"
-            else
-                "x12345678901234567890---------------++++++++++---------------123456abcy",
-            false,
-        },
+        config,
+        "x1234567890123456789012345678901234567890123456789012345678901234567890y",
+        "xabcy",
+        "x12345678901234567890---------------++++++++++---------------12345678901234567890y",
+        if (match_max_bits == 32)
+            "xabc12345678901234567890---------------++++++++++---------------12345678901234567890y"
+        else
+            "x12345678901234567890---------------++++++++++---------------123456abcy",
+        false,
     );
     config.delete_threshold = 0.6;
     // Big delete, big change 2.
-    try testing.checkAllAllocationFailures(
+    try testPatchApply(
         testing.allocator,
-        testPatchApply,
-        .{
-            config,
-            "x1234567890123456789012345678901234567890123456789012345678901234567890y",
-            "xabcy",
-            "x12345678901234567890---------------++++++++++---------------12345678901234567890y",
-            if (match_max_bits == 32)
-                "xabcy"
-            else
-                "x12345678901234567890---------------++++++++++---------------123456abcy",
-            match_max_bits == 32,
-        },
+        config,
+        "x1234567890123456789012345678901234567890123456789012345678901234567890y",
+        "xabcy",
+        "x12345678901234567890---------------++++++++++---------------12345678901234567890y",
+        if (match_max_bits == 32)
+            "xabcy"
+        else
+            "x12345678901234567890---------------++++++++++---------------123456abcy",
+        match_max_bits == 32,
     );
     config.delete_threshold = 0.6;
     config.match_threshold = 0.0;
     config.match_distance = 0;
     // Compensate for failed patch.
-    try testing.checkAllAllocationFailures(
+    try testPatchApply(
         testing.allocator,
-        testPatchApply,
-        .{
-            config,
-            "abcdefghijklmnopqrstuvwxyz--------------------1234567890",
-            "abcXXXXXXXXXXdefghijklmnopqrstuvwxyz--------------------1234567YYYYYYYYYY890",
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZ--------------------1234567890",
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZ--------------------1234567YYYYYYYYYY890",
-            false,
-        },
+        config,
+        "abcdefghijklmnopqrstuvwxyz--------------------1234567890",
+        "abcXXXXXXXXXXdefghijklmnopqrstuvwxyz--------------------1234567YYYYYYYYYY890",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ--------------------1234567890",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ--------------------1234567YYYYYYYYYY890",
+        false,
     );
     config.match_threshold = 0.5;
     config.match_distance = 1000;
     // Edge exact match.
-    try testing.checkAllAllocationFailures(
+    try testPatchApply(
         testing.allocator,
-        testPatchApply,
-        .{
-            config,
-            "",
-            "test",
-            "",
-            "test",
-            true,
-        },
+        config,
+        "",
+        "test",
+        "",
+        "test",
+        true,
     );
     // Near edge exact match.
-    try testing.checkAllAllocationFailures(
+    try testPatchApply(
         testing.allocator,
-        testPatchApply,
-        .{
-            config,
-            "XY",
-            "XtestY",
-            "XY",
-            "XtestY",
-            true,
-        },
+        config,
+        "XY",
+        "XtestY",
+        "XY",
+        "XtestY",
+        true,
     );
     // Edge partial match.
-    try testing.checkAllAllocationFailures(
+    try testPatchApply(
         testing.allocator,
-        testPatchApply,
-        .{
-            config,
-            "y",
-            "y123",
-            "x",
-            "x123",
-            true,
-        },
+        config,
+        "y",
+        "y123",
+        "x",
+        "x123",
+        true,
     );
+}
+
+fn testPatchCopyFailureCleanup(allocator: Allocator) !void {
+    var patch = Patch.init(.default);
+    defer patch.deinit(testing.allocator);
+
+    var hunk = Hunk{};
+    errdefer hunk.deinit(testing.allocator);
+    try hunk.diffs.ensureTotalCapacity(testing.allocator, 2);
+    hunk.diffs.appendAssumeCapacity(try Edit.asOwn(testing.allocator, .delete, "alpha"));
+    hunk.diffs.appendAssumeCapacity(try Edit.asOwn(testing.allocator, .insert, "omega"));
+    hunk.start1 = 0;
+    hunk.start2 = 0;
+    hunk.length1 = "alpha".len;
+    hunk.length2 = "omega".len;
+
+    try patch.hunks.ensureTotalCapacity(testing.allocator, 1);
+    patch.hunks.appendAssumeCapacity(hunk);
+    hunk = .{};
+
+    var copied = try patch.copy(allocator);
+    defer copied.deinit(allocator);
+}
+
+fn testPatchApplyFailureCleanup(allocator: Allocator) !void {
+    try testPatchApply(
+        allocator,
+        .default,
+        "abc",
+        "axc",
+        "abc",
+        "axc",
+        true,
+    );
+}
+
+test "patch allocation cleanup coverage probes" {
+    try testing.checkAllAllocationFailures(testing.allocator, testPatchCopyFailureCleanup, .{});
+    try testing.checkAllAllocationFailures(testing.allocator, testPatchApplyFailureCleanup, .{});
 }
 
 test "patching does not affect patches" {
@@ -3252,6 +3246,7 @@ fn testPatchSplitMaxCoverageLargeDeleteBranchErrdefer(allocator: Allocator) erro
 test "patchSplitMax coverage large delete branch" {
     try testPatchSplitMaxCoverageLargeDeleteBranch(testing.allocator);
     try testPatchSplitMaxCoverageMergeTrailingEqual(testing.allocator);
+    try testing.checkAllAllocationFailures(testing.allocator, testPatchSplitMaxCoverageMergeTrailingEqual, .{});
     try testing.expectError(
         error.Sentinel,
         testPatchSplitMaxCoverageLargeDeleteBranchErrdefer(testing.allocator),
