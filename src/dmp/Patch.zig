@@ -562,6 +562,7 @@ const MatchAlphabet = struct {
                 const index: u8 = @intCast(map.count);
                 map.dense[index] = c;
                 map.sparse[c] = index;
+                map.values[index] = 0;
                 map.count += 1;
             }
         }
