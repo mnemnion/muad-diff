@@ -12,6 +12,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const memex_dep = b.dependency("memex", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const memex_module = memex_dep.module("memex");
+    dmp_module.addImport("memex", memex_module);
+
     const test_filters = b.option(
         []const []const u8,
         "test-filter",
@@ -62,6 +69,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     all_tests_mod.addImport("corpus_contract", corpus_contract_mod);
+    all_tests_mod.addImport("memex", memex_module);
 
     const all_unit_tests = b.addTest(.{
         .name = "all",

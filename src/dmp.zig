@@ -18,6 +18,7 @@ const zdelta_mod = @import("zdelta.zig");
 
 pub const Diff = diff_mod.Diff;
 pub const DiffFn = diff_fn_mod.DiffFn;
+pub const WhichText = diff_fn_mod.WhichText;
 pub const Edit = diff_mod.Edit;
 pub const DiffConfig = diff_mod.DiffConfig;
 pub const DiffDecorations = diff_mod.DiffDecorations;

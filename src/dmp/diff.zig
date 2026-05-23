@@ -172,6 +172,8 @@ pub const DiffDecorations = struct {
 pub const Diff = diff_fn_mod.DiffFn(.{
     .context = void,
     .LineIterator = LineIterator,
+    .fixSegmentBackward = fixLineSegmentBackward,
+    .fixSegmentForward = fixLineSegmentForward,
     .semanticScore = diffCleanupSemanticScore,
 });
 
@@ -212,6 +214,16 @@ pub const LineIterator = struct {
         return iter.text[from..];
     }
 };
+
+fn fixLineSegmentBackward(_: *void, text: []const u8, _: diff_fn_mod.WhichText) usize {
+    const newline = std.mem.lastIndexOfScalar(u8, text, '\n') orelse return 0;
+    return newline + 1;
+}
+
+fn fixLineSegmentForward(_: *void, text: []const u8, _: diff_fn_mod.WhichText) usize {
+    const newline = std.mem.indexOfScalar(u8, text, '\n') orelse return text.len;
+    return newline + 1;
+}
 
 pub fn writeDecoratedEdit(
     allocator: Allocator,
@@ -312,6 +324,14 @@ fn testWriteDecoratedEditPreProcess(allocator: Allocator) !void {
 
 test "writeDecoratedEdit frees pre-processed text" {
     try testing.checkAllAllocationFailures(testing.allocator, testWriteDecoratedEditPreProcess, .{});
+}
+
+test "default Diff fixes segment splits to line boundaries" {
+    var context: void = {};
+    try testing.expectEqual(@as(usize, 6), fixLineSegmentBackward(&context, "alpha\nomega", .before));
+    try testing.expectEqual(@as(usize, 0), fixLineSegmentBackward(&context, "alpha", .after));
+    try testing.expectEqual(@as(usize, 6), fixLineSegmentForward(&context, "alpha\nomega", .before));
+    try testing.expectEqual(@as(usize, 5), fixLineSegmentForward(&context, "alpha", .after));
 }
 
 const std = @import("std");

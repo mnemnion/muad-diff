@@ -68,6 +68,11 @@ const BorrowedLosslessWindow = struct {
     equality_2: []const u8,
 };
 
+pub const WhichText = enum {
+    before,
+    after,
+};
+
 /// Result of line- or segment-based compression prior to rediffing.
 const SegmentsToCharsResult = struct {
     chars_1: []const u8,
@@ -86,6 +91,7 @@ const SegmentsToCharsResult = struct {
 /// Supported fields are:
 /// - `context`: stored context type, default `void`
 /// - `LineIterator`: iterator type for segmentation, default line iterator
+/// - `fixSegmentForward` and `fixSegmentBackward`: segment boundary fixups
 /// - `semanticScore`: boundary-scoring function for semantic cleanup
 pub fn DiffFn(config: anytype) type {
     const Config = @TypeOf(config);
@@ -98,6 +104,14 @@ pub fn DiffFn(config: anytype) type {
         config.semanticScore
     else
         defaultSemanticScore;
+    const has_fix_segment_forward = @hasField(Config, "fixSegmentForward");
+    const has_fix_segment_backward = @hasField(Config, "fixSegmentBackward");
+    const has_fix_segment_splits = has_fix_segment_forward and has_fix_segment_backward;
+    comptime {
+        if (has_fix_segment_forward != has_fix_segment_backward) {
+            @compileError("DiffFn config must provide both fixSegmentForward and fixSegmentBackward");
+        }
+    }
 
     return struct {
         /// The diff configuration, see `DiffConfig`.
@@ -111,6 +125,7 @@ pub fn DiffFn(config: anytype) type {
 
         pub const ContextType = Context;
         pub const IteratorType = SegmentIterator;
+        pub const WhichTextType = WhichText;
 
         pub const DiffError = OOM || error{TooManySegments} || iteratorInitError(SegmentIterator);
 
@@ -397,7 +412,8 @@ pub fn DiffFn(config: anytype) type {
             before: []const u8,
             after: []const u8,
         ) DiffError!DiffList {
-            if (std.mem.eql(u8, before, after)) {
+            const first_diff = memex.indexOfDiff(u8, before, after);
+            if (before.len == after.len and first_diff == before.len) {
                 var diffs: DiffList = .empty;
                 errdefer deinitDiffList(allocator, &diffs);
                 if (before.len != 0) {
@@ -407,12 +423,12 @@ pub fn DiffFn(config: anytype) type {
                 return diffs;
             }
 
-            var common_length = diffCommonPrefix(before, after);
+            var common_length = fixSplitBackward(before, first_diff);
             const common_prefix = before[0..common_length];
             var trimmed_before = before[common_length..];
             var trimmed_after = after[common_length..];
 
-            common_length = diffCommonSuffix(trimmed_before, trimmed_after);
+            common_length = diffCommonSuffixFromLastDiff(trimmed_before, trimmed_after);
             const common_suffix = trimmed_before[trimmed_before.len - common_length ..];
             trimmed_before = trimmed_before[0 .. trimmed_before.len - common_length];
             trimmed_after = trimmed_after[0 .. trimmed_after.len - common_length];
@@ -430,6 +446,25 @@ pub fn DiffFn(config: anytype) type {
             }
             try difference.cleanupMergeImpl(allocator, &diffs);
             return diffs;
+        }
+
+        /// Find a common suffix after prefix trimming, using memex's reverse
+        /// diff scan while preserving UTF-8 code point boundaries.
+        fn diffCommonSuffixFromLastDiff(before: []const u8, after: []const u8) usize {
+            const n = @min(before.len, after.len);
+            if (n == 0) return 0;
+
+            const before_tail_start = before.len - n;
+            const after_tail_start = after.len - n;
+            const first_suffix_diff = memex.lastIndexOfDiff(
+                u8,
+                before[before_tail_start..],
+                after[after_tail_start..],
+            );
+            if (first_suffix_diff == 0) return n;
+
+            const suffix_start = fixSplitForward(before, before_tail_start + first_suffix_diff);
+            return before.len - suffix_start;
         }
 
         /// Find the differences between two texts, assuming they do not share
@@ -790,14 +825,90 @@ pub fn DiffFn(config: anytype) type {
             text1_in: []const u8,
             text2_in: []const u8,
         ) DiffError!DiffList {
+            if (comptime has_fix_segment_splits) {
+                return difference.diffSegmentWithFixedSplits(allocator, text1_in, text2_in);
+            }
+            return difference.diffSegmentRaw(allocator, text1_in, text2_in);
+        }
+
+        fn diffSegmentWithFixedSplits(
+            difference: *Diff,
+            allocator: Allocator,
+            text1_in: []const u8,
+            text2_in: []const u8,
+        ) DiffError!DiffList {
+            const first_diff = memex.indexOfDiff(u8, text1_in, text2_in);
+            if (text1_in.len == text2_in.len and first_diff == text1_in.len) {
+                return diffEqualText(allocator, text1_in);
+            }
+
+            var common_length = config.fixSegmentBackward(
+                &difference.context,
+                text1_in[0..first_diff],
+                .before,
+            );
+            assert(common_length <= first_diff);
+            const common_prefix = text1_in[0..common_length];
+            var trimmed_text1 = text1_in[common_length..];
+            var trimmed_text2 = text2_in[common_length..];
+
+            common_length = difference.diffSegmentCommonSuffixFromLastDiff(trimmed_text1, trimmed_text2);
+            const common_suffix = trimmed_text1[trimmed_text1.len - common_length ..];
+            trimmed_text1 = trimmed_text1[0 .. trimmed_text1.len - common_length];
+            trimmed_text2 = trimmed_text2[0 .. trimmed_text2.len - common_length];
+
+            var diffs = try difference.diffSegmentRaw(allocator, trimmed_text1, trimmed_text2);
+            errdefer deinitDiffList(allocator, &diffs);
+
+            if (common_prefix.len != 0) {
+                try diffs.ensureUnusedCapacity(allocator, 1);
+                diffs.insertAssumeCapacity(0, Edit.asBorrow(.equal, common_prefix));
+            }
+            if (common_suffix.len != 0) {
+                try diffs.ensureUnusedCapacity(allocator, 1);
+                diffs.appendAssumeCapacity(Edit.asBorrow(.equal, common_suffix));
+            }
+            return diffs;
+        }
+
+        fn diffSegmentCommonSuffixFromLastDiff(
+            difference: *Diff,
+            before: []const u8,
+            after: []const u8,
+        ) usize {
+            const n = @min(before.len, after.len);
+            if (n == 0) return 0;
+
+            const before_tail_start = before.len - n;
+            const after_tail_start = after.len - n;
+            const first_suffix_diff = memex.lastIndexOfDiff(
+                u8,
+                before[before_tail_start..],
+                after[after_tail_start..],
+            );
+            const suffix_start = if (first_suffix_diff == 0)
+                before_tail_start
+            else
+                before_tail_start + first_suffix_diff;
+
+            const suffix_adjust = config.fixSegmentForward(
+                &difference.context,
+                before[suffix_start..],
+                .before,
+            );
+            assert(suffix_adjust <= before.len - suffix_start);
+            return before.len - suffix_start - suffix_adjust;
+        }
+
+        /// Perform a segment-level diff and rehydrate it without cleanup.
+        fn diffSegmentRaw(
+            difference: *Diff,
+            allocator: Allocator,
+            text1_in: []const u8,
+            text2_in: []const u8,
+        ) DiffError!DiffList {
             if (std.mem.eql(u8, text1_in, text2_in)) {
-                var diffs: DiffList = .empty;
-                errdefer deinitDiffList(allocator, &diffs);
-                if (text1_in.len != 0) {
-                    try diffs.ensureUnusedCapacity(allocator, 1);
-                    diffs.appendAssumeCapacity(Edit.asBorrow(.equal, text1_in));
-                }
-                return diffs;
+                return diffEqualText(allocator, text1_in);
             }
 
             var text_mode = difference.copyForTextMode();
@@ -1615,6 +1726,16 @@ fn flushWriter(writer: anytype) !void {
     }
 }
 
+fn diffEqualText(allocator: Allocator, text: []const u8) OOM!DiffList {
+    var diffs: DiffList = .empty;
+    errdefer deinitDiffList(allocator, &diffs);
+    if (text.len != 0) {
+        try diffs.ensureUnusedCapacity(allocator, 1);
+        diffs.appendAssumeCapacity(Edit.asBorrow(.equal, text));
+    }
+    return diffs;
+}
+
 /// Rehydrate the text in a diff from a string of segment hashes to real text.
 fn diffCharsToSegments(
     allocator: Allocator,
@@ -1880,6 +2001,54 @@ const LifecycleSegmentIterator = struct {
         allocator.free(iter.scratch);
     }
 };
+
+const FixedSegmentContext = struct {
+    backward_calls: usize = 0,
+    forward_calls: usize = 0,
+    backward_which: WhichText = .after,
+    forward_which: WhichText = .after,
+    backward_text: []const u8 = "",
+    forward_text: []const u8 = "",
+};
+
+const PipeSegmentIterator = struct {
+    cursor: usize = 0,
+    text: []const u8,
+
+    pub fn next(iter: *PipeSegmentIterator) ?[]const u8 {
+        if (iter.cursor == iter.text.len) return null;
+        const maybe_separator = std.mem.indexOfScalarPos(
+            u8,
+            iter.text,
+            iter.cursor,
+            '|',
+        );
+        if (maybe_separator) |separator| {
+            const segment = iter.text[iter.cursor .. separator + 1];
+            iter.cursor = separator + 1;
+            return segment;
+        }
+        const segment = iter.text[iter.cursor..];
+        iter.cursor = iter.text.len;
+        return segment;
+    }
+};
+
+fn fixPipeSegmentBackward(context: *FixedSegmentContext, text: []const u8, which: WhichText) usize {
+    context.backward_calls += 1;
+    context.backward_which = which;
+    context.backward_text = text;
+    const separator = std.mem.lastIndexOfScalar(u8, text, '|') orelse return 0;
+    return separator + 1;
+}
+
+fn fixPipeSegmentForward(context: *FixedSegmentContext, text: []const u8, which: WhichText) usize {
+    context.forward_calls += 1;
+    context.forward_which = which;
+    context.forward_text = text;
+    const separator = std.mem.indexOfScalar(u8, text, '|') orelse return text.len;
+    return separator + 1;
+}
 
 fn testDiffFnHalfMatch(
     params: TestHalfMatch,
@@ -2744,6 +2913,7 @@ test "DiffFn diff" {
     try testing.checkAllAllocationFailures(testing.allocator, testDiffFn, .{TDiff{ .config = config, .before = "abc", .after = "ab123c", .expected = &.{ .{ .operation = .equal, .owned = false, .text = "ab" }, .{ .operation = .insert, .owned = false, .text = "123" }, .{ .operation = .equal, .owned = false, .text = "c" } } }});
     try testing.checkAllAllocationFailures(testing.allocator, testDiffFn, .{TDiff{ .config = config, .before = "a123bc", .after = "abc", .expected = &.{ .{ .operation = .equal, .owned = false, .text = "a" }, .{ .operation = .delete, .owned = false, .text = "123" }, .{ .operation = .equal, .owned = false, .text = "bc" } } }});
     try testing.checkAllAllocationFailures(testing.allocator, testDiffFn, .{TDiff{ .config = config, .before = "a", .after = "b", .expected = &.{ .{ .operation = .delete, .owned = false, .text = "a" }, .{ .operation = .insert, .owned = false, .text = "b" } } }});
+    try testDiffFn(testing.allocator, .{ .config = config, .before = "xéz", .after = "xèz", .expected = &.{ .{ .operation = .equal, .owned = false, .text = "x" }, .{ .operation = .delete, .owned = false, .text = "é" }, .{ .operation = .insert, .owned = false, .text = "è" }, .{ .operation = .equal, .owned = false, .text = "z" } } });
 }
 
 test "DiffFn diffLineMode" {
@@ -2949,7 +3119,7 @@ test "DiffFn before and after text" {
     try testing.expectEqualStrings(after, after1);
 }
 
-test "DiffFn diffLineMode coverage runs" {
+test "DiffFn diffSegmentMode coverage runs" {
     const allocator = testing.allocator;
     const config: DiffConfig = .default;
     var difference = DefaultDiff.init(config);
@@ -3070,6 +3240,37 @@ test "DiffFn diffBySegment supports iterator lifecycle" {
     );
     try testing.expectEqual(@as(usize, 1), deinit_count);
     try expectEqualDiff(&.{}, difference.edits.items);
+}
+
+test "DiffFn diffBySegment supports fixed segment split hooks" {
+    const allocator = testing.allocator;
+    const FixedSegmentDiff = DiffFn(.{
+        .context = FixedSegmentContext,
+        .LineIterator = PipeSegmentIterator,
+        .fixSegmentBackward = fixPipeSegmentBackward,
+        .fixSegmentForward = fixPipeSegmentForward,
+    });
+
+    var difference = FixedSegmentDiff.initContext(.default, .{});
+    defer difference.deinit(allocator);
+
+    try difference.diffBySegment(
+        allocator,
+        "alpha|one same|omega|",
+        "alpha|two same|omega|",
+    );
+    try expectEqualDiff(&.{
+        Edit.asBorrow(.equal, "alpha|"),
+        Edit.asBorrow(.delete, "one same|"),
+        Edit.asBorrow(.insert, "two same|"),
+        Edit.asBorrow(.equal, "omega|"),
+    }, difference.edits.items);
+    try testing.expectEqual(@as(usize, 1), difference.context.backward_calls);
+    try testing.expectEqual(@as(usize, 1), difference.context.forward_calls);
+    try testing.expectEqual(WhichText.before, difference.context.backward_which);
+    try testing.expectEqual(WhichText.before, difference.context.forward_which);
+    try testing.expectEqualStrings("alpha|", difference.context.backward_text);
+    try testing.expectEqualStrings(" same|omega|", difference.context.forward_text);
 }
 
 test "DiffFn diffIndex" {
@@ -3198,6 +3399,7 @@ pub const DiffDecorations = diff_mod.DiffDecorations;
 
 const common = @import("dmp/common.zig");
 const diff_mod = @import("dmp/diff.zig");
+const memex = @import("memex");
 const Patch = @import("dmp/Patch.zig");
 const PatchConfig = Patch.PatchConfig;
 const zdelta_mod = @import("zdelta.zig");
