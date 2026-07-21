@@ -1,48 +1,27 @@
-//! Diff represents the difference between two texts.
+//! The default `Differ` specialization and its `Diff` result type.
 //!
-//! A `Diff` owns a `DiffList` of `Edit` values and provides the diff-specific
-//! operations over that list, including diff generation, cleanup passes, and
-//! readback helpers such as pretty formatting and text reconstruction.
+//! A `Differ` compares texts and returns a `Diff` containing the resulting
+//! `DiffList` of `Edit` values.
 //!
-//! `Diff` has several configurable parameters.  Use `.default` for the default
-//! configuration, or `.init(cfg)` to provide a custom `DiffConfig`. Release
-//! when finished with `diff.deinit(allocator)`.
+//! `Differ` has several configurable parameters. Use `.default` for the
+//! default configuration, or `.init(cfg)` to provide a custom `DiffConfig`.
 //!
 //! `DiffConfig` controls how the diff is produced:
 //! - `edit_cost` tunes the efficiency cleanup heuristics.
 //! - `check_lines` enables the initial line-mode speedup for large inputs.
 //! - `check_line_threshold` sets the minimum input size for that speedup.
 //!
-//! The diff object starts empty.  To populate it with a diff:
+//! To produce a diff:
 //!
-//!     try diff.diff(allocator, before, after);
+//!     var differ: Differ = .default;
+//!     var diff = try differ.diff(allocator, before, after);
+//!     defer diff.deinit(allocator);
 //!
 //! The diffing algorithm only allocates memory when it has to, so most of a
 //! typical diff will consist of views into the compared strings.  These must
 //! therefore stay in memory, or at your option, you may call `.own(allocator)`
 //! to own that memory.
 //!
-
-/// The configurable parameters for a Diff object.
-pub const DiffConfig = struct {
-    /// Cost of an empty edit operation in terms of edit characters.  Higher
-    /// values lead to fewer, larger edit chunks.
-    edit_cost: u16,
-    /// If true, use the initial line-mode speedup when inputs are large enough.
-    /// This is generally faster, but can result in non-minimal diffs.
-    check_lines: bool,
-    /// Number of bytes in each string needed to trigger a line-based diff.
-    /// Ignored if check_lines is `false`.
-    check_line_threshold: u32,
-
-    /// Reasonable defaults for diffing: use line mode in most cases (4K
-    /// strings), with an edit cost which prevents most chaff.
-    pub const default: DiffConfig = .{
-        .edit_cost = 4,
-        .check_lines = true,
-        .check_line_threshold = 4096,
-    };
-};
 
 pub const ZDeltaEncodeError = zdelta_mod.ZDeltaEncodeError;
 pub const ZDeltaDecodeError = zdelta_mod.ZDeltaDecodeError;
@@ -169,13 +148,17 @@ pub const DiffDecorations = struct {
     };
 };
 
-pub const Diff = diff_fn_mod.DiffFn(.{
+/// The default text differ.
+pub const Differ = diff_fn_mod.DiffFn(.{
     .context = void,
-    .LineIterator = LineIterator,
+    .SegmentIterator = LineIterator,
     .fixSegmentBackward = fixLineSegmentBackward,
     .fixSegmentForward = fixLineSegmentForward,
     .semanticScore = diffCleanupSemanticScore,
 });
+
+/// A difference produced by the default `Differ`.
+pub const Diff = Differ.Diff;
 
 /// File-public, not module-public.  Just a synonym in any case.
 pub const DiffList = ArrayListUnmanaged(Edit);
@@ -326,7 +309,7 @@ test "writeDecoratedEdit frees pre-processed text" {
     try testing.checkAllAllocationFailures(testing.allocator, testWriteDecoratedEditPreProcess, .{});
 }
 
-test "default Diff fixes segment splits to line boundaries" {
+test "default Differ fixes segment splits to line boundaries" {
     var context: void = {};
     try testing.expectEqual(@as(usize, 6), fixLineSegmentBackward(&context, "alpha\nomega", .before));
     try testing.expectEqual(@as(usize, 0), fixLineSegmentBackward(&context, "alpha", .after));

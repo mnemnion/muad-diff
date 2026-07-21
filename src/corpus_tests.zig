@@ -276,9 +276,9 @@ fn assertRevisionPairInvariant(
     before: RevisionFixture,
     after: RevisionFixture,
 ) !void {
-    var diff = Diff.init(diff_config);
+    var differ = Differ.init(diff_config);
+    var diff = try differ.diff(testing.allocator, before.body, after.body);
     defer diff.deinit(testing.allocator);
-    try diff.diff(testing.allocator, before.body, after.body);
     try expectDiffListUtf8(diff.edits);
 
     const rebuilt_before = try diff.beforeText(testing.allocator);
@@ -438,6 +438,7 @@ const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
 
 const dmp = @import("dmp.zig");
+const Differ = dmp.Differ;
 const Diff = dmp.Diff;
 const Edit = dmp.Edit;
 const DiffConfig = dmp.DiffConfig;
