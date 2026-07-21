@@ -29,7 +29,7 @@ pub fn growForNeed(state: anytype, comptime growth_fudge: u32, need: u32) !void 
 pub fn ensureHeadRoom(state: anytype, comptime growth_fudge: u32, need: u32) !void {
     if (need <= state.start) return;
     if (need > state.budget) try growForNeed(state, growth_fudge, need);
-    dbgassert(need <= totalSlack(state));
+    if (is_debug) dbgassert(need <= totalSlack(state));
     rebase(state, need);
 }
 
@@ -37,7 +37,7 @@ pub fn ensureTailRoom(state: anytype, comptime growth_fudge: u32, need: u32) !vo
     const tail_room: u32 = @intCast(state.buffer.len - state.end);
     if (need <= tail_room) return;
     if (need > state.budget) try growForNeed(state, growth_fudge, need);
-    dbgassert(need <= totalSlack(state));
+    if (is_debug) dbgassert(need <= totalSlack(state));
     rebase(state, totalSlack(state) - need);
 }
 
@@ -117,7 +117,9 @@ test "initialSlack rounds odd slack up to keep room balanced" {
 }
 
 const std = @import("std");
+const builtin = @import("builtin");
 const common = @import("../dmp/common.zig");
 const dbgassert = common.dbgassert;
 const cast = common.cast;
+const is_debug = builtin.mode == .Debug;
 const testing = std.testing;

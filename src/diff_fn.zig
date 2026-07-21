@@ -847,7 +847,7 @@ pub fn DiffFn(config: anytype) type {
                 text1_in[0..first_diff],
                 .before,
             );
-            assert(common_length <= first_diff);
+            if (is_debug) assert(common_length <= first_diff);
             const common_prefix = text1_in[0..common_length];
             var trimmed_text1 = text1_in[common_length..];
             var trimmed_text2 = text2_in[common_length..];
@@ -896,7 +896,7 @@ pub fn DiffFn(config: anytype) type {
                 before[suffix_start..],
                 .before,
             );
-            assert(suffix_adjust <= before.len - suffix_start);
+            if (is_debug) assert(suffix_adjust <= before.len - suffix_start);
             return before.len - suffix_start - suffix_adjust;
         }
 
@@ -942,7 +942,7 @@ pub fn DiffFn(config: anytype) type {
                         count_insert += 1;
                         const text = diffs.items[pointer].text;
                         if (count_insert == 1) insert_run = text else {
-                            dbgassert(insert_run.ptr + insert_run.len == text.ptr); // kcov-miss: debug invariant guard.
+                            if (is_debug) dbgassert(insert_run.ptr + insert_run.len == text.ptr); // kcov-miss: debug invariant guard.
                             insert_run = insert_run.ptr[0 .. insert_run.len + text.len];
                         }
                     },
@@ -950,7 +950,7 @@ pub fn DiffFn(config: anytype) type {
                         count_delete += 1;
                         const text = diffs.items[pointer].text;
                         if (count_delete == 1) delete_run = text else {
-                            dbgassert(delete_run.ptr + delete_run.len == text.ptr); // kcov-miss: debug invariant guard.
+                            if (is_debug) dbgassert(delete_run.ptr + delete_run.len == text.ptr); // kcov-miss: debug invariant guard.
                             delete_run = delete_run.ptr[0 .. delete_run.len + text.len];
                         }
                     },
@@ -1011,24 +1011,30 @@ pub fn DiffFn(config: anytype) type {
                 const replacement = switch (edit.operation) {
                     .equal => replacement: {
                         const span = before_text[before_cursor..][0..edit.text.len];
-                        dbgassert(std.mem.startsWith(u8, before_text[before_cursor..], edit.text));
-                        dbgassert(std.mem.startsWith(u8, after_text[after_cursor..], edit.text));
-                        dbgassert(std.mem.eql(u8, span, edit.text));
+                        if (is_debug) {
+                            dbgassert(std.mem.startsWith(u8, before_text[before_cursor..], edit.text));
+                            dbgassert(std.mem.startsWith(u8, after_text[after_cursor..], edit.text));
+                            dbgassert(std.mem.eql(u8, span, edit.text));
+                        }
                         before_cursor += edit.text.len;
                         after_cursor += edit.text.len;
                         break :replacement Edit.asBorrow(.equal, span);
                     },
                     .delete => replacement: {
                         const span = before_text[before_cursor..][0..edit.text.len];
-                        dbgassert(std.mem.startsWith(u8, before_text[before_cursor..], edit.text));
-                        dbgassert(std.mem.eql(u8, span, edit.text));
+                        if (is_debug) {
+                            dbgassert(std.mem.startsWith(u8, before_text[before_cursor..], edit.text));
+                            dbgassert(std.mem.eql(u8, span, edit.text));
+                        }
                         before_cursor += edit.text.len;
                         break :replacement Edit.asBorrow(.delete, span);
                     },
                     .insert => replacement: {
                         const span = after_text[after_cursor..][0..edit.text.len];
-                        dbgassert(std.mem.startsWith(u8, after_text[after_cursor..], edit.text));
-                        dbgassert(std.mem.eql(u8, span, edit.text));
+                        if (is_debug) {
+                            dbgassert(std.mem.startsWith(u8, after_text[after_cursor..], edit.text));
+                            dbgassert(std.mem.eql(u8, span, edit.text));
+                        }
                         after_cursor += edit.text.len;
                         break :replacement Edit.asBorrow(.insert, span);
                     },
@@ -1549,7 +1555,7 @@ pub fn DiffFn(config: anytype) type {
             var equality_1 = window.equality_1;
             var edit = window.edit;
             var equality_2 = window.equality_2;
-            std.debug.assert(canBorrowLosslessWindow(equality_1, edit, equality_2));
+            if (is_debug) std.debug.assert(canBorrowLosslessWindow(equality_1, edit, equality_2));
 
             const common_offset = diffCommonSuffix(equality_1, edit);
             if (common_offset > 0) {
@@ -1762,24 +1768,30 @@ fn diffCharsToSegments(
         switch (edit.operation) {
             .equal => {
                 const span = before_text[before_cursor..][0..text.items.len];
-                dbgassert(std.mem.startsWith(u8, before_text[before_cursor..], text.items));
-                dbgassert(std.mem.startsWith(u8, after_text[after_cursor..], text.items));
-                dbgassert(std.mem.eql(u8, span, text.items));
+                if (is_debug) {
+                    dbgassert(std.mem.startsWith(u8, before_text[before_cursor..], text.items));
+                    dbgassert(std.mem.startsWith(u8, after_text[after_cursor..], text.items));
+                    dbgassert(std.mem.eql(u8, span, text.items));
+                }
                 before_cursor += text.items.len;
                 after_cursor += text.items.len;
                 diffs.appendAssumeCapacity(Edit.asBorrow(.equal, span));
             },
             .delete => {
                 const span = before_text[before_cursor..][0..text.items.len];
-                dbgassert(std.mem.startsWith(u8, before_text[before_cursor..], text.items));
-                dbgassert(std.mem.eql(u8, span, text.items));
+                if (is_debug) {
+                    dbgassert(std.mem.startsWith(u8, before_text[before_cursor..], text.items));
+                    dbgassert(std.mem.eql(u8, span, text.items));
+                }
                 before_cursor += text.items.len;
                 diffs.appendAssumeCapacity(Edit.asBorrow(.delete, span));
             },
             .insert => {
                 const span = after_text[after_cursor..][0..text.items.len];
-                dbgassert(std.mem.startsWith(u8, after_text[after_cursor..], text.items));
-                dbgassert(std.mem.eql(u8, span, text.items));
+                if (is_debug) {
+                    dbgassert(std.mem.startsWith(u8, after_text[after_cursor..], text.items));
+                    dbgassert(std.mem.eql(u8, span, text.items));
+                }
                 after_cursor += text.items.len;
                 diffs.appendAssumeCapacity(Edit.asBorrow(.insert, span));
             },
@@ -1995,8 +2007,10 @@ const LifecycleSegmentIterator = struct {
         allocator: Allocator,
         context: LifecycleSegmentContext,
     ) void {
-        assert(iter.scratch.len == 1);
-        assert(iter.scratch[0] == context.marker);
+        if (is_debug) {
+            assert(iter.scratch.len == 1);
+            assert(iter.scratch[0] == context.marker);
+        }
         context.deinit_count.* += 1;
         allocator.free(iter.scratch);
     }
@@ -3385,6 +3399,7 @@ test "DiffFn prettyFormat decorates leading and trailing whitespace in edits" {
 }
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
@@ -3430,4 +3445,5 @@ const fixSplitBackward = common.fixSplitBackward;
 const cast = common.cast;
 const u2i = common.u2i;
 const i2u = common.i2u;
+const is_debug = builtin.mode == .Debug;
 const dbgassert = common.dbgassert;

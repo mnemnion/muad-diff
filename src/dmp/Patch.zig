@@ -402,7 +402,7 @@ fn matchBitap(
     // TODO decide what to do here:
     // assert (Match_MaxBits == 0 || pattern.Length <= Match_MaxBits)
     //    : "Pattern too long for this application.";
-    assert(text.len != 0 and pattern.len != 0);
+    if (is_debug) assert(text.len != 0 and pattern.len != 0);
 
     // Initialise the alphabet.
     var map: MatchAlphabet = .{};
@@ -724,7 +724,7 @@ fn makePatchInternal(
             .insert => {
                 try patch.diffs.ensureUnusedCapacity(allocator, 1);
                 const d = the_diff: {
-                    assert(edit.eql(diffs.items[i]));
+                    if (is_debug) assert(edit.eql(diffs.items[i]));
                     diffs.items[i] = dummy_diff;
                     break :the_diff edit;
                 };
@@ -735,7 +735,7 @@ fn makePatchInternal(
             .delete => {
                 try patch.diffs.ensureUnusedCapacity(allocator, 1);
                 const d = the_diff: {
-                    assert(edit.eql(diffs.items[i]));
+                    if (is_debug) assert(edit.eql(diffs.items[i]));
                     diffs.items[i] = dummy_diff;
                     break :the_diff edit;
                 };
@@ -749,7 +749,7 @@ fn makePatchInternal(
                     // Small equality inside a patch.
                     try patch.diffs.ensureUnusedCapacity(allocator, 1);
                     const d = the_diff: {
-                        assert(edit.eql(diffs.items[i]));
+                        if (is_debug) assert(edit.eql(diffs.items[i]));
                         diffs.items[i] = dummy_diff;
                         break :the_diff edit;
                     };
@@ -763,7 +763,7 @@ fn makePatchInternal(
                     if (patch.diffs.items.len != 0) {
                         // Free the Diff if we own it.
                         if (!current_transferred) {
-                            assert(edit.eql(diffs.items[i]));
+                            if (is_debug) assert(edit.eql(diffs.items[i]));
                             diffs.items[i] = dummy_diff;
                             var diff_to_deinit = edit;
                             diff_to_deinit.deinit(allocator);
@@ -1099,7 +1099,7 @@ const PatchManager = struct {
         if (tm.pre >= need_pre and tm.post >= need_post) return;
 
         const total_slack = tm.pre + tm.post;
-        assert(total_slack >= need_pre + need_post);
+        if (is_debug) assert(total_slack >= need_pre + need_post);
 
         const active_len = tm.text.len - total_slack;
         const min_pre = need_pre;
@@ -1401,9 +1401,9 @@ fn patchAddPadding(
         );
         // Should be 0 due to prior patch bump
         patch_start.start1 -= pad_len;
-        assert(patch_start.start1 == 0);
+        if (is_debug) assert(patch_start.start1 == 0);
         patch_start.start2 -= pad_len;
-        assert(patch_start.start2 == 0);
+        if (is_debug) assert(patch_start.start2 == 0);
         patch_start.length1 += pad_len;
         patch_start.length2 += pad_len;
         // patches.items[0].diffs = diffs_start;

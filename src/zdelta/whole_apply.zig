@@ -96,8 +96,10 @@ pub const DeltaApplicator = struct {
         try tm.ensureTailRoom(tail_room);
 
         tm.pivot = before_len / 2;
-        dbgassert(tm.t_idx == 0);
-        dbgassert(tm.z_idx == 0);
+        if (is_debug) {
+            dbgassert(tm.t_idx == 0);
+            dbgassert(tm.z_idx == 0);
+        }
     }
 
     pub fn deinit(tm: *DeltaApplicator) void {
@@ -194,9 +196,9 @@ pub const DeltaApplicator = struct {
     }
 
     pub fn insert(tm: *DeltaApplicator, at: u32, new_text: []const u8) !void {
-        dbgassert(new_text.len <= std.math.maxInt(u32));
+        if (is_debug) dbgassert(new_text.len <= std.math.maxInt(u32));
         const new_len: u32 = @intCast(new_text.len);
-        dbgassert(at <= tm.textLen());
+        if (is_debug) dbgassert(at <= tm.textLen());
 
         if (at < tm.pivot) {
             try tm.ensureHeadRoom(new_len);
@@ -218,10 +220,12 @@ pub const DeltaApplicator = struct {
     }
 
     fn replace(tm: *DeltaApplicator, at: u32, old_len: u32, new_text: []const u8) !void {
-        dbgassert(new_text.len <= std.math.maxInt(u32));
+        if (is_debug) dbgassert(new_text.len <= std.math.maxInt(u32));
         const new_len: u32 = @intCast(new_text.len);
-        dbgassert(at <= tm.textLen());
-        dbgassert(old_len <= tm.textLen() - at);
+        if (is_debug) {
+            dbgassert(at <= tm.textLen());
+            dbgassert(old_len <= tm.textLen() - at);
+        }
 
         if (new_len > old_len) {
             const growth = new_len - old_len;
@@ -264,8 +268,10 @@ pub const DeltaApplicator = struct {
     pub fn delete(tm: *DeltaApplicator, start: u32, len: u32) void {
         const abs_start = tm.start + start;
         const abs_end = abs_start + len;
-        dbgassert(start <= tm.textLen());
-        dbgassert(len <= tm.textLen() - start);
+        if (is_debug) {
+            dbgassert(start <= tm.textLen());
+            dbgassert(len <= tm.textLen() - start);
+        }
 
         if (start < tm.pivot) {
             @memmove(tm.buffer[tm.start + len ..][0..start], tm.buffer[tm.start..][0..start]);
@@ -283,7 +289,7 @@ pub const DeltaApplicator = struct {
 
     fn currentDeltaOp(tm: *const DeltaApplicator) !?DeltaOp {
         const zdelta = tm.zdelta orelse return error.MissingZDelta;
-        dbgassert(tm.z_idx < zdelta.ops.len);
+        if (is_debug) dbgassert(tm.z_idx < zdelta.ops.len);
         return zdelta.ops[tm.z_idx];
     }
 
@@ -321,6 +327,7 @@ pub const DeltaApplicator = struct {
 };
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Allocator = std.mem.Allocator;
 const apply_base = @import("apply_base.zig");
@@ -331,6 +338,7 @@ const addU32 = zdelta_mod.addU32;
 const checkedU32 = zdelta_mod.checkedU32;
 const common = @import("../dmp/common.zig");
 const dbgassert = common.dbgassert;
+const is_debug = builtin.mode == .Debug;
 const DeltaOp = common_apply.DeltaOp;
 const DeltaSpan = common_apply.DeltaSpan;
 const testing = std.testing;
