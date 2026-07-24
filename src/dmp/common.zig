@@ -219,13 +219,19 @@ pub fn diffCommonPrefix(before: []const u8, after: []const u8) usize {
 /// Find a common suffix which respects UTF-8 code point boundaries.
 pub fn diffCommonSuffix(before: []const u8, after: []const u8) usize {
     const n = @min(before.len, after.len);
-    var i: usize = 1;
-    while (i <= n) : (i += 1) {
-        if (after[after.len - i] != before[before.len - i]) {
-            return before.len - fixSplitForward(before, before.len - i + 1);
-        }
-    }
-    return n;
+    if (n == 0) return 0;
+
+    const before_tail_start = before.len - n;
+    const after_tail_start = after.len - n;
+    const suffix_start = memex.lastIndexOfDiff(
+        u8,
+        before[before_tail_start..],
+        after[after_tail_start..],
+    );
+    if (suffix_start == 0) return n;
+
+    const fixed_start = fixSplitForward(before, before_tail_start + suffix_start);
+    return before.len - fixed_start;
 }
 
 /// Encode one u32 'plan 9' style, up to six bytes for the whole range.
@@ -460,3 +466,4 @@ const testing = std.testing;
 
 const builtin = @import("builtin");
 const is_debug = builtin.mode == .Debug;
+const memex = @import("memex");

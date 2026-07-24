@@ -190,7 +190,7 @@ pub fn DiffFn(config: anytype) type {
             allocator: Allocator,
             before: []const u8,
             after: []const u8,
-        ) DiffError!diff_mod.Diff {
+        ) DiffError!Diff {
             differ.deinit(allocator);
             differ.diff_list = try differ.diffImpl(allocator, before, after);
             return differ.takeDiff();
@@ -202,7 +202,7 @@ pub fn DiffFn(config: anytype) type {
             allocator: Allocator,
             before: []const u8,
             after: []const u8,
-        ) DiffError!diff_mod.Diff {
+        ) DiffError!Diff {
             differ.deinit(allocator);
             differ.diff_list = try differ.diffSegment(allocator, before, after);
             return differ.takeDiff();
@@ -210,24 +210,24 @@ pub fn DiffFn(config: anytype) type {
 
         /// Reduce the number of edits by eliminating semantically trivial
         /// equalities.
-        pub fn cleanupSemantic(differ: *Differ, allocator: Allocator, difference: *diff_mod.Diff) OOM!void {
+        pub fn cleanupSemantic(differ: *Differ, allocator: Allocator, difference: *Diff) OOM!void {
             try differ.cleanupSemanticImpl(allocator, &difference.edits);
         }
 
         /// Look for single edits surrounded on both sides by equalities
         /// which can be shifted sideways to align the edit to a word boundary.
         /// e.g: The c<ins>at c</ins>ame. -> The <ins>cat </ins>came.
-        pub fn cleanupSemanticLossless(differ: *Differ, allocator: Allocator, difference: *diff_mod.Diff) OOM!void {
+        pub fn cleanupSemanticLossless(differ: *Differ, allocator: Allocator, difference: *Diff) OOM!void {
             try differ.cleanupSemanticLosslessImpl(allocator, &difference.edits);
         }
 
         /// Reduce the number of edits by eliminating operationally trivial
         /// equalities.
-        pub fn cleanupEfficiency(differ: *Differ, allocator: Allocator, difference: *diff_mod.Diff) OOM!void {
+        pub fn cleanupEfficiency(differ: *Differ, allocator: Allocator, difference: *Diff) OOM!void {
             try differ.cleanupEfficiencyImpl(allocator, &difference.edits);
         }
 
-        fn takeDiff(differ: *Differ) diff_mod.Diff {
+        fn takeDiff(differ: *Differ) Diff {
             const edits = differ.diff_list.?;
             differ.diff_list = null;
             return .{ .edits = edits };
@@ -333,7 +333,7 @@ pub fn DiffFn(config: anytype) type {
             var trimmed_before = before[common_length..];
             var trimmed_after = after[common_length..];
 
-            common_length = diffCommonSuffixFromLastDiff(trimmed_before, trimmed_after);
+            common_length = diffCommonSuffix(trimmed_before, trimmed_after);
             const common_suffix = trimmed_before[trimmed_before.len - common_length ..];
             trimmed_before = trimmed_before[0 .. trimmed_before.len - common_length];
             trimmed_after = trimmed_after[0 .. trimmed_after.len - common_length];
@@ -351,25 +351,6 @@ pub fn DiffFn(config: anytype) type {
             }
             try differ.cleanupMergeImpl(allocator, &diffs);
             return diffs;
-        }
-
-        /// Find a common suffix after prefix trimming, using memex's reverse
-        /// diff scan while preserving UTF-8 code point boundaries.
-        fn diffCommonSuffixFromLastDiff(before: []const u8, after: []const u8) usize {
-            const n = @min(before.len, after.len);
-            if (n == 0) return 0;
-
-            const before_tail_start = before.len - n;
-            const after_tail_start = after.len - n;
-            const first_suffix_diff = memex.lastIndexOfDiff(
-                u8,
-                before[before_tail_start..],
-                after[after_tail_start..],
-            );
-            if (first_suffix_diff == 0) return n;
-
-            const suffix_start = fixSplitForward(before, before_tail_start + first_suffix_diff);
-            return before.len - suffix_start;
         }
 
         /// Find the differences between two texts, assuming they do not share
@@ -1734,12 +1715,12 @@ pub const TestDiffer = DiffFn(.{
     .semanticScore = diff_mod.diffCleanupSemanticScore,
 });
 const DefaultDiffer = TestDiffer;
-const TestDifference = diff_mod.Diff;
+const TestDifference = Diff;
 
 comptime {
     const ContextDiffer = DiffFn(.{ .context = usize });
-    assert(diffReturnType(TestDiffer) == diff_mod.Diff);
-    assert(diffReturnType(ContextDiffer) == diff_mod.Diff);
+    assert(diffReturnType(TestDiffer) == Diff);
+    assert(diffReturnType(ContextDiffer) == Diff);
 }
 
 fn diffReturnType(comptime Differ: type) type {
@@ -2505,9 +2486,12 @@ test "DiffFn diffCommonPrefix" {
 }
 
 test "DiffFn diffCommonSuffix" {
+    try testing.expectEqual(@as(usize, 0), diffCommonSuffix("", ""));
     try testing.expectEqual(@as(usize, 0), diffCommonSuffix("abc", "xyz"));
     try testing.expectEqual(@as(usize, 4), diffCommonSuffix("abcdef1234", "xyz1234"));
     try testing.expectEqual(@as(usize, 4), diffCommonSuffix("1234", "xyz1234"));
+    try testing.expectEqual(@as(usize, 0), diffCommonSuffix("é", "©"));
+    try testing.expectEqual(@as(usize, 2), diffCommonSuffix("xé", "yé"));
 }
 
 test "DiffFn diffCommonOverlap" {
@@ -3274,6 +3258,7 @@ pub const DiffDecorations = diff_mod.DiffDecorations;
 
 const common = @import("dmp/common.zig");
 const diff_mod = @import("dmp/diff.zig");
+const Diff = diff_mod.Diff;
 const memex = @import("memex");
 const OOM = Allocator.Error;
 const deinitDiffList = common.deinitDiffList;
