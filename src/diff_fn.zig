@@ -2,7 +2,7 @@
 //! and `DiffList` representation from the generic diff module.
 //!
 //! The returned `Differ` stores its config and specialization context. Each
-//! diff operation returns a `Differ.Diff` containing the resulting edits.
+//! diff operation returns a shared `Diff` containing the resulting edits.
 //!
 //! Specialization points currently include:
 //! - `context`: user-provided state stored on the `Differ`
@@ -26,17 +26,17 @@ pub const DiffConfig = struct {
     edit_cost: u16,
     /// If true, use the initial segment-mode speedup when inputs are large enough.
     /// This is generally faster, but can result in non-minimal diffs.
-    check_lines: bool,
+    check_segments: bool,
     /// Number of bytes in each string needed to trigger a segment-based diff.
-    /// Ignored if `check_lines` is `false`.
-    check_line_threshold: u32,
+    /// Ignored if `check_segments` is `false`.
+    check_segment_threshold: u32,
 
     /// Reasonable defaults for diffing: use segment mode in most cases (4K
     /// strings), with an edit cost which prevents most chaff.
     pub const default: DiffConfig = .{
         .edit_cost = 4,
-        .check_lines = true,
-        .check_line_threshold = 4096,
+        .check_segments = true,
+        .check_segment_threshold = 4096,
     };
 };
 
@@ -149,133 +149,6 @@ pub fn DiffFn(config: anytype) type {
 
         pub const DiffError = OOM || error{TooManySegments} || iteratorInitError(SegmentIterator);
 
-        /// A completed difference between two texts.
-        pub const Diff = struct {
-            /// The individual edits making up this difference.
-            edits: DiffList,
-
-            /// An empty difference.
-            pub const empty: Diff = .{ .edits = .empty };
-
-            /// Own all edits in the `Diff`. After this operation it is safe to
-            /// dispose of the original strings.
-            pub fn own(difference: *Diff, allocator: Allocator) OOM!void {
-                for (difference.edits.items) |*edit| {
-                    try edit.own(allocator);
-                }
-            }
-
-            /// Clone this `Diff`, including its owned edits.
-            pub fn clone(difference: *const Diff, allocator: Allocator) OOM!Diff {
-                return .{ .edits = try cloneDiffList(allocator, &difference.edits) };
-            }
-
-            /// Make a copy of the `Diff`, preserving edit ownership status.
-            pub fn copy(difference: *const Diff, allocator: Allocator) OOM!Diff {
-                return .{ .edits = try copyDiffList(allocator, &difference.edits) };
-            }
-
-            /// Release the storage owned by this `Diff`.
-            pub fn deinit(difference: *Diff, allocator: Allocator) void {
-                deinitDiffList(allocator, &difference.edits);
-                difference.edits = .empty;
-            }
-
-            /// Return text representing a pretty-formatted `Diff`.
-            /// See `DiffDecorations` for how to customize this output.
-            pub fn prettyFormat(difference: *const Diff, allocator: Allocator, deco: DiffDecorations) ![]const u8 {
-                return diffPrettyFormat(allocator, difference.edits, deco);
-            }
-
-            /// Return text representing a pretty-formatted `DiffList`, in Xterm format.
-            pub fn prettyFormatXTerm(difference: *const Diff, allocator: Allocator) ![]const u8 {
-                return diffPrettyFormatXTerm(allocator, difference.edits);
-            }
-
-            /// Write a pretty-formatted `Diff` to `writer`. The `Allocator`
-            /// is only used if a custom text formatter is defined for
-            /// `DiffDecorations`. Returns number of bytes written.
-            pub fn writePrettyFormat(
-                difference: *const Diff,
-                allocator: Allocator,
-                writer: anytype,
-                deco: DiffDecorations,
-            ) !usize {
-                return writeDiffPrettyFormat(allocator, writer, difference.edits, deco);
-            }
-
-            /// Create a Patch from the Diff with the default PatchOptions.
-            pub fn toPatch(difference: *const Diff, allocator: Allocator) OOM!Patch {
-                var the_patch: Patch = .default;
-                return the_patch.fromDiff(allocator, difference);
-            }
-
-            /// Create a Patch from the Diff with the provided PatchOptions.
-            pub fn toPatchConfig(
-                difference: *const Diff,
-                allocator: Allocator,
-                cfg: PatchConfig,
-            ) OOM!Patch {
-                var the_patch: Patch = .init(cfg);
-                return the_patch.fromDiff(allocator, difference);
-            }
-
-            /// Write a Diff in a zDelta format. Currently supported are
-            /// formats `.a` and `.b`, see documentation for more details.
-            pub fn toZDelta(
-                difference: *const Diff,
-                allocator: Allocator,
-                version: ZDeltaVersion,
-            ) ZDeltaEncodeError![]const u8 {
-                return zdelta_mod.encode(allocator, difference.edits, version);
-            }
-
-            /// Populate a Diff from a zDelta string and the before text.
-            pub fn fromZDelta(
-                difference: *Diff,
-                allocator: Allocator,
-                before: []const u8,
-                zdelta: []const u8,
-            ) ZDeltaDecodeError!void {
-                var edits = try zdelta_mod.toDiffList(Edit, DiffList, allocator, before, zdelta);
-                errdefer deinitDiffList(allocator, &edits);
-                if (difference.edits.items.len != 0) {
-                    deinitDiffList(allocator, &difference.edits);
-                }
-                difference.edits = edits;
-            }
-
-            /// Compute and return the source text (all equalities and deletions).
-            pub fn beforeText(difference: Diff, allocator: Allocator) OOM![]const u8 {
-                return diffBeforeText(allocator, difference.edits);
-            }
-
-            /// Compute and return the destination text (all equalities and insertions).
-            pub fn afterText(difference: Diff, allocator: Allocator) OOM![]const u8 {
-                return diffAfterText(allocator, difference.edits);
-            }
-
-            /// loc is a location in text1; compute and return the equivalent
-            /// location in text2.
-            pub fn index(difference: Diff, loc: usize) usize {
-                return diffIndex(difference.edits, loc);
-            }
-
-            /// Answers the number of bytes total be added or removed by
-            /// applying this difference.
-            pub fn changeInBytes(difference: *const Diff) isize {
-                var count: isize = 0;
-                for (difference.edits.items) |edit| {
-                    switch (edit.operation) {
-                        .insert => count += u2i(edit.text.len),
-                        .delete => count -= u2i(edit.text.len),
-                        .equal => {},
-                    }
-                }
-                return count;
-            }
-        };
-
         /// A default-configured `Differ`.
         pub const default: Differ = .{
             .config = .default,
@@ -317,7 +190,7 @@ pub fn DiffFn(config: anytype) type {
             allocator: Allocator,
             before: []const u8,
             after: []const u8,
-        ) DiffError!Diff {
+        ) DiffError!diff_mod.Diff {
             differ.deinit(allocator);
             differ.diff_list = try differ.diffImpl(allocator, before, after);
             return differ.takeDiff();
@@ -329,7 +202,7 @@ pub fn DiffFn(config: anytype) type {
             allocator: Allocator,
             before: []const u8,
             after: []const u8,
-        ) DiffError!Diff {
+        ) DiffError!diff_mod.Diff {
             differ.deinit(allocator);
             differ.diff_list = try differ.diffSegment(allocator, before, after);
             return differ.takeDiff();
@@ -337,24 +210,24 @@ pub fn DiffFn(config: anytype) type {
 
         /// Reduce the number of edits by eliminating semantically trivial
         /// equalities.
-        pub fn cleanupSemantic(differ: *Differ, allocator: Allocator, difference: *Diff) OOM!void {
+        pub fn cleanupSemantic(differ: *Differ, allocator: Allocator, difference: *diff_mod.Diff) OOM!void {
             try differ.cleanupSemanticImpl(allocator, &difference.edits);
         }
 
         /// Look for single edits surrounded on both sides by equalities
         /// which can be shifted sideways to align the edit to a word boundary.
         /// e.g: The c<ins>at c</ins>ame. -> The <ins>cat </ins>came.
-        pub fn cleanupSemanticLossless(differ: *Differ, allocator: Allocator, difference: *Diff) OOM!void {
+        pub fn cleanupSemanticLossless(differ: *Differ, allocator: Allocator, difference: *diff_mod.Diff) OOM!void {
             try differ.cleanupSemanticLosslessImpl(allocator, &difference.edits);
         }
 
         /// Reduce the number of edits by eliminating operationally trivial
         /// equalities.
-        pub fn cleanupEfficiency(differ: *Differ, allocator: Allocator, difference: *Diff) OOM!void {
+        pub fn cleanupEfficiency(differ: *Differ, allocator: Allocator, difference: *diff_mod.Diff) OOM!void {
             try differ.cleanupEfficiencyImpl(allocator, &difference.edits);
         }
 
-        fn takeDiff(differ: *Differ) Diff {
+        fn takeDiff(differ: *Differ) diff_mod.Diff {
             const edits = differ.diff_list.?;
             differ.diff_list = null;
             return .{ .edits = edits };
@@ -565,9 +438,9 @@ pub fn DiffFn(config: anytype) type {
                 return diffs;
             }
 
-            if (differ.config.check_lines and
-                before.len > differ.config.check_line_threshold and
-                after.len > differ.config.check_line_threshold)
+            if (differ.config.check_segments and
+                before.len > differ.config.check_segment_threshold and
+                after.len > differ.config.check_segment_threshold)
             {
                 return differ.diffSegmentMode(allocator, before, after);
             }
@@ -1702,7 +1575,7 @@ pub fn DiffFn(config: anytype) type {
         /// Copy this specialization while forcing text-mode recursion.
         fn copyForTextMode(differ: *const Differ) Differ {
             var cfg = differ.config;
-            cfg.check_lines = false;
+            cfg.check_segments = false;
             return .{
                 .config = cfg,
                 .context = differ.context,
@@ -1710,58 +1583,6 @@ pub fn DiffFn(config: anytype) type {
             };
         }
     };
-}
-
-/// Return text representing a pretty-formatted `DiffList`.
-/// See `DiffDecorations` for how to customize this output.
-fn diffPrettyFormat(
-    allocator: Allocator,
-    diffs: DiffList,
-    deco: DiffDecorations,
-) ![]const u8 {
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
-    _ = try writeDiffPrettyFormat(allocator, &out.writer, diffs, deco);
-    return out.toOwnedSlice();
-}
-
-/// Pretty-print a diff for output to a terminal.
-fn diffPrettyFormatXTerm(allocator: Allocator, diffs: DiffList) ![]const u8 {
-    return try diffPrettyFormat(allocator, diffs, .xterm_classic);
-}
-
-/// Write a pretty-formatted `DiffList` to `writer`.  The `Allocator`
-/// is only used if a custom text formatter is defined for
-/// `DiffDecorations`.  Returns number of bytes written.
-fn writeDiffPrettyFormat(
-    allocator: Allocator,
-    writer: anytype,
-    diffs: DiffList,
-    deco: DiffDecorations,
-) !usize {
-    var written: usize = 0;
-    for (diffs.items) |edit| {
-        written += try diff_mod.writeDecoratedEdit(allocator, writer, deco, edit);
-    }
-    try flushWriter(writer);
-    return written;
-}
-
-fn flushWriter(writer: anytype) !void {
-    const Writer = @TypeOf(writer);
-    switch (@typeInfo(Writer)) {
-        .pointer => |pointer| {
-            if (@hasDecl(pointer.child, "flush")) {
-                try writer.flush();
-            }
-        },
-        else => {
-            if (@hasDecl(Writer, "flush")) {
-                var w = writer;
-                try w.flush();
-            }
-        },
-    }
 }
 
 fn diffEqualText(allocator: Allocator, text: []const u8) OOM!DiffList {
@@ -1913,7 +1734,18 @@ pub const TestDiffer = DiffFn(.{
     .semanticScore = diff_mod.diffCleanupSemanticScore,
 });
 const DefaultDiffer = TestDiffer;
-const TestDifference = TestDiffer.Diff;
+const TestDifference = diff_mod.Diff;
+
+comptime {
+    const ContextDiffer = DiffFn(.{ .context = usize });
+    assert(diffReturnType(TestDiffer) == diff_mod.Diff);
+    assert(diffReturnType(ContextDiffer) == diff_mod.Diff);
+}
+
+fn diffReturnType(comptime Differ: type) type {
+    const return_type = @typeInfo(@TypeOf(Differ.diff)).@"fn".return_type.?;
+    return @typeInfo(return_type).error_union.payload;
+}
 
 fn expectEqualDiff(expected: []const Edit, actual: []const Edit) !void {
     try testing.expectEqual(expected.len, actual.len);
@@ -2141,7 +1973,7 @@ fn testDiffFnHalfMatchAppendFailureCleanup(allocator: Allocator) !void {
 
 fn testDiffFnLineCleanupFailureCleanup(allocator: Allocator) !void {
     var config: DiffConfig = .default;
-    config.check_line_threshold = 8;
+    config.check_segment_threshold = 8;
     var differ = DefaultDiffer.init(config);
     var diffs = try differ.diffSegmentInternal(
         allocator,
@@ -2179,7 +2011,7 @@ test "DiffFn targeted allocation failures clean up partial diff lists" {
         .{
             .config = blk: {
                 var cfg: DiffConfig = .default;
-                cfg.check_line_threshold = 8;
+                cfg.check_segment_threshold = 8;
                 break :blk cfg;
             },
             .before = "alpha\nbeta\ngamma\ndelta\nalpha\nbeta\ngamma\ndelta\n",
@@ -2535,15 +2367,15 @@ fn testDiffFnLineMode(
 ) !void {
     const checked_config: DiffConfig = blk: {
         var config: DiffConfig = .default;
-        config.check_lines = true;
-        config.check_line_threshold = threshold;
+        config.check_segments = true;
+        config.check_segment_threshold = threshold;
         break :blk config;
     };
     var diff_checked = try diffFnListFromConfig(allocator, checked_config, before, after);
     defer deinitDiffList(allocator, &diff_checked);
 
     var unchecked_config = checked_config;
-    unchecked_config.check_lines = false;
+    unchecked_config.check_segments = false;
     var diff_unchecked = try diffFnListFromConfig(allocator, unchecked_config, before, after);
     defer deinitDiffList(allocator, &diff_unchecked);
 
@@ -2612,8 +2444,8 @@ test "DiffFn lifecycle" {
     {
         const options: DiffConfig = .{
             .edit_cost = 9,
-            .check_lines = false,
-            .check_line_threshold = 33,
+            .check_segments = false,
+            .check_segment_threshold = 33,
         };
         var differ = DefaultDiffer.init(options);
         defer differ.deinit(allocator);
@@ -2950,7 +2782,7 @@ test "DiffFn diffBisectSplit edge coverage" {
 test "DiffFn diff" {
     const config: DiffConfig = blk: {
         var config: DiffConfig = .default;
-        config.check_lines = false;
+        config.check_segments = false;
         break :blk config;
     };
     try testing.checkAllAllocationFailures(testing.allocator, testDiffFn, .{TDiff{ .config = config, .before = "", .after = "", .expected = &[_]Edit{} }});
@@ -2989,7 +2821,7 @@ test "DiffFn Unicode diffs" {
     const allocator = testing.allocator;
     const config: DiffConfig = blk: {
         var cfg: DiffConfig = .default;
-        cfg.check_lines = false;
+        cfg.check_segments = false;
         break :blk cfg;
     };
     {
@@ -3147,7 +2979,7 @@ test "DiffFn diffCleanupEfficiency" {
 test "DiffFn before and after text" {
     const config: DiffConfig = blk: {
         var cfg: DiffConfig = .default;
-        cfg.check_lines = false;
+        cfg.check_segments = false;
         break :blk cfg;
     };
     const allocator = testing.allocator;
@@ -3319,7 +3151,7 @@ test "DiffFn diffBySegment supports fixed segment split hooks" {
 test "DiffFn diffIndex" {
     const config: DiffConfig = blk: {
         var cfg: DiffConfig = .default;
-        cfg.check_lines = false;
+        cfg.check_segments = false;
         break :blk cfg;
     };
     var diffs = try diffFnListFromConfig(testing.allocator, config, "The midnight train", "The blue midnight train");
@@ -3351,8 +3183,8 @@ test "DiffFn beforeText regression for wikipedia ed script snippet" {
 
     const config: DiffConfig = blk: {
         var cfg: DiffConfig = .default;
-        cfg.check_lines = false;
-        cfg.check_line_threshold = 1024 * 1024;
+        cfg.check_segments = false;
+        cfg.check_segment_threshold = 1024 * 1024;
         break :blk cfg;
     };
     const allocator = testing.allocator;
@@ -3385,7 +3217,7 @@ test "DiffFn prettyFormat" {
     };
     const config: DiffConfig = blk: {
         var cfg: DiffConfig = .default;
-        cfg.check_lines = false;
+        cfg.check_segments = false;
         break :blk cfg;
     };
     const allocator = testing.allocator;
@@ -3443,21 +3275,13 @@ pub const DiffDecorations = diff_mod.DiffDecorations;
 const common = @import("dmp/common.zig");
 const diff_mod = @import("dmp/diff.zig");
 const memex = @import("memex");
-const Patch = @import("dmp/Patch.zig");
-const PatchConfig = Patch.PatchConfig;
-const zdelta_mod = @import("zdelta.zig");
-
 const OOM = Allocator.Error;
-const ZDeltaVersion = zdelta_mod.ZDeltaVersion;
-const ZDeltaEncodeError = zdelta_mod.ZDeltaEncodeError;
-const ZDeltaDecodeError = zdelta_mod.ZDeltaDecodeError;
 const deinitDiffList = common.deinitDiffList;
 const diffRunAllBorrowed = common.diffRunAllBorrowed;
 const diffBorrowedRunSpan = common.diffBorrowedRunSpan;
 const diffMaterializeRun = common.diffMaterializeRun;
 const diffMakeOwnedConcat2 = common.diffMakeOwnedConcat2;
 const cloneDiffList = common.cloneDiffList;
-const copyDiffList = common.copyDiffList;
 const hasSharedPrefixLen = common.hasSharedPrefixLen;
 const defaultSemanticScore = common.diffCleanupSemanticScore;
 const diffIndex = common.diffIndex;

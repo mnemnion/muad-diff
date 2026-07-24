@@ -661,7 +661,7 @@ fn diffAndMakePatch(
     text2: []const u8,
 ) Differ.DiffError!PatchList {
     var differ: Differ = .default;
-    differ.config.check_lines = true;
+    differ.config.check_segments = true;
     var difference = try differ.diff(allocator, text1, text2);
     defer difference.deinit(allocator);
     if (difference.edits.items.len > 2) {
@@ -934,7 +934,7 @@ fn applyDestructiveImpl(
                 // Imperfect match.  Run a diff to get a framework of equivalent
                 // indices.
                 var differ: Differ = .default;
-                differ.config.check_lines = false;
+                differ.config.check_segments = false;
                 var difference = try differ.diff(
                     allocator,
                     text1,
@@ -2708,7 +2708,7 @@ fn testMakePatch(allocator: Allocator) !void {
         try testing.expectEqualStrings(expectedPatch, patch_text);
         const config: DiffConfig = blk: {
             var config: DiffConfig = .default;
-            config.check_lines = false;
+            config.check_segments = false;
             break :blk config;
         };
         var differ = Differ.init(config);

@@ -379,8 +379,8 @@ test "corpus revision pairs satisfy diff and patch invariants" {
     const arena = arena_state.allocator();
     const diff_config: DiffConfig = blk: {
         var config: DiffConfig = .default;
-        config.check_line_threshold = 1024 * 1024;
-        config.check_lines = false;
+        config.check_segment_threshold = 1024 * 1024;
+        config.check_segments = false;
         break :blk config;
     };
     const patch_config: PatchConfig = .default;
@@ -410,8 +410,8 @@ test "corpus revision invariants (line mode)" {
     const arena = arena_state.allocator();
     const diff_config: DiffConfig = blk: {
         var config: DiffConfig = .default;
-        config.check_line_threshold = 10;
-        config.check_lines = true;
+        config.check_segment_threshold = 10;
+        config.check_segments = true;
         break :blk config;
     };
     const patch_config: PatchConfig = .default;

@@ -19,7 +19,7 @@ const zdelta_mod = @import("zdelta.zig");
 /// The default text differ.
 pub const Differ = diff_mod.Differ;
 /// A difference produced by the default `Differ`.
-pub const Diff = Differ.Diff;
+pub const Diff = diff_mod.Diff;
 pub const DiffFn = diff_fn_mod.DiffFn;
 pub const WhichText = diff_fn_mod.WhichText;
 pub const Edit = diff_mod.Edit;
