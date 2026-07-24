@@ -884,7 +884,7 @@ pub fn DiffFn(config: anytype) type {
             var trimmed_text1 = text1_in[common_length..];
             var trimmed_text2 = text2_in[common_length..];
 
-            common_length = differ.diffSegmentCommonSuffixFromLastDiff(trimmed_text1, trimmed_text2);
+            common_length = differ.diffSegmentCommonSuffix(trimmed_text1, trimmed_text2);
             const common_suffix = trimmed_text1[trimmed_text1.len - common_length ..];
             trimmed_text1 = trimmed_text1[0 .. trimmed_text1.len - common_length];
             trimmed_text2 = trimmed_text2[0 .. trimmed_text2.len - common_length];
@@ -903,7 +903,7 @@ pub fn DiffFn(config: anytype) type {
             return diffs;
         }
 
-        fn diffSegmentCommonSuffixFromLastDiff(
+        fn diffSegmentCommonSuffix(
             differ: *Differ,
             before: []const u8,
             after: []const u8,
