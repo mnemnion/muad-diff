@@ -1584,53 +1584,49 @@ fn diffCharsToSegments(
     before_text: []const u8,
     after_text: []const u8,
 ) OOM!DiffList {
-    var text: ArrayListUnmanaged(u8) = .empty;
-    defer text.deinit(allocator);
     var diffs: DiffList = .empty;
     errdefer deinitDiffList(allocator, &diffs);
     try diffs.ensureUnusedCapacity(allocator, char_diffs.items.len);
     var before_cursor: usize = 0;
     var after_cursor: usize = 0;
     for (char_diffs.items) |*edit| {
+        var text_len: usize = 0;
         var cursor: usize = 0;
         while (cursor < edit.text.len) {
             const cp_len = std.unicode.utf8ByteSequenceLength(edit.text[cursor]) catch @panic("Internal decode error in diffCharsToLines");
             const cp = std.unicode.wtf8Decode(edit.text[cursor..][0..cp_len]) catch @panic("Internal decode error in diffCharsToLines");
-            try text.appendSlice(allocator, line_array[cp - CHAR_OFFSET]);
+            const segment = line_array[cp - CHAR_OFFSET];
+            if (is_debug) {
+                switch (edit.operation) {
+                    .equal => {
+                        dbgassert(std.mem.startsWith(u8, before_text[before_cursor + text_len ..], segment));
+                        dbgassert(std.mem.startsWith(u8, after_text[after_cursor + text_len ..], segment));
+                    },
+                    .delete => dbgassert(std.mem.startsWith(u8, before_text[before_cursor + text_len ..], segment)),
+                    .insert => dbgassert(std.mem.startsWith(u8, after_text[after_cursor + text_len ..], segment)),
+                }
+            }
+            text_len += segment.len;
             cursor += cp_len;
         }
         switch (edit.operation) {
             .equal => {
-                const span = before_text[before_cursor..][0..text.items.len];
-                if (is_debug) {
-                    dbgassert(std.mem.startsWith(u8, before_text[before_cursor..], text.items));
-                    dbgassert(std.mem.startsWith(u8, after_text[after_cursor..], text.items));
-                    dbgassert(std.mem.eql(u8, span, text.items));
-                }
-                before_cursor += text.items.len;
-                after_cursor += text.items.len;
+                const span = before_text[before_cursor..][0..text_len];
+                before_cursor += text_len;
+                after_cursor += text_len;
                 diffs.appendAssumeCapacity(Edit.asBorrow(.equal, span));
             },
             .delete => {
-                const span = before_text[before_cursor..][0..text.items.len];
-                if (is_debug) {
-                    dbgassert(std.mem.startsWith(u8, before_text[before_cursor..], text.items));
-                    dbgassert(std.mem.eql(u8, span, text.items));
-                }
-                before_cursor += text.items.len;
+                const span = before_text[before_cursor..][0..text_len];
+                before_cursor += text_len;
                 diffs.appendAssumeCapacity(Edit.asBorrow(.delete, span));
             },
             .insert => {
-                const span = after_text[after_cursor..][0..text.items.len];
-                if (is_debug) {
-                    dbgassert(std.mem.startsWith(u8, after_text[after_cursor..], text.items));
-                    dbgassert(std.mem.eql(u8, span, text.items));
-                }
-                after_cursor += text.items.len;
+                const span = after_text[after_cursor..][0..text_len];
+                after_cursor += text_len;
                 diffs.appendAssumeCapacity(Edit.asBorrow(.insert, span));
             },
         }
-        text.items.len = 0;
     }
     return diffs;
 }
