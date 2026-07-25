@@ -93,19 +93,6 @@ pub const WhichText = enum {
     after,
 };
 
-/// Result of line- or segment-based compression prior to rediffing.
-const SegmentsToCharsResult = struct {
-    chars_1: []const u8,
-    chars_2: []const u8,
-    line_array: ArrayListUnmanaged([]const u8),
-
-    pub fn deinit(result: *SegmentsToCharsResult, allocator: Allocator) void {
-        allocator.free(result.chars_1);
-        allocator.free(result.chars_2);
-        result.line_array.deinit(allocator);
-    }
-};
-
 /// Build a specialized `Differ` type from a loose comptime config.
 ///
 /// Supported fields are:
@@ -113,9 +100,31 @@ const SegmentsToCharsResult = struct {
 /// - `SegmentIterator`: iterator type for segmentation, default line iterator
 /// - `fixSegmentForward` and `fixSegmentBackward`: segment boundary fixups
 /// - `semanticScore`: boundary-scoring function for semantic cleanup
+/// - `cached_segment_map`: retain segments and codepoints between diffs, default `false`
 pub fn DiffFn(config: anytype) type {
     const Config = @TypeOf(config);
     const Context = if (@hasField(Config, "context")) config.context else void;
+
+    const cached_segment_map = if (@hasField(Config, "cached_segment_map"))
+        config.cached_segment_map
+    else
+        false;
+    const SegmentMap = if (cached_segment_map) std.StringHashMapUnmanaged(u31) else void;
+    const SegmentArray = if (cached_segment_map) ArrayListUnmanaged([]const u8) else void;
+    const SegmentsToCharsResult = struct {
+        chars_1: []const u8,
+        chars_2: []const u8,
+        segment_array: ArrayListUnmanaged([]const u8),
+
+        const Result = @This();
+
+        fn deinit(result: *Result, allocator: Allocator) void {
+            allocator.free(result.chars_1);
+            allocator.free(result.chars_2);
+            if (comptime !cached_segment_map) result.segment_array.deinit(allocator);
+        }
+    };
+
     const SegmentIterator = if (@hasField(Config, "SegmentIterator"))
         config.SegmentIterator
     else
@@ -140,6 +149,10 @@ pub fn DiffFn(config: anytype) type {
         context: Context,
         /// Working edit list while a `Diff` is being produced.
         diff_list: ?DiffList,
+        /// Persistent segment-to-codepoint cache when configured.
+        segment_map: SegmentMap,
+        /// Persistent copied segments indexed by cached codepoint when configured.
+        segment_array: SegmentArray,
 
         const Differ = @This();
 
@@ -154,6 +167,8 @@ pub fn DiffFn(config: anytype) type {
             .config = .default,
             .context = defaultContext(Context),
             .diff_list = null,
+            .segment_map = if (cached_segment_map) .empty else {},
+            .segment_array = if (cached_segment_map) .empty else {},
         };
 
         /// Initialize a `Differ` with the provided `DiffConfig`.
@@ -162,6 +177,8 @@ pub fn DiffFn(config: anytype) type {
                 .config = cfg,
                 .context = defaultContext(Context),
                 .diff_list = null,
+                .segment_map = if (cached_segment_map) .empty else {},
+                .segment_array = if (cached_segment_map) .empty else {},
             };
         }
 
@@ -171,11 +188,24 @@ pub fn DiffFn(config: anytype) type {
                 .config = cfg,
                 .context = context,
                 .diff_list = null,
+                .segment_map = if (cached_segment_map) .empty else {},
+                .segment_array = if (cached_segment_map) .empty else {},
             };
         }
 
-        /// Release any working storage owned by this `Differ`.
+        /// Release all storage owned by this `Differ`.
         pub fn deinit(differ: *Differ, allocator: Allocator) void {
+            differ.clearDiff(allocator);
+            if (comptime cached_segment_map) {
+                differ.segment_map.deinit(allocator);
+                for (differ.segment_array.items) |segment| allocator.free(segment);
+                differ.segment_array.deinit(allocator);
+                differ.segment_array = .empty;
+                differ.segment_map = .empty;
+            }
+        }
+
+        fn clearDiff(differ: *Differ, allocator: Allocator) void {
             if (differ.diff_list) |*diffs| {
                 deinitDiffList(allocator, diffs);
                 differ.diff_list = null;
@@ -191,7 +221,7 @@ pub fn DiffFn(config: anytype) type {
             before: []const u8,
             after: []const u8,
         ) DiffError!Diff {
-            differ.deinit(allocator);
+            differ.clearDiff(allocator);
             differ.diff_list = try differ.diffImpl(allocator, before, after);
             return differ.takeDiff();
         }
@@ -203,7 +233,7 @@ pub fn DiffFn(config: anytype) type {
             before: []const u8,
             after: []const u8,
         ) DiffError!Diff {
-            differ.deinit(allocator);
+            differ.clearDiff(allocator);
             differ.diff_list = try differ.diffSegment(allocator, before, after);
             return differ.takeDiff();
         }
@@ -697,7 +727,7 @@ pub fn DiffFn(config: anytype) type {
             var diffs: DiffList = diff_munge: {
                 var char_diffs = try text_mode.diffInternal(allocator, a.chars_1, a.chars_2);
                 defer deinitDiffList(allocator, &char_diffs);
-                break :diff_munge try diffCharsToSegments(allocator, &char_diffs, a.line_array.items, text1_in, text2_in);
+                break :diff_munge try diffCharsToSegments(allocator, &char_diffs, a.segment_array.items, text1_in, text2_in);
             };
             errdefer deinitDiffList(allocator, &diffs);
             try differ.cleanupSemanticImpl(allocator, &diffs);
@@ -802,7 +832,7 @@ pub fn DiffFn(config: anytype) type {
             defer a.deinit(allocator);
             var char_diffs = try text_mode.diffInternal(allocator, a.chars_1, a.chars_2);
             defer deinitDiffList(allocator, &char_diffs);
-            return diffCharsToSegments(allocator, &char_diffs, a.line_array.items, text1_in, text2_in);
+            return diffCharsToSegments(allocator, &char_diffs, a.segment_array.items, text1_in, text2_in);
         }
 
         /// Rediff replacement blocks character-by-character after the
@@ -938,16 +968,50 @@ pub fn DiffFn(config: anytype) type {
             text1: []const u8,
             text2: []const u8,
         ) DiffError!SegmentsToCharsResult {
-            var line_array: ArrayListUnmanaged([]const u8) = .empty;
-            errdefer line_array.deinit(allocator);
-            line_array.items.len = 0;
-            var line_hash = std.StringHashMapUnmanaged(u31){};
-            defer line_hash.deinit(allocator);
+            if (comptime cached_segment_map) {
+                const chars1 = try differ.diffSegmentsToCharsMunge(
+                    allocator,
+                    text1,
+                    &differ.segment_array,
+                    &differ.segment_map,
+                );
+                errdefer allocator.free(chars1);
+                const chars2 = try differ.diffSegmentsToCharsMunge(
+                    allocator,
+                    text2,
+                    &differ.segment_array,
+                    &differ.segment_map,
+                );
+                return .{
+                    .chars_1 = chars1,
+                    .chars_2 = chars2,
+                    .segment_array = differ.segment_array,
+                };
+            } else {
+                var segment_array: ArrayListUnmanaged([]const u8) = .empty;
+                errdefer segment_array.deinit(allocator);
+                var segment_map: std.StringHashMapUnmanaged(u31) = .empty;
+                defer segment_map.deinit(allocator);
 
-            const chars1 = try differ.diffSegmentsToCharsMunge(allocator, text1, &line_array, &line_hash);
-            errdefer allocator.free(chars1);
-            const chars2 = try differ.diffSegmentsToCharsMunge(allocator, text2, &line_array, &line_hash);
-            return .{ .chars_1 = chars1, .chars_2 = chars2, .line_array = line_array };
+                const chars1 = try differ.diffSegmentsToCharsMunge(
+                    allocator,
+                    text1,
+                    &segment_array,
+                    &segment_map,
+                );
+                errdefer allocator.free(chars1);
+                const chars2 = try differ.diffSegmentsToCharsMunge(
+                    allocator,
+                    text2,
+                    &segment_array,
+                    &segment_map,
+                );
+                return .{
+                    .chars_1 = chars1,
+                    .chars_2 = chars2,
+                    .segment_array = segment_array,
+                };
+            }
         }
 
         /// Encode one text by iterating configured segments.
@@ -955,12 +1019,12 @@ pub fn DiffFn(config: anytype) type {
             differ: *Differ,
             allocator: Allocator,
             text: []const u8,
-            line_array: *ArrayListUnmanaged([]const u8),
-            line_hash: *std.StringHashMapUnmanaged(u31),
+            segment_array: *ArrayListUnmanaged([]const u8),
+            segment_map: *std.StringHashMapUnmanaged(u31),
         ) DiffError![]const u8 {
             var iter = try differ.makeIterator(allocator, text);
             defer differ.deinitIterator(allocator, &iter);
-            return differ.diffIteratorToCharsMunge(allocator, line_array, line_hash, &iter);
+            return differ.diffIteratorToCharsMunge(allocator, segment_array, segment_map, &iter);
         }
 
         /// Reduce a segment stream to Unicode code points representing each
@@ -969,27 +1033,50 @@ pub fn DiffFn(config: anytype) type {
             _: *Differ,
             allocator: Allocator,
             segment_array: *ArrayListUnmanaged([]const u8),
-            segment_hash: *std.StringHashMapUnmanaged(u31),
+            segment_map: *std.StringHashMapUnmanaged(u31),
             iterator: anytype,
         ) DiffError![]const u8 {
             var chars: ArrayListUnmanaged(u8) = .empty;
             defer chars.deinit(allocator);
             var codepoint: u31 = cast(u31, segment_array.items.len) + CHAR_OFFSET;
             var char_buf: [6]u8 = undefined;
-            while (iterator.next()) |line| {
-                if (segment_hash.get(line)) |value| {
-                    const nbytes = common.plan9Encode(value, &char_buf);
+            while (iterator.next()) |segment| {
+                const entry = try segment_map.getOrPut(allocator, segment);
+                if (entry.found_existing) {
+                    const cp_value = entry.value_ptr.*;
+                    const nbytes = common.plan9Encode(cp_value, &char_buf);
                     try chars.appendSlice(allocator, char_buf[0..nbytes]);
-                } else {
-                    if (codepoint == std.math.maxInt(u31) - CHAR_OFFSET) {
-                        return error.TooManySegments; // kcov-miss: requires exhausting the u31 segment namespace.
-                    }
-                    try segment_array.append(allocator, line);
-                    try segment_hash.put(allocator, line, codepoint);
+                    continue;
+                }
+
+                if (codepoint == std.math.maxInt(u31) - CHAR_OFFSET) {
+                    segment_map.removeByPtr(entry.key_ptr);
+                    return error.TooManySegments; // kcov-miss: requires exhausting the u31 segment namespace.
+                }
+                if (comptime cached_segment_map) {
+                    const owned_segment = allocator.dupe(u8, segment) catch |err| {
+                        segment_map.removeByPtr(entry.key_ptr);
+                        return err;
+                    };
+                    segment_array.append(allocator, owned_segment) catch |err| {
+                        allocator.free(owned_segment);
+                        segment_map.removeByPtr(entry.key_ptr);
+                        return err;
+                    };
+                    entry.key_ptr.* = owned_segment;
+                    entry.value_ptr.* = codepoint;
                     const nbytes = common.plan9Encode(codepoint, &char_buf);
                     try chars.appendSlice(allocator, char_buf[0..nbytes]);
-                    codepoint += 1;
+                } else {
+                    segment_array.append(allocator, segment) catch |err| {
+                        segment_map.removeByPtr(entry.key_ptr);
+                        return err;
+                    };
+                    entry.value_ptr.* = codepoint;
+                    const nbytes = common.plan9Encode(codepoint, &char_buf);
+                    try chars.appendSlice(allocator, char_buf[0..nbytes]);
                 }
+                codepoint += 1;
             }
             return chars.toOwnedSlice(allocator);
         }
@@ -1561,6 +1648,8 @@ pub fn DiffFn(config: anytype) type {
                 .config = cfg,
                 .context = differ.context,
                 .diff_list = null,
+                .segment_map = if (cached_segment_map) .empty else {},
+                .segment_array = if (cached_segment_map) .empty else {},
             };
         }
     };
@@ -1580,7 +1669,7 @@ fn diffEqualText(allocator: Allocator, text: []const u8) OOM!DiffList {
 fn diffCharsToSegments(
     allocator: Allocator,
     char_diffs: *DiffList,
-    line_array: []const []const u8,
+    segment_array: []const []const u8,
     before_text: []const u8,
     after_text: []const u8,
 ) OOM!DiffList {
@@ -1595,7 +1684,7 @@ fn diffCharsToSegments(
         while (cursor < edit.text.len) {
             const cp_len = std.unicode.utf8ByteSequenceLength(edit.text[cursor]) catch @panic("Internal decode error in diffCharsToLines");
             const cp = std.unicode.wtf8Decode(edit.text[cursor..][0..cp_len]) catch @panic("Internal decode error in diffCharsToLines");
-            const segment = line_array[cp - CHAR_OFFSET];
+            const segment = segment_array[cp - CHAR_OFFSET];
             if (is_debug) {
                 switch (edit.operation) {
                     .equal => {
@@ -1710,6 +1799,12 @@ pub const TestDiffer = DiffFn(.{
     .SegmentIterator = diff_mod.LineIterator,
     .semanticScore = diff_mod.diffCleanupSemanticScore,
 });
+const CachedSegmentDiffer = DiffFn(.{
+    .context = void,
+    .SegmentIterator = diff_mod.LineIterator,
+    .semanticScore = diff_mod.diffCleanupSemanticScore,
+    .cached_segment_map = true,
+});
 const DefaultDiffer = TestDiffer;
 const TestDifference = Diff;
 
@@ -1717,6 +1812,10 @@ comptime {
     const ContextDiffer = DiffFn(.{ .context = usize });
     assert(diffReturnType(TestDiffer) == Diff);
     assert(diffReturnType(ContextDiffer) == Diff);
+    assert(@TypeOf(TestDiffer.default.segment_map) == void);
+    assert(@TypeOf(TestDiffer.default.segment_array) == void);
+    assert(@TypeOf(CachedSegmentDiffer.default.segment_map) == std.StringHashMapUnmanaged(u31));
+    assert(@TypeOf(CachedSegmentDiffer.default.segment_array) == ArrayListUnmanaged([]const u8));
 }
 
 fn diffReturnType(comptime Differ: type) type {
@@ -1771,7 +1870,7 @@ const TCharLines = struct {
     before: []const u8,
     after: []const u8,
     diffs: []const Edit,
-    line_array: []const []const u8,
+    segment_array: []const []const u8,
     expected: []const Edit,
 };
 
@@ -2027,7 +2126,7 @@ fn testDiffFnCharsToLines(
         });
     }
 
-    var diffs = try diffCharsToSegments(allocator, &char_diffs, params.line_array, params.before, params.after);
+    var diffs = try diffCharsToSegments(allocator, &char_diffs, params.segment_array, params.before, params.after);
     defer deinitDiffList(allocator, &diffs);
     try expectEqualDiff(params.expected, diffs.items);
 }
@@ -2408,6 +2507,68 @@ fn testDiffFnRebuildTexts(allocator: Allocator, diffs: DiffList, params: TRebuil
     try testing.expectEqualStrings(params.after, texts[1]);
 }
 
+fn testDiffFnCachedSegmentMap(allocator: Allocator) !void {
+    var differ: CachedSegmentDiffer = .default;
+    defer differ.deinit(allocator);
+
+    {
+        const before = try allocator.dupe(u8, "alpha\nbeta\n");
+        defer allocator.free(before);
+        const after = try allocator.dupe(u8, "alpha\ngamma\n");
+        defer allocator.free(after);
+        var difference = try differ.diffBySegment(allocator, before, after);
+        defer difference.deinit(allocator);
+        try expectEqualDiff(&.{
+            Edit.asBorrow(.equal, "alpha\n"),
+            Edit.asBorrow(.delete, "beta\n"),
+            Edit.asBorrow(.insert, "gamma\n"),
+        }, difference.edits.items);
+    }
+
+    try testing.expectEqual(@as(usize, 3), differ.segment_map.count());
+    try testing.expectEqual(@as(usize, 3), differ.segment_array.items.len);
+    for (differ.segment_array.items, 0..) |segment, index| {
+        const entry = differ.segment_map.getEntry(segment).?;
+        try testing.expect(segment.ptr == entry.key_ptr.*.ptr);
+        try testing.expectEqual(cast(u31, index) + CHAR_OFFSET, entry.value_ptr.*);
+    }
+
+    {
+        const before = try allocator.dupe(u8, "alpha\ngamma\n");
+        defer allocator.free(before);
+        const after = try allocator.dupe(u8, "alpha\nbeta\n");
+        defer allocator.free(after);
+        var difference = try differ.diffBySegment(allocator, before, after);
+        defer difference.deinit(allocator);
+        try expectEqualDiff(&.{
+            Edit.asBorrow(.equal, "alpha\n"),
+            Edit.asBorrow(.delete, "gamma\n"),
+            Edit.asBorrow(.insert, "beta\n"),
+        }, difference.edits.items);
+    }
+
+    try testing.expectEqual(@as(usize, 3), differ.segment_map.count());
+    try testing.expectEqual(@as(usize, 3), differ.segment_array.items.len);
+
+    {
+        var difference = try differ.diffBySegment(
+            allocator,
+            "alpha\nbeta\n",
+            "alpha\ndelta\n",
+        );
+        defer difference.deinit(allocator);
+        try expectEqualDiff(&.{
+            Edit.asBorrow(.equal, "alpha\n"),
+            Edit.asBorrow(.delete, "beta\n"),
+            Edit.asBorrow(.insert, "delta\n"),
+        }, difference.edits.items);
+    }
+
+    try testing.expectEqual(@as(usize, 4), differ.segment_map.count());
+    try testing.expectEqual(@as(usize, 4), differ.segment_array.items.len);
+    try testing.expectEqualStrings("delta\n", differ.segment_array.items[3]);
+}
+
 test "DiffFn lifecycle" {
     const allocator = testing.allocator;
 
@@ -2475,6 +2636,14 @@ test "DiffFn lifecycle" {
     }
 }
 
+test "DiffFn cached segment map" {
+    try testing.checkAllAllocationFailures(
+        testing.allocator,
+        testDiffFnCachedSegmentMap,
+        .{},
+    );
+}
+
 test "DiffFn diffCommonPrefix" {
     try testing.expectEqual(@as(usize, 0), diffCommonPrefix("abc", "xyz"));
     try testing.expectEqual(@as(usize, 4), diffCommonPrefix("1234abcdef", "1234xyz"));
@@ -2538,7 +2707,7 @@ test "DiffFn diffSegmentsToChars" {
     var result = try differ.diffSegmentsToChars(allocator, "alpha\nbeta\nalpha\n", "beta\nalpha\nbeta\n");
     try testing.expectEqualStrings(" ! ", result.chars_1);
     try testing.expectEqualStrings("! !", result.chars_2);
-    try testing.expectEqualDeep(tmp_array_list.items, result.line_array.items);
+    try testing.expectEqualDeep(tmp_array_list.items, result.segment_array.items);
     result.deinit(allocator);
 
     tmp_array_list.items.len = 0;
@@ -2548,7 +2717,7 @@ test "DiffFn diffSegmentsToChars" {
     result = try differ.diffSegmentsToChars(allocator, "", "alpha\r\nbeta\r\n\r\n\r\n");
     try testing.expectEqualStrings("", result.chars_1);
     try testing.expectEqualStrings(" !\"\"", result.chars_2);
-    try testing.expectEqualDeep(tmp_array_list.items, result.line_array.items);
+    try testing.expectEqualDeep(tmp_array_list.items, result.segment_array.items);
     result.deinit(allocator);
 
     tmp_array_list.items.len = 0;
@@ -2557,7 +2726,7 @@ test "DiffFn diffSegmentsToChars" {
     result = try differ.diffSegmentsToChars(allocator, "a", "b");
     try testing.expectEqualStrings(" ", result.chars_1);
     try testing.expectEqualStrings("!", result.chars_2);
-    try testing.expectEqualDeep(tmp_array_list.items, result.line_array.items);
+    try testing.expectEqualDeep(tmp_array_list.items, result.segment_array.items);
     result.deinit(allocator);
 }
 
@@ -2573,7 +2742,7 @@ test "DiffFn diffCharsToLines" {
         .before = "alpha\nbeta\nalpha\n",
         .after = "alpha\nbeta\nalpha\nbeta\nalpha\nbeta\n",
         .diffs = diff_list.items,
-        .line_array = &[_][]const u8{ "alpha\n", "beta\n" },
+        .segment_array = &[_][]const u8{ "alpha\n", "beta\n" },
         .expected = &.{
             .{ .operation = .equal, .owned = false, .text = "alpha\nbeta\nalpha\n" },
             .{ .operation = .insert, .owned = false, .text = "beta\nalpha\nbeta\n" },
