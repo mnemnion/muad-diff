@@ -36,6 +36,14 @@ Some of the features, relative to the classic library:
 
 - **Improved Deltas**: More on this later.
 
+
+## Status
+
+The core functionality of this library is stable, well-tested, and ready
+for use.  It's implicated in a rather elaborate quest involving syntax-
+directed diffing, so if it looks like it has a few more degrees of freedom,
+and affordances, than it's really making good use of: that's why.
+
 [diff-match-patch]: https://github.com/google/diff-match-patch
 [diffz]: https://github.com/ziglibs/diffz/pull/26
 [bitap]: https://en.wikipedia.org/wiki/Bitap_algorithm
