@@ -1,4 +1,4 @@
-# Muad Diff: The Splice Must Flow
+# Muad'Diff: The Splice Must Flow
 
 A Zig diffing library based on [diff-match-patch].  This started as a PR
 for [diffz], before developing a life of its own.
@@ -15,7 +15,7 @@ Some of the features, relative to the classic library:
 
 - **Segmented**: `diff-match-patch` has a line-oriented 'fast mode',
   which for encoding reasons is classically limited to 64K (unique)
-  lines.  Muad D'iff uses an encoding allowing up to 2^31 lines, and
+  lines.  Muad'Diff uses an encoding allowing up to 2^31 lines, and
   isn't limited to lines either.
 
 - **Streamlined Patches**: The "unidiff format" aggressively uses
