@@ -16,11 +16,14 @@ const diff_fn_mod = @import("diff_fn.zig");
 const diff_context_mod = @import("diff_context.zig");
 const zdelta_mod = @import("zdelta.zig");
 
+/// The default text differ.
+pub const Differ = diff_mod.Differ;
+/// A difference produced by the default `Differ`.
 pub const Diff = diff_mod.Diff;
 pub const DiffFn = diff_fn_mod.DiffFn;
 pub const WhichText = diff_fn_mod.WhichText;
 pub const Edit = diff_mod.Edit;
-pub const DiffConfig = diff_mod.DiffConfig;
+pub const DiffConfig = diff_fn_mod.DiffConfig;
 pub const DiffDecorations = diff_mod.DiffDecorations;
 pub const ZDeltaVersion = zdelta_mod.ZDeltaVersion;
 pub const ZDeltaEncodeError = zdelta_mod.ZDeltaEncodeError;
@@ -35,9 +38,10 @@ pub const DiffContext = diff_context_mod;
 pub const Patch = @import("dmp/Patch.zig");
 
 test {
+    _ = Differ;
     _ = Diff;
     _ = DiffFn(.{});
-    _ = diff_fn_mod.TestDiff;
+    _ = diff_fn_mod.TestDiffer;
     _ = DiffContext;
     _ = Patch;
 }

@@ -122,9 +122,9 @@ const RealCodec = struct {
         before_text: []const u8,
         after_text: []const u8,
     ) ![]const u8 {
-        var diff: dmp.Diff = .default;
+        var differ: dmp.Differ = .default;
+        var diff = try differ.diff(allocator, before_text, after_text);
         defer diff.deinit(allocator);
-        try diff.diff(allocator, before_text, after_text);
         return try diff.toZDelta(allocator, .b);
     }
 
@@ -133,7 +133,7 @@ const RealCodec = struct {
         before_text: []const u8,
         zdelta: []const u8,
     ) ![]const u8 {
-        var diff: dmp.Diff = .default;
+        var diff: dmp.Diff = .empty;
         defer diff.deinit(allocator);
         try diff.fromZDelta(allocator, before_text, zdelta);
         return try diff.afterText(allocator);

@@ -227,7 +227,7 @@ pub fn fromTexts(
     allocator: Allocator,
     text1: []const u8,
     text2: []const u8,
-) Diff.DiffError!*Patch {
+) Differ.DiffError!*Patch {
     patch.deinit(allocator);
     patch.hunks = try patch.diffAndMakePatch(allocator, text1, text2);
     return patch;
@@ -258,7 +258,7 @@ pub fn apply(
     patch: *const Patch,
     allocator: Allocator,
     text: []const u8,
-) Diff.DiffError!struct { []const u8, bool } {
+) Differ.DiffError!struct { []const u8, bool } {
     return try patch.applyPatch(allocator, text);
 }
 
@@ -269,7 +269,7 @@ pub fn applyDestructive(
     patch: *Patch,
     allocator: Allocator,
     og_text: []const u8,
-) Diff.DiffError!struct { []const u8, bool } {
+) Differ.DiffError!struct { []const u8, bool } {
     if (patch.hunks.items.len == 0) {
         return .{ try allocator.dupe(u8, og_text), true };
     }
@@ -659,16 +659,16 @@ fn diffAndMakePatch(
     allocator: Allocator,
     text1: []const u8,
     text2: []const u8,
-) Diff.DiffError!PatchList {
-    var diff_obj: Diff = .default;
-    defer diff_obj.deinit(allocator);
-    diff_obj.config.check_lines = true;
-    try diff_obj.diff(allocator, text1, text2);
-    if (diff_obj.edits.items.len > 2) {
-        try diff_obj.cleanupSemantic(allocator);
-        try diff_obj.cleanupEfficiency(allocator);
+) Differ.DiffError!PatchList {
+    var differ: Differ = .default;
+    differ.config.check_segments = true;
+    var difference = try differ.diff(allocator, text1, text2);
+    defer difference.deinit(allocator);
+    if (difference.edits.items.len > 2) {
+        try differ.cleanupSemantic(allocator, &difference);
+        try differ.cleanupEfficiency(allocator, &difference);
     }
-    return try makePatchInternal(patch.config, allocator, text1, &diff_obj);
+    return try makePatchInternal(patch.config, allocator, text1, &difference);
 }
 
 /// @return List of Patch objects.
@@ -853,7 +853,7 @@ fn applyPatch(
     patch: *const Patch,
     allocator: Allocator,
     og_text: []const u8,
-) Diff.DiffError!struct { []const u8, bool } {
+) Differ.DiffError!struct { []const u8, bool } {
     if (patch.hunks.items.len == 0) {
         // As silly as this is, we dupe the text, because something
         // passing an empty patchset isn't going to check, and will
@@ -871,7 +871,7 @@ fn applyDestructiveImpl(
     patch: *Patch,
     allocator: Allocator,
     og_text: []const u8,
-) Diff.DiffError!struct { []const u8, bool } {
+) Differ.DiffError!struct { []const u8, bool } {
     const pre, const post = patch.textMaxBounds(og_text.len);
     const null_padding = try patchAddPadding(patch.config, allocator, &patch.hunks);
     defer allocator.free(null_padding);
@@ -887,7 +887,7 @@ fn applyDestructiveImpl(
     for (patch.hunks.items) |hunk| {
         const expected_loc = cast(usize, cast(isize, hunk.start2) + delta);
         // TODO: make this a borrow when possible.
-        const text1 = try (Diff{ .config = .default, .context = {}, .edits = hunk.diffs }).beforeText(allocator);
+        const text1 = try (Diff{ .edits = hunk.diffs }).beforeText(allocator);
         defer allocator.free(text1);
         var maybe_start: ?usize = null;
         var maybe_end: ?usize = null;
@@ -927,22 +927,22 @@ fn applyDestructiveImpl(
             };
             if (std.mem.eql(u8, text1, text2)) {
                 // Perfect match, just shove the replacement text in.
-                const diff_text = try (Diff{ .config = .default, .context = {}, .edits = hunk.diffs }).afterText(allocator);
+                const diff_text = try (Diff{ .edits = hunk.diffs }).afterText(allocator);
                 defer allocator.free(diff_text);
                 tm.replaceRange(start, text1.len, diff_text);
             } else {
                 // Imperfect match.  Run a diff to get a framework of equivalent
                 // indices.
-                var diff_obj: Diff = .default;
-                defer diff_obj.deinit(allocator);
-                diff_obj.config.check_lines = false;
-                try diff_obj.diff(
+                var differ: Differ = .default;
+                differ.config.check_segments = false;
+                var difference = try differ.diff(
                     allocator,
                     text1,
                     text2,
                 );
+                defer difference.deinit(allocator);
                 const t1_l_float: f64 = @floatFromInt(text1.len);
-                const levenshtein_d: f64 = levenshtein(diff_obj);
+                const levenshtein_d: f64 = levenshtein(difference);
                 const bad_match = levenshtein_d / t1_l_float > patch.config.delete_threshold;
                 if (text1.len > m_max_b and bad_match) {
                     // The end points match, but the content is unacceptably bad.
@@ -952,23 +952,23 @@ fn applyDestructiveImpl(
                     // We're reasonably sure that cleanupSemanticLossless cannot change
                     // the byte count, but it's worth asserting.
                     if (is_debug) {
-                        const before = diff_obj.changeInBytes();
-                        try diff_obj.cleanupSemanticLossless(allocator);
-                        const after = diff_obj.changeInBytes();
+                        const before = difference.changeInBytes();
+                        try differ.cleanupSemanticLossless(allocator, &difference);
+                        const after = difference.changeInBytes();
                         assert(before == after);
                     } else {
-                        try diff_obj.cleanupSemanticLossless(allocator);
+                        try differ.cleanupSemanticLossless(allocator, &difference);
                     }
                     var index1: usize = 0;
                     for (hunk.diffs.items) |edit| {
                         if (edit.operation != .equal) {
-                            const index2 = diff_obj.index(index1);
+                            const index2 = difference.index(index1);
                             if (edit.operation == .insert) {
                                 // Insertion
                                 tm.insert(start + index2, edit.text);
                             } else if (edit.operation == .delete) {
                                 // Deletion
-                                const delete_at = diff_obj.index(index1 + edit.text.len) - index2;
+                                const delete_at = difference.index(index1 + edit.text.len) - index2;
                                 tm.delete(start + index2, delete_at);
                             }
                         }
@@ -1294,7 +1294,7 @@ fn patchSplitMax(
                 }
             }
             // Append the end context for this patch.
-            const postcontext_backing = try (Diff{ .config = .default, .context = {}, .edits = bigpatch.diffs }).beforeText(allocator);
+            const postcontext_backing = try (Diff{ .edits = bigpatch.diffs }).beforeText(allocator);
             defer allocator.free(postcontext_backing);
             const postcontext_owned = true;
             const postcontext = if (postcontext_backing.len > patch_margin)
@@ -1304,7 +1304,7 @@ fn patchSplitMax(
             // Compute the head context for the next patch, if we're going to
             // need it.
             if (bigpatch.diffs.items.len != 0) {
-                const after_text = try (Diff{ .config = .default, .context = {}, .edits = hunk.diffs }).afterText(allocator);
+                const after_text = try (Diff{ .edits = hunk.diffs }).afterText(allocator);
                 if (precontext_owned) allocator.free(precontext_backing);
                 precontext_backing = after_text;
                 precontext_owned = true;
@@ -2049,9 +2049,9 @@ fn testPatchIssue157GeneratedPatchRoundTrip(allocator: Allocator) !void {
         "  }\n" ++
         "}";
 
-    var diff = Diff.init(.default);
+    var differ: Differ = .default;
+    var diff = try differ.diff(allocator, original_json, expected_json);
     defer diff.deinit(allocator);
-    try diff.diff(allocator, original_json, expected_json);
 
     var patch: Patch = .default;
     defer patch.deinit(allocator);
@@ -2708,12 +2708,12 @@ fn testMakePatch(allocator: Allocator) !void {
         try testing.expectEqualStrings(expectedPatch, patch_text);
         const config: DiffConfig = blk: {
             var config: DiffConfig = .default;
-            config.check_lines = false;
+            config.check_segments = false;
             break :blk config;
         };
-        var diff = Diff.init(config);
+        var differ = Differ.init(config);
+        var diff = try differ.diff(allocator, text1, text2);
         defer diff.deinit(allocator);
-        try diff.diff(allocator, text1, text2);
         _ = try patch.make(allocator, text1, &diff);
         const patch_text_2 = try patch.toTextPatch(allocator);
         defer allocator.free(patch_text_2);
@@ -2736,7 +2736,7 @@ fn testMakePatch(allocator: Allocator) !void {
             .{ .operation = .insert, .owned = false, .text = "~!@#$%^&*()_+{}|:\"<>?" },
         });
         defer deinitDiffList(allocator, &diffs);
-        const difference = Diff{ .config = .default, .context = {}, .edits = diffs };
+        const difference = Diff{ .edits = diffs };
         _ = try patch.fromDiff(allocator, &difference);
         for (patch.hunks.items[0].diffs.items, 0..) |edit, idx| {
             try testing.expect(edit.eql(diffs.items[idx]));
@@ -3366,6 +3366,7 @@ const is_debug = builtin.mode == .Debug;
 const dmp = @import("../dmp.zig");
 const diff_mod = @import("diff.zig");
 const common = @import("common.zig");
+const Differ = dmp.Differ;
 const Diff = dmp.Diff;
 const Edit = dmp.Edit;
 const DiffConfig = dmp.DiffConfig;
