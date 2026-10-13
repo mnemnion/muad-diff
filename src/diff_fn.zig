@@ -9,16 +9,6 @@
 //! - `SegmentIterator`: the iterator used by the segment-mode speedup
 //! - `semanticScore`: boundary scoring used by semantic lossless cleanup
 
-const CHAR_OFFSET = 32;
-const UNICODE_MAX = 0x10ffdf;
-const UNICODE_TWO_THIRDS = 742724;
-const UNICODE_ONE_THIRD = 371355;
-
-comptime {
-    assert(UNICODE_TWO_THIRDS + UNICODE_ONE_THIRD == UNICODE_MAX);
-    assert(UNICODE_TWO_THIRDS + UNICODE_ONE_THIRD + CHAR_OFFSET == 0x10ffff);
-}
-
 /// The configurable parameters for a `Differ`.
 pub const DiffConfig = struct {
     /// Cost of an empty edit operation in terms of edit characters. Higher
@@ -101,6 +91,8 @@ pub const WhichText = enum {
 /// - `fixSegmentForward` and `fixSegmentBackward`: segment boundary fixups
 /// - `semanticScore`: boundary-scoring function for semantic cleanup
 /// - `cached_segment_map`: retain segments and codepoints between diffs, default `false`
+/// - `reDiffSegments(*Context, delete, insert) bool`: selectively exact-diff token pairs
+/// - `keepReDiff(*Context, Diff) bool`: accept a proposed exact diff, default `true`
 pub fn DiffFn(config: anytype) type {
     const Config = @TypeOf(config);
     const Context = if (@hasField(Config, "context")) config.context else void;
@@ -226,7 +218,9 @@ pub fn DiffFn(config: anytype) type {
             return differ.takeDiff();
         }
 
-        /// Run only the iterator-backed segment diff path, without cleanups.
+        /// Run the iterator-backed segment diff and any configured selective rediff.
+        /// When rediff is configured, group only equalities before cleanup;
+        /// pair changed tokens in source order within each replacement run.
         pub fn diffBySegment(
             differ: *Differ,
             allocator: Allocator,
@@ -235,7 +229,58 @@ pub fn DiffFn(config: anytype) type {
         ) DiffError!Diff {
             differ.clearDiff(allocator);
             differ.diff_list = try differ.diffSegment(allocator, before, after);
+            errdefer differ.clearDiff(allocator);
+            if (comptime @hasField(Config, "reDiffSegments")) {
+                try differ.cleanupBySegments(allocator, &differ.diff_list.?);
+            }
             return differ.takeDiff();
+        }
+
+        fn cleanupBySegments(differ: *Differ, allocator: Allocator, diffs: *DiffList) DiffError!void {
+            var enhanced: DiffList = .empty;
+            errdefer deinitDiffList(allocator, &enhanced);
+            try enhanced.ensureTotalCapacity(allocator, diffs.items.len);
+            var index: usize = 0;
+            while (index < diffs.items.len) {
+                // Rehydration keeps changed tokens separate. Pair tokens in
+                // source order within each replacement, before coalescing edits.
+                var insert_start = index;
+                while (insert_start < diffs.items.len and diffs.items[insert_start].operation == .delete) : (insert_start += 1) {}
+                var run_end = insert_start;
+                while (run_end < diffs.items.len and diffs.items[run_end].operation == .insert) : (run_end += 1) {}
+                if (insert_start == index or run_end == insert_start) {
+                    const end = @max(run_end, index + 1);
+                    for (diffs.items[index..end]) |edit| try appendBorrowedEdit(allocator, &enhanced, edit);
+                    index = end;
+                    continue;
+                }
+                const pairs = @min(insert_start - index, run_end - insert_start);
+                for (0..pairs) |pair| {
+                    const deletion = diffs.items[index + pair];
+                    const insertion = diffs.items[insert_start + pair];
+                    if (config.reDiffSegments(&differ.context, deletion.text, insertion.text)) {
+                        var text_mode = differ.copyForTextMode();
+                        var candidate: Diff = .{ .edits = try text_mode.diffInternal(allocator, deletion.text, insertion.text) };
+                        defer candidate.deinit(allocator);
+                        try differ.diffRebindToSourceTexts(allocator, &candidate.edits, deletion.text, insertion.text, 0, 0);
+                        const keep = if (comptime @hasField(Config, "keepReDiff"))
+                            config.keepReDiff(&differ.context, candidate)
+                        else
+                            true;
+                        if (keep) {
+                            for (candidate.edits.items) |edit| try appendBorrowedEdit(allocator, &enhanced, edit);
+                            continue;
+                        }
+                    }
+                    try appendBorrowedEdit(allocator, &enhanced, deletion);
+                    try appendBorrowedEdit(allocator, &enhanced, insertion);
+                }
+                for (diffs.items[index + pairs .. insert_start]) |edit| try appendBorrowedEdit(allocator, &enhanced, edit);
+                for (diffs.items[insert_start + pairs .. run_end]) |edit| try appendBorrowedEdit(allocator, &enhanced, edit);
+                index = run_end;
+            }
+            deinitDiffList(allocator, diffs);
+            diffs.* = enhanced;
         }
 
         /// Reduce the number of edits by eliminating semantically trivial
@@ -727,7 +772,7 @@ pub fn DiffFn(config: anytype) type {
             var diffs: DiffList = diff_munge: {
                 var char_diffs = try text_mode.diffInternal(allocator, a.chars_1, a.chars_2);
                 defer deinitDiffList(allocator, &char_diffs);
-                break :diff_munge try diffCharsToSegments(allocator, &char_diffs, a.segment_array.items, text1_in, text2_in);
+                break :diff_munge try diffCharsToSegments(allocator, &char_diffs, a.segment_array.items, text1_in, text2_in, true);
             };
             errdefer deinitDiffList(allocator, &diffs);
             try differ.cleanupSemanticImpl(allocator, &diffs);
@@ -832,7 +877,7 @@ pub fn DiffFn(config: anytype) type {
             defer a.deinit(allocator);
             var char_diffs = try text_mode.diffInternal(allocator, a.chars_1, a.chars_2);
             defer deinitDiffList(allocator, &char_diffs);
-            return diffCharsToSegments(allocator, &char_diffs, a.segment_array.items, text1_in, text2_in);
+            return diffCharsToSegments(allocator, &char_diffs, a.segment_array.items, text1_in, text2_in, !@hasField(Config, "reDiffSegments"));
         }
 
         /// Rediff replacement blocks character-by-character after the
@@ -1038,7 +1083,7 @@ pub fn DiffFn(config: anytype) type {
         ) DiffError![]const u8 {
             var chars: ArrayListUnmanaged(u8) = .empty;
             defer chars.deinit(allocator);
-            var codepoint: u31 = cast(u31, segment_array.items.len) + CHAR_OFFSET;
+            var codepoint: u31 = cast(u31, segment_array.items.len);
             var char_buf: [6]u8 = undefined;
             while (iterator.next()) |segment| {
                 const entry = try segment_map.getOrPut(allocator, segment);
@@ -1049,7 +1094,7 @@ pub fn DiffFn(config: anytype) type {
                     continue;
                 }
 
-                if (codepoint == std.math.maxInt(u31) - CHAR_OFFSET) {
+                if (codepoint == std.math.maxInt(u31)) {
                     segment_map.removeByPtr(entry.key_ptr);
                     return error.TooManySegments; // kcov-miss: requires exhausting the u31 segment namespace.
                 }
@@ -1672,6 +1717,7 @@ fn diffCharsToSegments(
     segment_array: []const []const u8,
     before_text: []const u8,
     after_text: []const u8,
+    comptime group_changes: bool,
 ) OOM!DiffList {
     var diffs: DiffList = .empty;
     errdefer deinitDiffList(allocator, &diffs);
@@ -1684,7 +1730,7 @@ fn diffCharsToSegments(
         while (cursor < edit.text.len) {
             const cp_len = std.unicode.utf8ByteSequenceLength(edit.text[cursor]) catch @panic("Internal decode error in diffCharsToLines");
             const cp = std.unicode.wtf8Decode(edit.text[cursor..][0..cp_len]) catch @panic("Internal decode error in diffCharsToLines");
-            const segment = segment_array[cp - CHAR_OFFSET];
+            const segment = segment_array[cp];
             if (is_debug) {
                 switch (edit.operation) {
                     .equal => {
@@ -1695,6 +1741,11 @@ fn diffCharsToSegments(
                     .insert => dbgassert(std.mem.startsWith(u8, after_text[after_cursor + text_len ..], segment)),
                 }
             }
+            if (!group_changes and edit.operation != .equal) {
+                const source = if (edit.operation == .delete) before_text else after_text;
+                const offset = if (edit.operation == .delete) before_cursor else after_cursor;
+                try diffs.append(allocator, Edit.asBorrow(edit.operation, source[offset + text_len ..][0..segment.len]));
+            }
             text_len += segment.len;
             cursor += cp_len;
         }
@@ -1703,21 +1754,36 @@ fn diffCharsToSegments(
                 const span = before_text[before_cursor..][0..text_len];
                 before_cursor += text_len;
                 after_cursor += text_len;
-                diffs.appendAssumeCapacity(Edit.asBorrow(.equal, span));
+                try diffs.append(allocator, Edit.asBorrow(.equal, span));
             },
             .delete => {
                 const span = before_text[before_cursor..][0..text_len];
                 before_cursor += text_len;
-                diffs.appendAssumeCapacity(Edit.asBorrow(.delete, span));
+                if (group_changes) try diffs.append(allocator, Edit.asBorrow(.delete, span));
             },
             .insert => {
                 const span = after_text[after_cursor..][0..text_len];
                 after_cursor += text_len;
-                diffs.appendAssumeCapacity(Edit.asBorrow(.insert, span));
+                if (group_changes) try diffs.append(allocator, Edit.asBorrow(.insert, span));
             },
         }
     }
     return diffs;
+}
+
+// Coalesce only after selective rediffing. Borrowed spans must be contiguous
+// in their original source; equalities separated by a deletion cannot join.
+fn appendBorrowedEdit(allocator: Allocator, diffs: *DiffList, edit: Edit) OOM!void {
+    assert(!edit.owned);
+    if (edit.text.len == 0) return;
+    if (diffs.items.len > 0) {
+        const previous = &diffs.items[diffs.items.len - 1];
+        if (previous.operation == edit.operation and previous.text.ptr + previous.text.len == edit.text.ptr) {
+            previous.text = previous.text.ptr[0 .. previous.text.len + edit.text.len];
+            return;
+        }
+    }
+    try diffs.append(allocator, edit);
 }
 
 /// Detect a fully borrowed three-edit window suitable for lossless cleanup.
@@ -2126,7 +2192,7 @@ fn testDiffFnCharsToLines(
         });
     }
 
-    var diffs = try diffCharsToSegments(allocator, &char_diffs, params.segment_array, params.before, params.after);
+    var diffs = try diffCharsToSegments(allocator, &char_diffs, params.segment_array, params.before, params.after, true);
     defer deinitDiffList(allocator, &diffs);
     try expectEqualDiff(params.expected, diffs.items);
 }
@@ -2530,7 +2596,7 @@ fn testDiffFnCachedSegmentMap(allocator: Allocator) !void {
     for (differ.segment_array.items, 0..) |segment, index| {
         const entry = differ.segment_map.getEntry(segment).?;
         try testing.expect(segment.ptr == entry.key_ptr.*.ptr);
-        try testing.expectEqual(cast(u31, index) + CHAR_OFFSET, entry.value_ptr.*);
+        try testing.expectEqual(cast(u31, index), entry.value_ptr.*);
     }
 
     {
@@ -2636,6 +2702,133 @@ test "DiffFn lifecycle" {
     }
 }
 
+test "DiffFn selective segment rediff preserves provenance and survives allocation failure" {
+    try testing.checkAllAllocationFailures(testing.allocator, testSelectiveRediff, .{});
+}
+
+test "DiffFn rediff receives individual tokens from multi-token replacements" {
+    try testing.checkAllAllocationFailures(testing.allocator, testTokenRediff, .{});
+}
+
+fn testTokenRediff(allocator: Allocator) !void {
+    const prefix = "prefix\nsame\n";
+    const old_token = "hello old world\n";
+    const new_token = "hello new world\n";
+    const before = prefix ++ old_token ++ "opaque-old\nextra-old\nsuffix\n";
+    const after = prefix ++ new_token ++ "opaque-new\nsuffix\n";
+    const Hooks = struct {
+        calls: usize = 0,
+
+        fn rediff(ctx: *@This(), deletion: []const u8, insertion: []const u8) bool {
+            const offset = prefix.len + if (ctx.calls == 0) @as(usize, 0) else old_token.len;
+            const new_offset = prefix.len + if (ctx.calls == 0) @as(usize, 0) else new_token.len;
+            assert(deletion.ptr == before.ptr + offset);
+            assert(insertion.ptr == after.ptr + new_offset);
+            assert(std.mem.eql(u8, deletion, if (ctx.calls == 0) old_token else "opaque-old\n"));
+            assert(std.mem.eql(u8, insertion, if (ctx.calls == 0) new_token else "opaque-new\n"));
+            ctx.calls += 1;
+            return ctx.calls == 1;
+        }
+    };
+    const Selective = DiffFn(.{ .context = Hooks, .reDiffSegments = Hooks.rediff });
+    var differ = Selective.initContext(.default, .{});
+    defer differ.deinit(allocator);
+    var difference = try differ.diffBySegment(allocator, before, after);
+    defer difference.deinit(allocator);
+    try testing.expectEqual(@as(usize, 2), differ.context.calls);
+    try expectEqualDiff(&.{
+        Edit.asBorrow(.equal, prefix ++ "hello "),
+        Edit.asBorrow(.delete, "old"),
+        Edit.asBorrow(.insert, "new"),
+        Edit.asBorrow(.equal, " world\n"),
+        Edit.asBorrow(.delete, "opaque-old\n"),
+        Edit.asBorrow(.insert, "opaque-new\n"),
+        Edit.asBorrow(.delete, "extra-old\n"),
+        Edit.asBorrow(.equal, "suffix\n"),
+    }, difference.edits.items);
+    try testDiffFnRebuildTexts(allocator, difference.edits, .{ .before = before, .after = after });
+}
+
+test "DiffFn segment rediff is optional and keeper defaults to acceptance" {
+    const Hooks = struct {
+        fn accept(_: *void, _: []const u8, _: []const u8) bool {
+            return true;
+        }
+        fn reject(_: *void, _: []const u8, _: []const u8) bool {
+            return false;
+        }
+    };
+    const before = "hello old world\n";
+    const after = "hello new world\n";
+    inline for (.{ Hooks.accept, Hooks.reject }) |hook| {
+        const Selective = DiffFn(.{ .reDiffSegments = hook });
+        var differ: Selective = .default;
+        defer differ.deinit(testing.allocator);
+        var difference = try differ.diffBySegment(testing.allocator, before, after);
+        defer difference.deinit(testing.allocator);
+        try testing.expectEqual(@as(usize, if (hook == Hooks.accept) 4 else 2), difference.edits.items.len);
+    }
+}
+
+test "DiffFn zero-based segment IDs cross UTF-8 encoding widths" {
+    var before: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer before.deinit();
+    var after: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer after.deinit();
+    for (0..2100) |index| {
+        try before.writer.print("{d}\n", .{index});
+        if (index == 128 or index == 2048) try after.writer.print("changed {d}\n", .{index}) else try after.writer.print("{d}\n", .{index});
+    }
+    var differ: DefaultDiffer = .default;
+    defer differ.deinit(testing.allocator);
+    var difference = try differ.diffBySegment(testing.allocator, before.written(), after.written());
+    defer difference.deinit(testing.allocator);
+    try testDiffFnRebuildTexts(testing.allocator, difference.edits, .{ .before = before.written(), .after = after.written() });
+    try testing.expectEqual(@as(usize, 7), difference.edits.items.len);
+}
+
+fn testSelectiveRediff(allocator: Allocator) !void {
+    const Hooks = struct {
+        before: []const u8,
+        after: []const u8,
+        accept: bool,
+        calls: usize = 0,
+
+        fn rediff(ctx: *@This(), deletion: []const u8, insertion: []const u8) bool {
+            assert(deletion.ptr == ctx.before.ptr);
+            assert(insertion.ptr == ctx.after.ptr);
+            ctx.calls += 1;
+            return true;
+        }
+
+        fn keep(ctx: *@This(), candidate: Diff) bool {
+            assert(candidate.edits.items.len > 2);
+            return ctx.accept;
+        }
+    };
+    const Selective = DiffFn(.{ .context = Hooks, .reDiffSegments = Hooks.rediff, .keepReDiff = Hooks.keep });
+    const before = "hello old world\n";
+    const after = "hello new world\n";
+    inline for (.{ true, false }) |accept| {
+        var differ = Selective.initContext(.default, .{ .before = before, .after = after, .accept = accept });
+        defer differ.deinit(allocator);
+        var difference = try differ.diffBySegment(allocator, before, after);
+        defer difference.deinit(allocator);
+        try testing.expectEqual(@as(usize, 1), differ.context.calls);
+        if (accept) {
+            try expectEqualDiff(&.{
+                Edit.asBorrow(.equal, "hello "),
+                Edit.asBorrow(.delete, "old"),
+                Edit.asBorrow(.insert, "new"),
+                Edit.asBorrow(.equal, " world\n"),
+            }, difference.edits.items);
+        } else {
+            try expectEqualDiff(&.{ Edit.asBorrow(.delete, before), Edit.asBorrow(.insert, after) }, difference.edits.items);
+        }
+        try testDiffFnRebuildTexts(allocator, difference.edits, .{ .before = before, .after = after });
+    }
+}
+
 test "DiffFn cached segment map" {
     try testing.checkAllAllocationFailures(
         testing.allocator,
@@ -2705,8 +2898,8 @@ test "DiffFn diffSegmentsToChars" {
 
     var differ: DefaultDiffer = .default;
     var result = try differ.diffSegmentsToChars(allocator, "alpha\nbeta\nalpha\n", "beta\nalpha\nbeta\n");
-    try testing.expectEqualStrings(" ! ", result.chars_1);
-    try testing.expectEqualStrings("! !", result.chars_2);
+    try testing.expectEqualStrings("\x00\x01\x00", result.chars_1);
+    try testing.expectEqualStrings("\x01\x00\x01", result.chars_2);
     try testing.expectEqualDeep(tmp_array_list.items, result.segment_array.items);
     result.deinit(allocator);
 
@@ -2716,7 +2909,7 @@ test "DiffFn diffSegmentsToChars" {
     try tmp_array_list.append("\r\n");
     result = try differ.diffSegmentsToChars(allocator, "", "alpha\r\nbeta\r\n\r\n\r\n");
     try testing.expectEqualStrings("", result.chars_1);
-    try testing.expectEqualStrings(" !\"\"", result.chars_2);
+    try testing.expectEqualStrings("\x00\x01\x02\x02", result.chars_2);
     try testing.expectEqualDeep(tmp_array_list.items, result.segment_array.items);
     result.deinit(allocator);
 
@@ -2724,8 +2917,8 @@ test "DiffFn diffSegmentsToChars" {
     try tmp_array_list.append("a");
     try tmp_array_list.append("b");
     result = try differ.diffSegmentsToChars(allocator, "a", "b");
-    try testing.expectEqualStrings(" ", result.chars_1);
-    try testing.expectEqualStrings("!", result.chars_2);
+    try testing.expectEqualStrings("\x00", result.chars_1);
+    try testing.expectEqualStrings("\x01", result.chars_2);
     try testing.expectEqualDeep(tmp_array_list.items, result.segment_array.items);
     result.deinit(allocator);
 }
@@ -2735,8 +2928,8 @@ test "DiffFn diffCharsToLines" {
     defer deinitDiffList(testing.allocator, &diff_list);
     try diff_list.ensureTotalCapacity(testing.allocator, 2);
     diff_list.appendSliceAssumeCapacity(&.{
-        .{ .operation = .equal, .owned = true, .text = try testing.allocator.dupe(u8, " ! ") },
-        .{ .operation = .insert, .owned = true, .text = try testing.allocator.dupe(u8, "! !") },
+        .{ .operation = .equal, .owned = true, .text = try testing.allocator.dupe(u8, "\x00\x01\x00") },
+        .{ .operation = .insert, .owned = true, .text = try testing.allocator.dupe(u8, "\x01\x00\x01") },
     });
     try testing.checkAllAllocationFailures(testing.allocator, testDiffFnCharsToLines, .{TCharLines{
         .before = "alpha\nbeta\nalpha\n",
