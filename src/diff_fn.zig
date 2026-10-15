@@ -245,7 +245,11 @@ pub fn DiffFn(config: anytype) type {
                 // Rehydration keeps changed tokens separate. Pair tokens in
                 // source order within each replacement, before coalescing edits.
                 var insert_start = index;
-                while (insert_start < diffs.items.len and diffs.items[insert_start].operation == .delete) : (insert_start += 1) {}
+                while (insert_start < diffs.items.len and
+                    diffs.items[insert_start].operation == .delete)
+                {
+                    insert_start += 1;
+                }
                 var run_end = insert_start;
                 while (run_end < diffs.items.len and diffs.items[run_end].operation == .insert) : (run_end += 1) {}
                 if (insert_start == index or run_end == insert_start) {
@@ -1728,8 +1732,7 @@ fn diffCharsToSegments(
         var text_len: usize = 0;
         var cursor: usize = 0;
         while (cursor < edit.text.len) {
-            const cp_len = std.unicode.utf8ByteSequenceLength(edit.text[cursor]) catch @panic("Internal decode error in diffCharsToLines");
-            const cp = std.unicode.wtf8Decode(edit.text[cursor..][0..cp_len]) catch @panic("Internal decode error in diffCharsToLines");
+            const cp = common.plan9DecodeCursor(edit.text, &cursor);
             const segment = segment_array[cp];
             if (is_debug) {
                 switch (edit.operation) {
@@ -1747,7 +1750,6 @@ fn diffCharsToSegments(
                 try diffs.append(allocator, Edit.asBorrow(edit.operation, source[offset + text_len ..][0..segment.len]));
             }
             text_len += segment.len;
-            cursor += cp_len;
         }
         switch (edit.operation) {
             .equal => {
@@ -2941,6 +2943,35 @@ test "DiffFn diffCharsToLines" {
             .{ .operation = .insert, .owned = false, .text = "beta\nalpha\nbeta\n" },
         },
     }});
+}
+
+test "DiffFn rehydrates Plan 9 segment IDs beyond Unicode" {
+    const codepoints = [_]u31{ 0, 0x80, 0x800, 0xd800, 0x110000, 0x200000 };
+    const segments = [_][]const u8{ "a", "b", "c", "d", "e", "f" };
+    const segment_array = try testing.allocator.alloc([]const u8, 0x200001);
+    defer testing.allocator.free(segment_array);
+
+    var encoded: [codepoints.len * 6]u8 = undefined;
+    var len: usize = 0;
+    for (codepoints, segments) |codepoint, segment| {
+        segment_array[codepoint] = segment;
+        len += common.plan9Encode(codepoint, encoded[len..]);
+    }
+    try testDiffFnCharsToLines(testing.allocator, .{
+        .before = "abcdefabcdef",
+        .after = "abcdefabcdef",
+        .diffs = &.{
+            Edit.asBorrow(.equal, encoded[0..len]),
+            Edit.asBorrow(.delete, encoded[0..len]),
+            Edit.asBorrow(.insert, encoded[0..len]),
+        },
+        .segment_array = segment_array,
+        .expected = &.{
+            Edit.asBorrow(.equal, "abcdef"),
+            Edit.asBorrow(.delete, "abcdef"),
+            Edit.asBorrow(.insert, "abcdef"),
+        },
+    });
 }
 
 test "DiffFn diffCleanupMerge" {
