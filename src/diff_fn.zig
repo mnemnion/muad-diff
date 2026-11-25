@@ -320,7 +320,7 @@ pub fn DiffFn(config: anytype) type {
         ) DiffError!SegmentIterator {
             if (@hasDecl(SegmentIterator, "init")) {
                 const fn_info = @typeInfo(@TypeOf(SegmentIterator.init)).@"fn";
-                switch (fn_info.params.len) {
+                switch (fn_info.param_types.len) {
                     1 => return try unwrapIteratorInit(SegmentIterator, SegmentIterator.init(text)),
                     2 => {
                         if (fnParamType(fn_info, 0) == Allocator) {
@@ -351,7 +351,7 @@ pub fn DiffFn(config: anytype) type {
         ) void {
             if (@hasDecl(SegmentIterator, "deinit")) {
                 const fn_info = @typeInfo(@TypeOf(SegmentIterator.deinit)).@"fn";
-                switch (fn_info.params.len) {
+                switch (fn_info.param_types.len) {
                     1 => iterator.deinit(),
                     2 => {
                         if (fnParamType(fn_info, 1) == Allocator) {
@@ -1852,7 +1852,7 @@ fn iteratorInitError(comptime Iterator: type) type {
 }
 
 fn fnParamType(comptime fn_info: anytype, comptime index: usize) type {
-    return fn_info.params[index].type orelse @compileError("segment iterator function parameters must be typed");
+    return fn_info.param_types[index] orelse @compileError("segment iterator function parameters must be typed");
 }
 
 fn unwrapIteratorInit(comptime Iterator: type, result: anytype) iteratorInitError(Iterator)!Iterator {
@@ -3671,5 +3671,5 @@ const fixSplitBackward = common.fixSplitBackward;
 const cast = common.cast;
 const u2i = common.u2i;
 const i2u = common.i2u;
-const is_debug = builtin.mode == .Debug;
+const is_debug = builtin.mode == .debug;
 const dbgassert = common.dbgassert;

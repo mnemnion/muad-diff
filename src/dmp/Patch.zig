@@ -2743,7 +2743,7 @@ fn testMakePatch(allocator: Allocator) !void {
         }
     }
     {
-        const text1a = "abcdef" ** 100;
+        const text1a = std.mem.asBytes(&@as([100][6]u8, @splat("abcdef".*)));
         const text2a = text1a ++ "123";
         const expected_patch = switch (match_max_bits) {
             32 => "@@ -573,28 +573,31 @@\n cdefabcdefabcdefabcdefabcdef\n+123\n",
@@ -3361,7 +3361,7 @@ const OOM = Allocator.Error;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const ArrayList = std.array_list.Managed;
 const builtin = @import("builtin");
-const is_debug = builtin.mode == .Debug;
+const is_debug = builtin.mode == .debug;
 
 const dmp = @import("../dmp.zig");
 const diff_mod = @import("diff.zig");

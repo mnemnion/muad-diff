@@ -338,7 +338,7 @@ const addU32 = zdelta_mod.addU32;
 const checkedU32 = zdelta_mod.checkedU32;
 const common = @import("../dmp/common.zig");
 const dbgassert = common.dbgassert;
-const is_debug = builtin.mode == .Debug;
+const is_debug = builtin.mode == .debug;
 const DeltaOp = common_apply.DeltaOp;
 const DeltaSpan = common_apply.DeltaSpan;
 const testing = std.testing;

@@ -884,12 +884,12 @@ test "ZDelta encode rejects invalid text" {
 
 fn testZDeltaEncodeLargeInsert(allocator: Allocator) !void {
     const text = "abcdefghijklmnopqrstuvwxyz0123456789";
-    const edits = [_]TestEdit{TestEdit.asBorrow(.insert, text ** 8)};
+    const edits = [_]TestEdit{TestEdit.asBorrow(.insert, std.mem.asBytes(&@as([8][text.len]u8, @splat(text.*))))};
     const diff = .{ .items = edits[0..] };
 
     const actual = try encode(allocator, diff, .b);
     defer allocator.free(actual);
-    try testing.expectEqualStrings("zΔ⚡b|+" ++ text ** 8 ++ "|", actual);
+    try testing.expectEqualStrings("zΔ⚡b|+" ++ std.mem.asBytes(&@as([8][text.len]u8, @splat(text.*))) ++ "|", actual);
 }
 
 test "ZDelta encode maps writer allocation failures to OutOfMemory" {

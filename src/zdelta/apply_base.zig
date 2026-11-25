@@ -121,5 +121,5 @@ const builtin = @import("builtin");
 const common = @import("../dmp/common.zig");
 const dbgassert = common.dbgassert;
 const cast = common.cast;
-const is_debug = builtin.mode == .Debug;
+const is_debug = builtin.mode == .debug;
 const testing = std.testing;
